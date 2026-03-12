@@ -1,0 +1,12 @@
+[package]
+name = "sfgw-nas"
+description = "SMB/NFS file sharing services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sfgw-db = { path = "../sfgw-db" }
+sfgw-hal = { path = "../sfgw-hal" }
+anyhow.workspace = true
+tokio.workspace = true

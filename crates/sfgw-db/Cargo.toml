@@ -1,0 +1,11 @@
+[package]
+name = "sfgw-db"
+description = "SQLite database layer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true

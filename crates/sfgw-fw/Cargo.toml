@@ -1,0 +1,11 @@
+[package]
+name = "sfgw-fw"
+description = "Firewall — nftables rule management via netlink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sfgw-db = { path = "../sfgw-db" }
+anyhow.workspace = true
+tokio.workspace = true

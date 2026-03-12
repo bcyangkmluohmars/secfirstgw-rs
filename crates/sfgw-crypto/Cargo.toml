@@ -1,0 +1,11 @@
+[package]
+name = "sfgw-crypto"
+description = "LUKS2 full-disk encryption with hardware-derived key material"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sfgw-hal = { path = "../sfgw-hal" }
+anyhow.workspace = true
+tokio.workspace = true

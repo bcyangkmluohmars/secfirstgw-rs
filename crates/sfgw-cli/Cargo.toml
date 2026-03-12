@@ -1,0 +1,31 @@
+[package]
+name = "sfgw-cli"
+description = "Single binary entry point for secfirstgw-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sfgw"
+path = "src/main.rs"
+
+[dependencies]
+sfgw-fw = { path = "../sfgw-fw" }
+sfgw-net = { path = "../sfgw-net" }
+sfgw-controller = { path = "../sfgw-controller" }
+sfgw-crypto = { path = "../sfgw-crypto" }
+sfgw-hal = { path = "../sfgw-hal" }
+sfgw-vpn = { path = "../sfgw-vpn" }
+sfgw-dns = { path = "../sfgw-dns" }
+sfgw-lcd = { path = "../sfgw-lcd" }
+sfgw-nas = { path = "../sfgw-nas" }
+sfgw-api = { path = "../sfgw-api" }
+sfgw-db = { path = "../sfgw-db" }
+sfgw-log = { path = "../sfgw-log" }
+sfgw-adopt = { path = "../sfgw-adopt" }
+sfgw-ids = { path = "../sfgw-ids" }
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

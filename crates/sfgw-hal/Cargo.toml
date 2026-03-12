@@ -1,0 +1,10 @@
+[package]
+name = "sfgw-hal"
+description = "Hardware abstraction layer — detects platform (bare metal, VM, Docker)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+nix.workspace = true
