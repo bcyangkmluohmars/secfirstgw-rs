@@ -1,0 +1,15 @@
+services:
+  sfgw:
+    build: .
+    ports:
+      - "8443:8443"
+      - "18080:8080"
+    volumes:
+      - sfgw-data:/data
+    environment:
+      SFGW_DB_PATH: /data/sfgw.db
+      SFGW_LISTEN_ADDR: 0.0.0.0:8443
+      RUST_LOG: sfgw=info
+
+volumes:
+  sfgw-data:

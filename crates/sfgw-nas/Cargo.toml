@@ -10,3 +10,4 @@ sfgw-db = { path = "../sfgw-db" }
 sfgw-hal = { path = "../sfgw-hal" }
 anyhow.workspace = true
 tokio.workspace = true
+tracing.workspace = true

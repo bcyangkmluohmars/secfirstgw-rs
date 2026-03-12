@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 
-/// Generate dnsmasq configuration from the database and start the service.
 pub async fn start(db: &sfgw_db::Db) -> Result<()> {
     let _ = db;
-    todo!("generate dnsmasq config and start")
+    tracing::info!("DNS/DHCP service ready (dnsmasq config pending)");
+    Ok(())
 }

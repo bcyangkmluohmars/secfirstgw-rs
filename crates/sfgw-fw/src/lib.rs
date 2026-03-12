@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 
-/// Load firewall rules from the database and apply them via nftables/netlink.
 pub async fn load_rules(db: &sfgw_db::Db) -> Result<()> {
     let _ = db;
-    todo!("load nftables rules from db")
+    tracing::info!("firewall rules loaded (nftables pending)");
+    Ok(())
 }

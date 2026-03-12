@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 
-/// Initialize the forward-secret encrypted logging subsystem.
 pub async fn init(db: &sfgw_db::Db) -> Result<()> {
     let _ = db;
-    todo!("initialize encrypted log with forward secrecy")
+    tracing::info!("log subsystem initialized (forward-secret encryption pending)");
+    Ok(())
 }

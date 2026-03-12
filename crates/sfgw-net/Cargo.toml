@@ -11,3 +11,4 @@ sfgw-hal = { path = "../sfgw-hal" }
 anyhow.workspace = true
 tokio.workspace = true
 rtnetlink.workspace = true
+tracing.workspace = true

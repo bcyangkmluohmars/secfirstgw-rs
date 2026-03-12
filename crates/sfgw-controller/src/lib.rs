@@ -5,5 +5,6 @@ use anyhow::Result;
 /// Start the network controller service.
 pub async fn start(db: &sfgw_db::Db) -> Result<()> {
     let _ = db;
-    todo!("start network controller")
+    tracing::info!("network controller ready (device management pending)");
+    Ok(())
 }

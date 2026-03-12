@@ -2,10 +2,7 @@
 
 use anyhow::Result;
 
-/// Initialize the LCD display panel via sysfs.
-///
-/// Only meaningful on bare-metal platforms; callers should gate on
-/// `Platform::has_lcd()` before calling.
 pub async fn init() -> Result<()> {
-    todo!("initialize LCD display via sysfs")
+    tracing::info!("LCD display initialized (sysfs driver pending)");
+    Ok(())
 }

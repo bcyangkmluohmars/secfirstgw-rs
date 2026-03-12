@@ -9,3 +9,6 @@ license.workspace = true
 sfgw-hal = { path = "../sfgw-hal" }
 anyhow.workspace = true
 tokio.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+libc.workspace = true

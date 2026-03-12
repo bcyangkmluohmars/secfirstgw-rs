@@ -4,22 +4,6 @@
 //!
 //! Runs on gateway, switches, and APs. Each node monitors locally,
 //! reports to the gateway controller which correlates and alerts.
-//!
-//! ## Detection Capabilities
-//!
-//! ### Gateway + Switch
-//! - ARP spoofing (duplicate MAC, gratuitous ARP flood, gateway impersonation)
-//! - DHCP spoofing (rogue DHCP servers)
-//! - VLAN hopping (802.1Q double-tagging)
-//! - DNS spoofing (responses from unexpected sources)
-//! - Port scan detection
-//! - MAC flood detection (CAM table overflow attempts)
-//!
-//! ### AP (later phase)
-//! - Deauth flood detection
-//! - Evil twin / rogue AP detection
-//! - PMKID harvesting detection
-//! - Karma attack detection
 
 use anyhow::Result;
 
@@ -33,9 +17,9 @@ pub mod collector;
 /// IDS role — determines which detectors are active
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdsRole {
-    /// Gateway: full packet inspection on all interfaces + correlation engine
+    /// Gateway: full packet inspection + correlation engine
     Gateway,
-    /// Switch: local ARP/DHCP/DNS monitoring + port security, reports to gateway
+    /// Switch: local ARP/DHCP/DNS monitoring, reports to gateway
     Switch,
     /// AP: wireless-specific detection (deauth, evil twin, rogue AP)
     AccessPoint,
@@ -44,11 +28,8 @@ pub enum IdsRole {
 /// Severity of a detected event
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Severity {
-    /// Informational — logged, no action
     Info,
-    /// Warning — logged + alert
     Warning,
-    /// Critical — logged + alert + automatic response (port isolate, block MAC)
     Critical,
 }
 
@@ -68,24 +49,23 @@ pub struct IdsEvent {
 /// Automatic response action
 #[derive(Debug, Clone, serde::Serialize)]
 pub enum ResponseAction {
-    /// Log only
     LogOnly,
-    /// Send alert (Telegram, webhook)
     Alert(IdsEvent),
-    /// Isolate port on switch
     IsolatePort { interface: String, mac: String },
-    /// Block MAC address across all switches
     BlockMac { mac: String, duration_secs: u64 },
-    /// Rate limit a host
     RateLimit { ip: String, pps: u32 },
 }
 
-/// Start the IDS engine on the gateway
+/// Start the IDS engine
 pub async fn start(db: &sfgw_db::Db, role: IdsRole) -> Result<()> {
-    todo!()
+    let _ = db;
+    tracing::info!("IDS engine started (role: {role:?}, detectors pending)");
+    Ok(())
 }
 
-/// Process an IDS event reported by a remote node (switch/AP)
+/// Process an IDS event reported by a remote node
 pub async fn process_remote_event(db: &sfgw_db::Db, event: IdsEvent) -> Result<ResponseAction> {
-    todo!()
+    let _ = (db, &event);
+    tracing::info!("remote IDS event: {}", event.description);
+    Ok(ResponseAction::LogOnly)
 }

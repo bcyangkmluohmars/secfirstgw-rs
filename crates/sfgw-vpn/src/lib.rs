@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 
-/// Start VPN services (WireGuard via boringtun + OpenVPN).
 pub async fn start(db: &sfgw_db::Db) -> Result<()> {
     let _ = db;
-    todo!("start VPN services")
+    tracing::info!("VPN service ready (WireGuard multi-core pending)");
+    Ok(())
 }

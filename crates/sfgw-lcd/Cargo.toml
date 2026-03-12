@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true
+tracing.workspace = true

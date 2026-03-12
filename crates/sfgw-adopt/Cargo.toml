@@ -9,3 +9,4 @@ license.workspace = true
 sfgw-db = { path = "../sfgw-db" }
 anyhow.workspace = true
 tokio.workspace = true
+tracing.workspace = true
