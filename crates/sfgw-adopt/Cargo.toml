@@ -20,3 +20,7 @@ chrono.workspace = true
 uuid.workspace = true
 fips203.workspace = true
 fips204.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+tempfile = "3"

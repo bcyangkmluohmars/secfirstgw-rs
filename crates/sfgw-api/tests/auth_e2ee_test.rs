@@ -798,3 +798,315 @@ async fn test_login_nonexistent_user() {
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+// ===========================================================================
+// E2EE security tests — tampered envelopes, replay, wrong keys
+// ===========================================================================
+
+/// Helper: negotiate and derive AES key from X25519 ECDH.
+async fn negotiate_and_derive_key(
+    app: &Router,
+) -> (String, [u8; 32], x25519_dalek::StaticSecret) {
+    let client_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let client_public = x25519_dalek::PublicKey::from(&client_secret);
+    let client_pub_b64 = B64.encode(client_public.as_bytes());
+
+    let (status, body) = send(
+        app,
+        post_json(
+            "/api/v1/auth/session",
+            &json!({ "client_public_key": client_pub_b64 }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let negotiate_id = body["negotiate_id"].as_str().unwrap().to_string();
+    let server_pub_bytes = B64
+        .decode(body["server_public_key"].as_str().unwrap())
+        .unwrap();
+    let mut server_pub_arr = [0u8; 32];
+    server_pub_arr.copy_from_slice(&server_pub_bytes);
+    let server_pub_key = x25519_dalek::PublicKey::from(server_pub_arr);
+    let shared_secret = client_secret.diffie_hellman(&server_pub_key);
+
+    let aes_key = {
+        use ring::hkdf;
+        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]);
+        let prk = salt.extract(shared_secret.as_bytes());
+        struct AesKeyType;
+        impl hkdf::KeyType for AesKeyType {
+            fn len(&self) -> usize {
+                32
+            }
+        }
+        let okm = prk.expand(&[b"sfgw-e2ee-v1"], AesKeyType).unwrap();
+        let mut key = [0u8; 32];
+        okm.fill(&mut key).unwrap();
+        key
+    };
+
+    (negotiate_id, aes_key, client_secret)
+}
+
+#[tokio::test]
+async fn test_e2ee_login_tampered_ciphertext_rejected() {
+    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+    let (negotiate_id, aes_key, _) = negotiate_and_derive_key(&app).await;
+
+    let creds_json = serde_json::to_vec(&json!({
+        "username": "admin",
+        "password": "password1234",
+    }))
+    .unwrap();
+    let (mut ciphertext, iv) = sfgw_api::e2ee::encrypt(&aes_key, &creds_json).unwrap();
+
+    // Tamper with ciphertext
+    if ciphertext.len() > 5 {
+        ciphertext[5] ^= 0xFF;
+    }
+
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/auth/login",
+            &json!({
+                "negotiate_id": negotiate_id,
+                "ciphertext": B64.encode(&ciphertext),
+                "iv": B64.encode(&iv),
+            }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body["error"].as_str().unwrap().contains("decryption failed"));
+}
+
+#[tokio::test]
+async fn test_e2ee_login_tampered_iv_rejected() {
+    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+    let (negotiate_id, aes_key, _) = negotiate_and_derive_key(&app).await;
+
+    let creds_json = serde_json::to_vec(&json!({
+        "username": "admin",
+        "password": "password1234",
+    }))
+    .unwrap();
+    let (ciphertext, mut iv) = sfgw_api::e2ee::encrypt(&aes_key, &creds_json).unwrap();
+
+    // Tamper with IV
+    iv[0] ^= 0xFF;
+
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/auth/login",
+            &json!({
+                "negotiate_id": negotiate_id,
+                "ciphertext": B64.encode(&ciphertext),
+                "iv": B64.encode(&iv),
+            }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body["error"].as_str().unwrap().contains("decryption failed"));
+}
+
+#[tokio::test]
+async fn test_e2ee_negotiate_id_replay_rejected() {
+    // Negotiate IDs are consumed on first use (take_negotiate_key removes the entry).
+    // A second login attempt with the same negotiate_id must fail.
+    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+    let (negotiate_id, aes_key, _) = negotiate_and_derive_key(&app).await;
+
+    let creds_json = serde_json::to_vec(&json!({
+        "username": "admin",
+        "password": "password1234",
+    }))
+    .unwrap();
+    let (ciphertext, iv) = sfgw_api::e2ee::encrypt(&aes_key, &creds_json).unwrap();
+
+    // First login: should succeed and consume the negotiate entry
+    let (status, _) = send(
+        &app,
+        post_json(
+            "/api/v1/auth/login",
+            &json!({
+                "negotiate_id": negotiate_id,
+                "ciphertext": B64.encode(&ciphertext),
+                "iv": B64.encode(&iv),
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Second login with same negotiate_id: must be rejected (replay)
+    let (ciphertext2, iv2) = sfgw_api::e2ee::encrypt(&aes_key, &creds_json).unwrap();
+    let (status2, body2) = send(
+        &app,
+        post_json(
+            "/api/v1/auth/login",
+            &json!({
+                "negotiate_id": negotiate_id,
+                "ciphertext": B64.encode(&ciphertext2),
+                "iv": B64.encode(&iv2),
+            }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status2, StatusCode::BAD_REQUEST);
+    assert!(body2["error"]
+        .as_str()
+        .unwrap()
+        .contains("not found or expired"));
+}
+
+#[tokio::test]
+async fn test_e2ee_wrong_key_decryption_fails() {
+    // Encrypt with a random key that doesn't match the negotiate key
+    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+    let (negotiate_id, _aes_key, _) = negotiate_and_derive_key(&app).await;
+
+    let wrong_key = sfgw_api::e2ee::generate_envelope_key().unwrap();
+    let creds_json = serde_json::to_vec(&json!({
+        "username": "admin",
+        "password": "password1234",
+    }))
+    .unwrap();
+    let (ciphertext, iv) = sfgw_api::e2ee::encrypt(&wrong_key, &creds_json).unwrap();
+
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/auth/login",
+            &json!({
+                "negotiate_id": negotiate_id,
+                "ciphertext": B64.encode(&ciphertext),
+                "iv": B64.encode(&iv),
+            }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body["error"].as_str().unwrap().contains("decryption failed"));
+}
+
+#[tokio::test]
+async fn test_protected_route_401_with_invalid_token() {
+    let (db, _tmp) = fresh_db().await;
+    let app = build_app(db);
+
+    let (status, body) = send(
+        &app,
+        get_with_token("/api/v1/status", Some("totally-fake-token-12345")),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body["error"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn test_protected_route_401_with_expired_token() {
+    // Manually insert an expired session and verify it's rejected
+    let (app, db, _tmp) = setup_admin("admin", "password1234").await;
+
+    // Get user id
+    let user_id: i64 = {
+        let conn = db.lock().await;
+        conn.query_row("SELECT id FROM users WHERE username = 'admin'", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    };
+
+    // Insert an expired session directly (expires_at must be RFC 3339)
+    let expired_token = "expired-test-token-abc123";
+    {
+        let past = (chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+        let created = (chrono::Utc::now() - chrono::Duration::hours(49)).to_rfc3339();
+        let conn = db.lock().await;
+        conn.execute(
+            "INSERT INTO sessions (token, user_id, tls_session, client_ip, fingerprint, envelope_key, created_at, expires_at) VALUES (?1, ?2, '', '127.0.0.1', 'test-agent', '', ?3, ?4)",
+            rusqlite::params![expired_token, user_id, created, past],
+        ).unwrap();
+    }
+
+    let (status, body) = send(
+        &app,
+        get_with_token("/api/v1/status", Some(expired_token)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body["error"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn test_session_binding_rejects_different_ip() {
+    // Create a session bound to 127.0.0.1, then try accessing from a different IP
+    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+
+    // Login from 127.0.0.1
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/auth/login",
+            &json!({ "username": "admin", "password": "password1234" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = body["token"].as_str().unwrap();
+
+    // Try accessing from a different IP — build request with different x-forwarded-for
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/status")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::USER_AGENT, "test-agent")
+        .header("x-forwarded-for", "10.99.99.99")
+        .body(Body::empty())
+        .unwrap();
+
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body["error"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn test_session_binding_rejects_different_user_agent() {
+    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+
+    // Login with "test-agent" user-agent
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/auth/login",
+            &json!({ "username": "admin", "password": "password1234" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = body["token"].as_str().unwrap();
+
+    // Try accessing with a different user-agent
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/status")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::USER_AGENT, "attacker-browser/1.0")
+        .header("x-forwarded-for", "127.0.0.1")
+        .body(Body::empty())
+        .unwrap();
+
+    let (status, body) = send(&app, req).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body["error"].as_str().is_some());
+}
