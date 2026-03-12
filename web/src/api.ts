@@ -286,12 +286,12 @@ export const api = {
   deleteVpnTunnel: (name: string) => request<void>(`/api/v1/vpn/tunnels/${name}`, { method: 'DELETE' }),
   startVpnTunnel: (name: string) => request<void>(`/api/v1/vpn/tunnels/${name}/start`, { method: 'POST' }),
   stopVpnTunnel: (name: string) => request<void>(`/api/v1/vpn/tunnels/${name}/stop`, { method: 'POST' }),
-  getVpnTunnelStatus: (name: string) => request<TunnelStatus>(`/api/v1/vpn/tunnels/${name}/status`),
+  getVpnTunnelStatus: async (name: string) => (await request<{ status: TunnelStatus }>(`/api/v1/vpn/tunnels/${name}/status`)).status,
   addVpnPeer: (tunnelName: string, peer: WgPeer) => request<void>(`/api/v1/vpn/tunnels/${tunnelName}/peers`, { method: 'POST', body: peer }),
   removeVpnPeer: (tunnelName: string, peerKey: string) => request<void>(`/api/v1/vpn/tunnels/${tunnelName}/peers/${encodeURIComponent(peerKey)}`, { method: 'DELETE' }),
 
   // DNS
-  getDnsConfig: () => request<DnsConfig>('/api/v1/dns/config'),
+  getDnsConfig: () => request<{ config: DnsConfig }>('/api/v1/dns/config'),
   saveDnsConfig: (config: DnsConfig) => request<void>('/api/v1/dns/config', { method: 'PUT', body: config }),
   getDhcpRanges: () => request<{ ranges: DhcpRange[] }>('/api/v1/dns/dhcp/ranges'),
   saveDhcpRanges: (ranges: DhcpRange[]) => request<void>('/api/v1/dns/dhcp/ranges', { method: 'PUT', body: ranges }),

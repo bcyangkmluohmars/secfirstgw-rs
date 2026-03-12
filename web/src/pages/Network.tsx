@@ -32,7 +32,7 @@ export default function Network() {
         api.getDnsOverrides(),
       ])
       setInterfaces(ifRes.interfaces)
-      setDnsConfig(dnsRes)
+      setDnsConfig(dnsRes.config)
       setDhcpRanges(rangesRes.ranges)
       setStaticLeases(staticRes.leases)
       setActiveLeases(leasesRes.leases)
