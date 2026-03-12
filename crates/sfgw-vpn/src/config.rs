@@ -6,6 +6,7 @@
 //! and QR code data generation for mobile peer provisioning.
 
 use anyhow::{bail, Context, Result};
+use zeroize::Zeroize;
 
 use crate::{TunnelConfig, WgPeer};
 
@@ -13,14 +14,20 @@ use crate::{TunnelConfig, WgPeer};
 ///
 /// **Security**: The returned string contains the private key.
 /// It must NEVER be logged or returned in API responses.
-pub fn generate_interface_config(config: &TunnelConfig) -> String {
+/// The SecureBox is temporarily opened to extract the base64 key.
+pub fn generate_interface_config(config: &TunnelConfig) -> Result<String> {
+    let mut private_key_b64 = crate::keys::private_key_to_base64(&config.private_key)?;
+
     let mut out = String::with_capacity(512);
 
     out.push_str("[Interface]\n");
-    out.push_str(&format!("PrivateKey = {}\n", config.private_key));
+    out.push_str(&format!("PrivateKey = {}\n", private_key_b64));
     out.push_str(&format!("Address = {}\n", config.address));
     out.push_str(&format!("ListenPort = {}\n", config.listen_port));
     out.push_str(&format!("MTU = {}\n", config.mtu));
+
+    // Zeroize the plaintext key immediately after use
+    private_key_b64.zeroize();
 
     if let Some(ref dns) = config.dns {
         out.push_str(&format!("DNS = {}\n", dns));
@@ -31,7 +38,7 @@ pub fn generate_interface_config(config: &TunnelConfig) -> String {
         out.push_str(&format_peer_section(peer));
     }
 
-    out
+    Ok(out)
 }
 
 /// Generate a WireGuard config for a specific peer (client-side config).
@@ -110,6 +117,7 @@ pub fn generate_qr_data(
 /// Parse a WireGuard config file into a `TunnelConfig`.
 ///
 /// Handles both `[Interface]` and `[Peer]` sections.
+/// The private key is immediately wrapped in SecureBox upon parsing.
 pub fn parse_config(input: &str) -> Result<TunnelConfig> {
     let mut private_key = String::new();
     let mut address = String::new();
@@ -204,9 +212,15 @@ pub fn parse_config(input: &str) -> Result<TunnelConfig> {
     let public_key = crate::keys::public_key_from_private(&private_key)
         .context("invalid PrivateKey")?;
 
+    // Wrap the private key in SecureBox immediately
+    let secure_key = crate::keys::wrap_private_key(&private_key)?;
+
+    // Zeroize the plaintext private key string
+    private_key.zeroize();
+
     Ok(TunnelConfig {
         listen_port,
-        private_key,
+        private_key: secure_key,
         public_key,
         address,
         dns,
@@ -274,7 +288,8 @@ mod tests {
     #[test]
     fn parse_roundtrip() {
         // Use a real keypair for the test (parser derives public key from private)
-        let kp = crate::keys::generate_keypair();
+        let kp = crate::keys::generate_keypair().unwrap();
+        let private_key_b64 = crate::keys::private_key_to_base64(&kp.private_key).unwrap();
         let config_str = format!(
             "[Interface]\n\
              PrivateKey = {}\n\
@@ -288,7 +303,7 @@ mod tests {
              AllowedIPs = 10.0.0.2/32\n\
              Endpoint = 203.0.113.1:51820\n\
              PersistentKeepalive = 25\n",
-            kp.private_key
+            private_key_b64
         );
 
         let parsed = parse_config(&config_str).unwrap();
@@ -306,7 +321,7 @@ mod tests {
         assert_eq!(parsed.peers[0].persistent_keepalive, Some(25));
 
         // Generate config back and re-parse
-        let regenerated = generate_interface_config(&parsed);
+        let regenerated = generate_interface_config(&parsed).unwrap();
         let reparsed = parse_config(&regenerated).unwrap();
         assert_eq!(reparsed.address, parsed.address);
         assert_eq!(reparsed.listen_port, parsed.listen_port);

@@ -6,13 +6,14 @@
 //! client certificates during adoption.  The CA key is stored in the `meta`
 //! table (key = `gateway_ca_key`) and the certificate in `gateway_ca_cert`.
 //!
-//! **TODO**: wrap the private key in `SecureBox<T>` so it is mlock'd,
+//! The private key is held in a [`SecureBox`] so it is mlock'd,
 //! zeroize-on-drop, and encrypted at rest in RAM.
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use fips204::ml_dsa_65;
 use fips204::traits::{KeyGen, SerDes, Signer};
+use sfgw_crypto::secure_mem::SecureBox;
 use sfgw_db::Db;
 
 /// PEM tag used for the CA certificate (self-signed).
@@ -38,8 +39,8 @@ pub struct CertPayload {
 
 /// In-memory representation of the gateway CA.
 pub struct GatewayCA {
-    /// ML-DSA-65 private key bytes.
-    signing_key: Vec<u8>,
+    /// ML-DSA-65 private key bytes (encrypted at rest in RAM).
+    signing_key: SecureBox<Vec<u8>>,
     /// ML-DSA-65 public key bytes.
     verifying_key: Vec<u8>,
     pub cert_pem: String,
@@ -92,9 +93,13 @@ impl GatewayCA {
                     .map_err(|_| anyhow::anyhow!("CA signing key wrong length"))?,
             )
             .map_err(|e| anyhow::anyhow!("failed to load CA signing key: {e:?}"))?;
+            // Wrap the private key in SecureBox immediately — mlock'd,
+            // zeroize-on-drop, encrypted at rest in RAM.
+            let signing_key = SecureBox::new(sk_bytes)
+                .context("failed to create SecureBox for CA signing key")?;
             tracing::info!("gateway CA loaded from database (ML-DSA-65)");
             return Ok(Self {
-                signing_key: sk_bytes,
+                signing_key,
                 verifying_key: vk_bytes,
                 cert_pem,
             });
@@ -126,7 +131,8 @@ impl GatewayCA {
 
         let cert_pem = encode_pem(CA_CERT_PEM_TAG, &serde_json::to_vec(&payload)?);
 
-        // Persist — TODO: encrypt CA key with SecureBox before storing.
+        // Persist the base64-encoded key to DB, then immediately wrap the
+        // raw bytes in SecureBox so they are mlock'd and encrypted in RAM.
         let key_b64 = B64.encode(&sk_bytes);
         let vk_b64 = B64.encode(&vk_bytes);
         conn.execute(
@@ -142,9 +148,12 @@ impl GatewayCA {
             [&cert_pem],
         )?;
 
+        let signing_key = SecureBox::new(sk_bytes)
+            .context("failed to create SecureBox for CA signing key")?;
+
         tracing::info!("gateway CA generated and stored (first boot, ML-DSA-65)");
         Ok(Self {
-            signing_key: sk_bytes,
+            signing_key,
             verifying_key: vk_bytes,
             cert_pem,
         })
@@ -166,7 +175,10 @@ impl GatewayCA {
             not_after: not_after.to_rfc3339(),
             signature: String::new(),
         };
-        payload.signature = Self::sign_payload_static(&self.signing_key, &payload)?;
+        // Temporarily decrypt the signing key for the signature operation.
+        let sk_bytes = self.signing_key.open()
+            .context("failed to decrypt CA signing key from SecureBox")?;
+        payload.signature = Self::sign_payload_static(&sk_bytes, &payload)?;
 
         let pem = encode_pem(DEVICE_CERT_PEM_TAG, &serde_json::to_vec(&payload)?);
         Ok(pem)
@@ -179,8 +191,11 @@ impl GatewayCA {
 
     /// Sign arbitrary data with the CA key (ML-DSA-65).
     pub fn sign(&self, data: &[u8]) -> Result<Vec<u8>> {
+        // Temporarily decrypt the signing key for the signature operation.
+        let sk_bytes = self.signing_key.open()
+            .context("failed to decrypt CA signing key from SecureBox")?;
         let sk = ml_dsa_65::PrivateKey::try_from_bytes(
-            self.signing_key
+            sk_bytes
                 .as_slice()
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("CA signing key wrong length"))?,

@@ -9,6 +9,7 @@
 use anyhow::{bail, Context, Result};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
+use zeroize::Zeroize;
 
 use crate::db::{self, TunnelRow};
 use crate::{TunnelConfig, TunnelStatus, VpnTunnel, WgPeer, WgPeerStatus};
@@ -40,21 +41,20 @@ pub async fn create_tunnel(
         bail!("tunnel '{}' already exists", name);
     }
 
-    let keypair = crate::keys::generate_keypair();
+    let keypair = crate::keys::generate_keypair()?;
+    let public_key = keypair.public_key;
 
     let config = TunnelConfig {
         listen_port,
-        // TODO: store in SecureBox instead of plain base64
-        private_key: keypair.private_key.clone(),
-        public_key: keypair.public_key.clone(),
+        private_key: keypair.private_key,
+        public_key: public_key.clone(),
         address: address.to_string(),
         dns: dns.map(String::from),
         mtu: mtu.unwrap_or(1420),
         peers: Vec::new(),
     };
 
-    let config_json =
-        serde_json::to_string(&config).context("failed to serialize tunnel config")?;
+    let config_json = config.to_db_json()?;
 
     let id = db::insert_tunnel(db, name, "wireguard", &config_json).await?;
 
@@ -66,7 +66,7 @@ pub async fn create_tunnel(
         tunnel_type: crate::TunnelType::WireGuard,
         enabled: false,
         listen_port,
-        public_key: keypair.public_key,
+        public_key,
         address: address.to_string(),
         dns: dns.map(String::from),
         mtu: mtu.unwrap_or(1420),
@@ -80,8 +80,7 @@ pub async fn start_tunnel(db: &sfgw_db::Db, name: &str) -> Result<()> {
         .await?
         .context("tunnel not found")?;
 
-    let config: TunnelConfig =
-        serde_json::from_str(&row.config).context("corrupt tunnel config in DB")?;
+    let config = TunnelConfig::from_db_json(&row.config)?;
 
     // 1. Create WireGuard interface
     run_cmd("ip", &["link", "add", "dev", name, "type", "wireguard"])
@@ -89,7 +88,13 @@ pub async fn start_tunnel(db: &sfgw_db::Db, name: &str) -> Result<()> {
         .context("failed to create WG interface — is the wireguard kernel module loaded?")?;
 
     // 2. Set private key via wg (pipe through stdin to avoid CLI exposure)
-    set_private_key(name, &config.private_key).await?;
+    //    Temporarily decrypt the SecureBox to get the base64 key.
+    {
+        let mut key_b64 = crate::keys::private_key_to_base64(&config.private_key)?;
+        let result = set_private_key(name, &key_b64).await;
+        key_b64.zeroize();
+        result?;
+    }
 
     // 3. Set listen port
     run_cmd(
@@ -174,8 +179,7 @@ pub async fn add_peer(
         .await?
         .context("tunnel not found")?;
 
-    let mut config: TunnelConfig =
-        serde_json::from_str(&row.config).context("corrupt tunnel config")?;
+    let mut config = TunnelConfig::from_db_json(&row.config)?;
 
     // Check for duplicate public key
     if config
@@ -193,7 +197,7 @@ pub async fn add_peer(
 
     config.peers.push(peer);
 
-    let config_json = serde_json::to_string(&config)?;
+    let config_json = config.to_db_json()?;
     db::update_tunnel_config(db, row.id, &config_json).await?;
 
     info!(tunnel = tunnel_name, "peer added");
@@ -210,8 +214,7 @@ pub async fn remove_peer(
         .await?
         .context("tunnel not found")?;
 
-    let mut config: TunnelConfig =
-        serde_json::from_str(&row.config).context("corrupt tunnel config")?;
+    let mut config = TunnelConfig::from_db_json(&row.config)?;
 
     let before = config.peers.len();
     config.peers.retain(|p| p.public_key != peer_public_key);
@@ -228,7 +231,7 @@ pub async fn remove_peer(
         .await;
     }
 
-    let config_json = serde_json::to_string(&config)?;
+    let config_json = config.to_db_json()?;
     db::update_tunnel_config(db, row.id, &config_json).await?;
 
     info!(tunnel = tunnel_name, "peer removed");
@@ -337,8 +340,7 @@ pub async fn get_tunnel(db: &sfgw_db::Db, name: &str) -> Result<Option<VpnTunnel
 // ---------------------------------------------------------------------------
 
 fn tunnel_from_row(row: TunnelRow) -> Result<VpnTunnel> {
-    let config: TunnelConfig =
-        serde_json::from_str(&row.config).context("corrupt tunnel config in DB")?;
+    let config = TunnelConfig::from_db_json(&row.config)?;
 
     Ok(VpnTunnel {
         id: row.id,
@@ -347,10 +349,10 @@ fn tunnel_from_row(row: TunnelRow) -> Result<VpnTunnel> {
         enabled: row.enabled != 0,
         listen_port: config.listen_port,
         public_key: config.public_key,
-        address: config.address.clone(),
-        dns: config.dns.clone(),
+        address: config.address,
+        dns: config.dns,
         mtu: config.mtu,
-        peers: config.peers.clone(),
+        peers: config.peers,
     })
 }
 

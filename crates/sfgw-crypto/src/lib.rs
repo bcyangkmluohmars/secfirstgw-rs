@@ -4,9 +4,17 @@ pub mod secure_mem;
 
 use anyhow::{Context, Result};
 use ring::hkdf;
+use std::path::Path;
+use std::process::Command;
 
 /// Path to the LUKS key file used in VM mode.
 const VM_KEY_FILE: &str = "/etc/sfgw/luks.key";
+
+/// Block device expected to hold the LUKS2 partition.
+const LUKS_DEVICE: &str = "/dev/sda1";
+
+/// dm-crypt mapper name for the unlocked volume.
+const MAPPER_NAME: &str = "sfgw-data";
 
 /// HKDF info string for bare-metal key derivation.
 const HKDF_INFO: &[u8] = b"secfirstgw-luks2-auto-unlock-v1";
@@ -38,12 +46,12 @@ async fn auto_unlock_vm() -> Result<()> {
 
         tracing::info!("vm mode — found LUKS key file at {VM_KEY_FILE}");
 
-        // TODO: call cryptsetup to unlock the LUKS2 volume with key_data
-        // e.g. cryptsetup open --type luks2 --key-file=- /dev/sda2 sfgw-data
+        let result = cryptsetup_open_keyfile(VM_KEY_FILE);
 
-        // Zeroize key material after use
+        // Zeroize key material after use (the on-disk file remains, but our copy is cleared)
         zeroize::Zeroize::zeroize(&mut key_data[..]);
-        Ok(())
+
+        result
     } else {
         tracing::info!(
             "vm mode — no LUKS key file at {VM_KEY_FILE}, skipping auto-unlock"
@@ -78,14 +86,84 @@ async fn auto_unlock_bare_metal() -> Result<()> {
 
     tracing::info!("bare metal — derived LUKS key from hardware identity");
 
-    // TODO: call cryptsetup to unlock the LUKS2 volume with derived_key
-    // e.g. cryptsetup open --type luks2 --key-file=- /dev/sda2 sfgw-data
+    let result = cryptsetup_open_stdin(&derived_key);
 
     // Zeroize all sensitive material
     zeroize::Zeroize::zeroize(&mut ikm[..]);
     zeroize::Zeroize::zeroize(&mut derived_key[..]);
 
-    Ok(())
+    result
+}
+
+/// Open a LUKS2 volume using a key file on disk.
+fn cryptsetup_open_keyfile(key_file: &str) -> Result<()> {
+    if !Path::new(LUKS_DEVICE).exists() {
+        tracing::info!("{LUKS_DEVICE} not found — no HDD present, skipping LUKS unlock");
+        return Ok(());
+    }
+
+    if Path::new(&format!("/dev/mapper/{MAPPER_NAME}")).exists() {
+        tracing::info!("/dev/mapper/{MAPPER_NAME} already exists — volume already unlocked");
+        return Ok(());
+    }
+
+    let output = Command::new("cryptsetup")
+        .args(["luksOpen", LUKS_DEVICE, MAPPER_NAME, "--key-file", key_file])
+        .output()
+        .context("failed to execute cryptsetup")?;
+
+    if output.status.success() {
+        tracing::info!("LUKS volume unlocked as /dev/mapper/{MAPPER_NAME}");
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("cryptsetup luksOpen failed: {stderr}");
+    }
+}
+
+/// Open a LUKS2 volume by piping key material to cryptsetup via stdin.
+///
+/// The key is written to stdin and never logged or written to disk.
+fn cryptsetup_open_stdin(key: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    if !Path::new(LUKS_DEVICE).exists() {
+        tracing::info!("{LUKS_DEVICE} not found — no HDD present, skipping LUKS unlock");
+        return Ok(());
+    }
+
+    if Path::new(&format!("/dev/mapper/{MAPPER_NAME}")).exists() {
+        tracing::info!("/dev/mapper/{MAPPER_NAME} already exists — volume already unlocked");
+        return Ok(());
+    }
+
+    let mut child = Command::new("cryptsetup")
+        .args(["luksOpen", LUKS_DEVICE, MAPPER_NAME, "--key-file", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to spawn cryptsetup")?;
+
+    // Write key to stdin — never log this data
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(key)
+            .context("failed to write key to cryptsetup stdin")?;
+        // stdin is dropped here, closing the pipe
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for cryptsetup")?;
+
+    if output.status.success() {
+        tracing::info!("LUKS volume unlocked as /dev/mapper/{MAPPER_NAME}");
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("cryptsetup luksOpen failed: {stderr}");
+    }
 }
 
 /// Read a DMI identity field, trimming whitespace.

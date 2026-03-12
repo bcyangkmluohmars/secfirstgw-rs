@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 sfgw-db = { path = "../sfgw-db" }
+sfgw-crypto = { path = "../sfgw-crypto" }
+zeroize.workspace = true
 rusqlite.workspace = true
 anyhow.workspace = true
 tokio.workspace = true

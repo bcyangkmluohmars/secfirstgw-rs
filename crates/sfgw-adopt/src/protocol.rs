@@ -19,6 +19,7 @@ use fips203::ml_kem_1024;
 use fips203::traits::{Encaps, SerDes};
 use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
+use sfgw_crypto::secure_mem::SecureBox;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::ca::GatewayCA;
@@ -209,6 +210,13 @@ pub async fn approve_device(
     okm.fill(&mut symmetric_key)
         .map_err(|_| anyhow::anyhow!("HKDF fill failed"))?;
 
+    // Wrap the derived symmetric key in SecureBox immediately so the
+    // plaintext is mlock'd, encrypted in RAM, and zeroized on drop.
+    let symmetric_key_box = SecureBox::new(symmetric_key.to_vec())
+        .context("failed to create SecureBox for symmetric key")?;
+    // Zeroize the stack copy now that SecureBox owns the key material.
+    zeroize::Zeroize::zeroize(&mut symmetric_key);
+
     // 5. Sign device certificate.
     let device_cert_pem = ca.sign_device_cert(&request.device_mac, &device_pub_bytes)?;
 
@@ -231,8 +239,12 @@ pub async fn approve_device(
     cfg["public_key"] = serde_json::json!(adopted_device.public_key);
     cfg["sequence_number"] = serde_json::json!(initial_sequence);
     cfg["adopted_at"] = serde_json::json!(adopted_device.adopted_at);
-    // Store symmetric key base64 — TODO: encrypt with SecureBox.
-    cfg["symmetric_key"] = serde_json::json!(B64.encode(symmetric_key));
+    // Temporarily decrypt the symmetric key for base64 encoding to DB.
+    {
+        let sk_plain = symmetric_key_box.open()
+            .context("failed to decrypt symmetric key from SecureBox")?;
+        cfg["symmetric_key"] = serde_json::json!(B64.encode(&sk_plain));
+    }
 
     {
         let conn = db.lock().await;
