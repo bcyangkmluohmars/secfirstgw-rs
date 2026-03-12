@@ -34,15 +34,14 @@ export default function Layout() {
   const [online, setOnline] = useState(false)
 
   useEffect(() => {
-    api.getStatus()
-      .then((s) => { setStatus(s); setOnline(true) })
-      .catch(() => setOnline(false))
-
-    const interval = setInterval(() => {
+    const fetchStatus = () => {
       api.getStatus()
         .then((s) => { setStatus(s); setOnline(true) })
         .catch(() => setOnline(false))
-    }, 10000)
+    }
+
+    fetchStatus()
+    const interval = setInterval(fetchStatus, 10000)
     return () => clearInterval(interval)
   }, [])
 
@@ -76,7 +75,7 @@ export default function Layout() {
           ))}
         </nav>
         <div className="px-4 py-3 border-t border-gray-800 text-xs text-gray-600 font-mono">
-          {status?.version ?? 'v0.0.0'}
+          v{status?.status === 'ok' ? '0.1.0' : '---'}
         </div>
       </aside>
 
@@ -86,7 +85,7 @@ export default function Layout() {
         <header className="h-12 bg-gray-900 border-b border-gray-800 flex items-center justify-between px-4">
           <div className="flex items-center gap-3">
             <span className="text-sm text-gray-400 font-mono">
-              {status?.hostname ?? '---'}
+              {status?.status === 'ok' ? 'SecFirstGW' : '---'}
             </span>
           </div>
           <div className="flex items-center gap-4">
@@ -96,7 +95,7 @@ export default function Layout() {
             </span>
             {status && (
               <span className="text-xs text-gray-500 font-mono">
-                CPU {status.cpu_usage.toFixed(0)}% | RAM {formatBytes(status.memory_used)}/{formatBytes(status.memory_total)}
+                Load {status.load_average[0].toFixed(2)} | RAM {status.memory.used_mb}MB/{status.memory.total_mb}MB
               </span>
             )}
           </div>
@@ -111,10 +110,3 @@ export default function Layout() {
   )
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
-}

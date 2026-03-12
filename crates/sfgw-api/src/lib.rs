@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 pub mod auth;
+pub mod e2ee;
 pub mod middleware;
 
 use anyhow::{Context, Result};
@@ -11,6 +12,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -20,9 +22,6 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::middleware::AuthUser;
 
 /// Start the axum web API and serve the UI.
-///
-/// Listens on the address specified by SFGW_LISTEN_ADDR (default: 0.0.0.0:8443).
-/// In production this will be :443 with TLS. For dev/Docker we use :8443 without TLS.
 pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
     let listen_addr: SocketAddr = std::env::var("SFGW_LISTEN_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8443".to_string())
@@ -30,24 +29,28 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
         .context("invalid SFGW_LISTEN_ADDR")?;
 
     let db = db.clone();
+    let negotiate_store = e2ee::new_negotiate_store();
 
     // Public routes (no auth required)
+    // /auth/session — unified E2EE key exchange + optional session resume
+    // /auth/login   — authenticate with credentials (plain or E2EE-encrypted)
+    // /auth/setup   — initial admin setup (only when no users exist)
     let public_routes = Router::new()
+        .route("/api/v1/auth/session", post(session_handler))
         .route("/api/v1/auth/login", post(login_handler))
         .route("/api/v1/auth/setup", post(setup_handler));
 
-    // Protected routes (auth required via AuthUser extractor)
+    // Protected routes (auth required)
+    // E2EE middleware handles transparent encrypt/decrypt for all these
     let protected_routes = Router::new()
         .route("/api/v1/status", get(status_handler))
         .route("/api/v1/system", get(system_handler))
         .route("/api/v1/interfaces", get(interfaces_handler))
         .route("/api/v1/devices", get(devices_handler))
         .route("/api/v1/auth/me", get(me_handler))
-        .route("/api/v1/auth/logout", post(logout_handler));
+        .route("/api/v1/auth/logout", post(logout_handler))
+        .layer(axum::middleware::from_fn(e2ee::e2ee_layer));
 
-    // Serve the frontend SPA from SFGW_WEB_DIR (if set and the directory exists).
-    // API routes take priority; unmatched requests fall back to static files,
-    // with index.html as the final fallback for client-side routing.
     let app = if let Some(web_dir) = std::env::var("SFGW_WEB_DIR")
         .ok()
         .map(PathBuf::from)
@@ -60,6 +63,7 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
             .merge(public_routes)
             .merge(protected_routes)
             .layer(Extension(db))
+            .layer(Extension(negotiate_store))
             .layer(tower_http::trace::TraceLayer::new_for_http())
             .fallback_service(serve_dir)
     } else {
@@ -67,6 +71,7 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
             .merge(public_routes)
             .merge(protected_routes)
             .layer(Extension(db))
+            .layer(Extension(negotiate_store))
             .layer(tower_http::trace::TraceLayer::new_for_http())
     };
 
@@ -87,29 +92,184 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Public handlers
+// /auth/session — Unified E2EE session endpoint
 // ---------------------------------------------------------------------------
+//
+// Always performs X25519 key exchange.
+// If a valid token is provided, resumes the session with a new envelope key.
+// If no token or invalid token, returns the negotiate context for login.
+//
+// Request:  { client_public_key: base64, token?: string }
+// Response: { negotiate_id: string, server_public_key: base64,
+//             authenticated: bool, user?: {...}, envelope?: {iv, data} }
+
+#[derive(Deserialize)]
+struct SessionRequest {
+    client_public_key: String,
+    token: Option<String>,
+}
+
+async fn session_handler(
+    Extension(db): Extension<sfgw_db::Db>,
+    Extension(negotiate_store): Extension<e2ee::NegotiateStore>,
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<SessionRequest>,
+) -> impl IntoResponse {
+    // Always do the key exchange
+    let client_pub = match B64.decode(&body.client_public_key) {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid base64 in client_public_key" })),
+            );
+        }
+    };
+
+    let (negotiate_id, server_pub) = match e2ee::negotiate(&negotiate_store, &client_pub).await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))),
+    };
+
+    let mut response = json!({
+        "negotiate_id": negotiate_id,
+        "server_public_key": B64.encode(&server_pub),
+        "authenticated": false,
+    });
+
+    // If token provided, try to validate + resume
+    if let Some(ref token) = body.token {
+        let client_ip = resolve_client_ip(&headers, &addr);
+        let fingerprint = middleware::fingerprint_from_headers(&headers);
+
+        if let Ok(Some(user_id)) =
+            auth::validate_session(&db, token, &client_ip, &fingerprint).await
+        {
+            if let Ok(Some(user)) = auth::get_user_by_id(&db, user_id).await {
+                // Generate new envelope key for this session
+                if let Ok(env_key) = e2ee::generate_envelope_key() {
+                    let env_key_b64 = B64.encode(&env_key);
+                    let _ = auth::update_envelope_key(&db, token, &env_key_b64).await;
+
+                    // Get the negotiate AES key to encrypt the envelope key
+                    if let Ok(neg_key) =
+                        e2ee::take_negotiate_key(&negotiate_store, &negotiate_id).await
+                    {
+                        if let Ok(sealed) = e2ee::Envelope::seal(&neg_key, &env_key) {
+                            response["authenticated"] = json!(true);
+                            response["user"] = json!({
+                                "id": user.id,
+                                "username": user.username,
+                                "role": user.role,
+                            });
+                            response["envelope"] = json!({
+                                "iv": sealed.iv,
+                                "data": sealed.data,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(response))
+}
+
+// ---------------------------------------------------------------------------
+// /auth/login — Authenticate with credentials
+// ---------------------------------------------------------------------------
+//
+// Supports two modes:
+// 1. E2EE: { negotiate_id, ciphertext, iv } — credentials encrypted with negotiate key
+// 2. Plain: { username, password } — for curl/testing (still TLS-protected)
+//
+// Response includes encrypted envelope key for E2EE sessions.
 
 #[derive(Deserialize)]
 struct LoginRequest {
+    username: Option<String>,
+    password: Option<String>,
+    negotiate_id: Option<String>,
+    ciphertext: Option<String>,
+    iv: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct E2eeCredentials {
     username: String,
     password: String,
 }
 
 async fn login_handler(
     Extension(db): Extension<sfgw_db::Db>,
+    Extension(negotiate_store): Extension<e2ee::NegotiateStore>,
     headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    // Look up user
-    let user_and_hash = match auth::get_user_by_username(&db, &body.username).await {
+    // Extract credentials (E2EE or plain)
+    let (username, password, negotiate_key) = if let (Some(nid), Some(ct), Some(iv)) =
+        (&body.negotiate_id, &body.ciphertext, &body.iv)
+    {
+        let neg_key = match e2ee::take_negotiate_key(&negotiate_store, nid).await {
+            Ok(k) => k,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))),
+        };
+
+        let ct_bytes = match B64.decode(ct) {
+            Ok(b) => b,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "invalid base64 in ciphertext" })),
+                );
+            }
+        };
+        let iv_bytes = match B64.decode(iv) {
+            Ok(b) => b,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "invalid base64 in iv" })),
+                );
+            }
+        };
+
+        let plaintext = match e2ee::decrypt(&neg_key, &ct_bytes, &iv_bytes) {
+            Ok(pt) => pt,
+            Err(e) => {
+                tracing::warn!("E2EE login decrypt failed: {e}");
+                return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "decryption failed" })));
+            }
+        };
+
+        let creds: E2eeCredentials = match serde_json::from_slice(&plaintext) {
+            Ok(c) => c,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "invalid decrypted payload" })),
+                );
+            }
+        };
+
+        (creds.username, creds.password, Some(neg_key))
+    } else if let (Some(u), Some(p)) = (body.username, body.password) {
+        (u, p, None)
+    } else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "provide credentials (E2EE or plain)" })),
+        );
+    };
+
+    // Verify user
+    let (user, password_hash) = match auth::get_user_by_username(&db, &username).await {
         Ok(Some(pair)) => pair,
         Ok(None) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "invalid credentials" })),
-            );
+            return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "invalid credentials" })));
         }
         Err(e) => {
             tracing::error!("login db error: {e}");
@@ -120,19 +280,13 @@ async fn login_handler(
         }
     };
 
-    let (user, password_hash) = user_and_hash;
-
-    // Verify password
-    match auth::verify_password(&body.password, &password_hash) {
+    match auth::verify_password(&password, &password_hash) {
         Ok(true) => {}
         Ok(false) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "invalid credentials" })),
-            );
+            return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "invalid credentials" })));
         }
         Err(e) => {
-            tracing::error!("password verification error: {e}");
+            tracing::error!("password verify error: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "internal server error" })),
@@ -140,25 +294,32 @@ async fn login_handler(
         }
     }
 
-    // Determine client IP — prefer X-Forwarded-For, fall back to socket addr
-    let client_ip = middleware::client_ip_from_headers(&headers);
-    let client_ip = if client_ip == "unknown" {
-        addr.ip().to_string()
-    } else {
-        client_ip
-    };
-
+    let client_ip = resolve_client_ip(&headers, &addr);
     let fingerprint = middleware::fingerprint_from_headers(&headers);
 
+    // Generate envelope key for E2EE sessions
+    let envelope_key = negotiate_key
+        .as_ref()
+        .and_then(|_| e2ee::generate_envelope_key().ok());
+    let envelope_key_b64 = envelope_key.as_ref().map(|k| B64.encode(k)).unwrap_or_default();
+
     // Create session
-    match auth::create_session(&db, user.id, &client_ip, &fingerprint, "").await {
-        Ok((token, expires_at)) => (
-            StatusCode::OK,
-            Json(json!({
+    match auth::create_session(&db, user.id, &client_ip, &fingerprint, &envelope_key_b64).await {
+        Ok((token, expires_at)) => {
+            let mut response = json!({
                 "token": token,
                 "expires_at": expires_at.to_rfc3339(),
-            })),
-        ),
+            });
+
+            // Encrypt envelope key with negotiate key
+            if let (Some(neg_key), Some(env_key)) = (&negotiate_key, &envelope_key) {
+                if let Ok(sealed) = e2ee::Envelope::seal(neg_key, env_key) {
+                    response["envelope"] = json!({ "iv": sealed.iv, "data": sealed.data });
+                }
+            }
+
+            (StatusCode::OK, Json(response))
+        }
         Err(e) => {
             tracing::error!("session creation error: {e}");
             (
@@ -168,6 +329,10 @@ async fn login_handler(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// /auth/setup — Initial admin setup
+// ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 struct SetupRequest {
@@ -179,13 +344,9 @@ async fn setup_handler(
     Extension(db): Extension<sfgw_db::Db>,
     Json(body): Json<SetupRequest>,
 ) -> impl IntoResponse {
-    // Only allow setup if no users exist
     match auth::user_count(&db).await {
         Ok(count) if count > 0 => {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({ "error": "setup already completed — users exist" })),
-            );
+            return (StatusCode::CONFLICT, Json(json!({ "error": "setup already completed" })));
         }
         Err(e) => {
             tracing::error!("setup user count error: {e}");
@@ -197,7 +358,6 @@ async fn setup_handler(
         _ => {}
     }
 
-    // Validate input
     if body.username.is_empty() || body.password.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -212,7 +372,6 @@ async fn setup_handler(
         );
     }
 
-    // Hash the password
     let password_hash = match auth::hash_password(&body.password) {
         Ok(h) => h,
         Err(e) => {
@@ -224,7 +383,6 @@ async fn setup_handler(
         }
     };
 
-    // Create the admin user
     match auth::create_user(&db, &body.username, &password_hash, "admin").await {
         Ok(user_id) => (
             StatusCode::CREATED,
@@ -245,10 +403,22 @@ async fn setup_handler(
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn resolve_client_ip(headers: &HeaderMap, addr: &SocketAddr) -> String {
+    let ip = middleware::client_ip_from_headers(headers);
+    if ip == "unknown" {
+        addr.ip().to_string()
+    } else {
+        ip
+    }
+}
+
+// ---------------------------------------------------------------------------
 // System-info helpers
 // ---------------------------------------------------------------------------
 
-/// Read system uptime in seconds from `/proc/uptime`.
 fn read_uptime_secs() -> f64 {
     std::fs::read_to_string("/proc/uptime")
         .ok()
@@ -257,21 +427,14 @@ fn read_uptime_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Memory sizes in MiB parsed from `/proc/meminfo`.
 struct MemInfo {
     total_mb: u64,
     used_mb: u64,
     free_mb: u64,
 }
 
-/// Parse `/proc/meminfo` and return total, used and free memory in MiB.
-///
-/// "used" is defined as total minus available (MemAvailable), which matches
-/// what tools like `free` and `htop` report.  When MemAvailable is missing we
-/// fall back to `total - free - buffers - cached`.
 fn read_meminfo() -> MemInfo {
     let content = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
-
     let field = |name: &str| -> u64 {
         content
             .lines()
@@ -280,29 +443,23 @@ fn read_meminfo() -> MemInfo {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0)
     };
-
     let total_kb = field("MemTotal:");
     let available_kb = field("MemAvailable:");
     let free_kb = field("MemFree:");
     let buffers_kb = field("Buffers:");
     let cached_kb = field("Cached:");
-
     let used_kb = if available_kb > 0 {
         total_kb.saturating_sub(available_kb)
     } else {
         total_kb.saturating_sub(free_kb + buffers_kb + cached_kb)
     };
-
-    let effective_free_kb = total_kb.saturating_sub(used_kb);
-
     MemInfo {
         total_mb: total_kb / 1024,
         used_mb: used_kb / 1024,
-        free_mb: effective_free_kb / 1024,
+        free_mb: total_kb.saturating_sub(used_kb) / 1024,
     }
 }
 
-/// Read the first three load-average values from `/proc/loadavg`.
 fn read_loadavg() -> (f64, f64, f64) {
     let content = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
     let mut parts = content.split_whitespace();
@@ -312,44 +469,32 @@ fn read_loadavg() -> (f64, f64, f64) {
     (a, b, c)
 }
 
-/// Read the system hostname.
 fn read_hostname() -> String {
-    // Try the syscall-backed file first, fall back to /etc/hostname.
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .or_else(|_| std::fs::read_to_string("/etc/hostname"))
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
-/// Read the kernel version string from `/proc/version`.
 fn read_kernel_version() -> String {
     std::fs::read_to_string("/proc/version")
         .ok()
-        .and_then(|s| {
-            // Format: "Linux version 6.x.y-... (gcc ...) #1 ..."
-            // We want the third token (the version number).
-            s.split_whitespace().nth(2).map(String::from)
-        })
+        .and_then(|s| s.split_whitespace().nth(2).map(String::from))
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Count logical CPUs by scanning `/proc/cpuinfo` for "processor" lines.
 fn read_cpu_count() -> usize {
     let content = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
-    let count = content
-        .lines()
-        .filter(|l| l.starts_with("processor"))
-        .count();
+    let count = content.lines().filter(|l| l.starts_with("processor")).count();
     if count == 0 { 1 } else { count }
 }
 
-/// Read the machine hardware architecture via `std::env::consts::ARCH`.
 fn read_arch() -> &'static str {
     std::env::consts::ARCH
 }
 
 // ---------------------------------------------------------------------------
-// Protected handlers (require AuthUser)
+// Protected handlers
 // ---------------------------------------------------------------------------
 
 async fn status_handler(_auth: AuthUser) -> Json<Value> {
@@ -424,7 +569,6 @@ async fn interfaces_handler(
             .collect();
         rows
     };
-
     Json(json!({ "interfaces": interfaces }))
 }
 
@@ -453,7 +597,6 @@ async fn devices_handler(
             .collect();
         rows
     };
-
     Json(json!({ "devices": devices }))
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "sfgw-fw"
-description = "Firewall — nftables rule management via netlink"
+description = "Firewall — nftables rule management via nft commands"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,5 +8,9 @@ license.workspace = true
 [dependencies]
 sfgw-db = { path = "../sfgw-db" }
 anyhow.workspace = true
+rusqlite.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true

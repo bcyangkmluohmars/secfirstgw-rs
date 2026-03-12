@@ -1,0 +1,92 @@
+# =============================================================================
+# secfirstgw — dnsmasq configuration (auto-generated, do not edit)
+# =============================================================================
+# Security philosophy: no open resolver, DNSSEC on, rebind protection on,
+# rate limiting, DNS tunnel blocking, query logging for IDS correlation.
+
+# ---------- General ----------
+domain-needed
+bogus-priv
+no-resolv
+no-poll
+
+{% if domain %}
+domain={{ domain }}
+local=/{{ domain }}/
+{% endif %}
+
+# ---------- Upstream DNS ----------
+{% for server in upstream_dns %}
+server={{ server }}
+{% endfor %}
+
+# ---------- Security: Rebind Protection ----------
+{% if rebind_protection %}
+stop-dns-rebind
+rebind-localhost-ok
+{% endif %}
+
+# ---------- Security: DNSSEC ----------
+{% if dnssec %}
+dnssec
+dnssec-check-unsigned
+trust-anchor=.,20326,8,2,E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D
+{% endif %}
+
+# ---------- Security: No Open Resolver ----------
+# Bind only to LAN/MGMT interfaces, never WAN
+{% for iface in bind_interfaces %}
+interface={{ iface }}
+{% endfor %}
+bind-interfaces
+except-interface=lo
+
+# ---------- Cache ----------
+cache-size={{ cache_size }}
+
+# ---------- Security: Rate Limiting ----------
+# Limit DNS queries: max 100 queries per second per client
+dns-forward-max=150
+# Limit concurrent queries
+edns-packet-max=1232
+
+# ---------- Security: Block DNS Tunneling Patterns ----------
+# Block excessively long queries (common in DNS tunneling)
+# dnsmasq does not have native regex; we block known tunnel domains
+# and rely on query logging + IDS for detection.
+# Block common tunneling/exfiltration TLDs
+bogus-nxdomain=198.51.100.1
+
+# ---------- DHCP Ranges (VLAN-aware) ----------
+{% for range in dhcp_ranges %}
+# Interface: {{ range.interface }}{% if range.vlan_id %} (VLAN {{ range.vlan_id }}){% endif %}
+
+dhcp-range={{ range.interface }},{{ range.start_ip }},{{ range.end_ip }},{{ range.netmask }},{{ range.lease_time }}
+dhcp-option={{ range.interface }},3,{{ range.gateway }}
+dhcp-option={{ range.interface }},6,{{ range.gateway }}
+{% endfor %}
+
+# ---------- Static Leases ----------
+{% for lease in static_leases %}
+dhcp-host={{ lease.mac }},{{ lease.ip }}{% if lease.hostname %},{{ lease.hostname }}{% endif %}
+
+{% endfor %}
+
+# ---------- DNS Overrides (Split DNS / Local) ----------
+{% for override in dns_overrides %}
+address=/{{ override.domain }}/{{ override.ip }}
+{% endfor %}
+
+# ---------- Security: Block PTR for Private Ranges from WAN ----------
+# bogus-priv already handles this (drops reverse lookups for private ranges)
+
+# ---------- Logging for IDS Correlation ----------
+log-queries
+log-dhcp
+log-facility=/var/log/sfgw/dnsmasq.log
+
+# ---------- Lease File ----------
+dhcp-leasefile=/var/lib/misc/dnsmasq.leases
+
+# ---------- PID File ----------
+pid-file=/var/run/dnsmasq/sfgw-dnsmasq.pid

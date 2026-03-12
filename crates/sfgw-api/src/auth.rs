@@ -223,6 +223,17 @@ pub async fn create_user(
     Ok(conn.last_insert_rowid())
 }
 
+/// Update the envelope key for a session (used on E2EE re-negotiate).
+pub async fn update_envelope_key(db: &sfgw_db::Db, token: &str, envelope_key: &str) -> Result<()> {
+    let conn = db.lock().await;
+    conn.execute(
+        "UPDATE sessions SET envelope_key = ?1 WHERE token = ?2",
+        rusqlite::params![envelope_key, token],
+    )
+    .context("failed to update envelope key")?;
+    Ok(())
+}
+
 /// Delete a session by token.
 pub async fn delete_session(db: &sfgw_db::Db, token: &str) -> Result<()> {
     let conn = db.lock().await;

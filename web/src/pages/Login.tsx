@@ -1,6 +1,15 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { api } from '../api'
+import { api, setToken } from '../api'
+import {
+  negotiateForLogin,
+  encryptPayload,
+  decryptPayload,
+  setEnvelopeKey,
+  isE2EESupported,
+} from '../crypto'
 
 export default function Login() {
   const [username, setUsername] = useState('')
@@ -15,8 +24,42 @@ export default function Login() {
     setLoading(true)
 
     try {
-      const res = await api.login({ username, password })
-      localStorage.setItem('token', res.token)
+      const e2eeOk = await isE2EESupported()
+
+      if (e2eeOk) {
+        // E2EE login: negotiate → encrypt credentials → login
+        const { negotiateId, negotiateKey } = await negotiateForLogin()
+
+        const credsBytes = new TextEncoder().encode(JSON.stringify({ username, password }))
+        const encrypted = await encryptPayload(negotiateKey, credsBytes)
+
+        const res = await api.login({
+          negotiate_id: negotiateId,
+          ciphertext: encrypted.data,
+          iv: encrypted.iv,
+        })
+
+        setToken(res.token)
+
+        // Decrypt envelope key for subsequent E2EE requests
+        if (res.envelope) {
+          const rawKey = await decryptPayload(negotiateKey, res.envelope.iv, res.envelope.data)
+          const envKey = await globalThis.crypto.subtle.importKey(
+            'raw',
+            rawKey.buffer as ArrayBuffer,
+            { name: 'AES-GCM', length: 256 },
+            false,
+            ['encrypt', 'decrypt'],
+          )
+          setEnvelopeKey(envKey)
+        }
+      } else {
+        // Fallback: plain login (TLS-only)
+        const res = await api.login({ username, password })
+        setToken(res.token)
+        setEnvelopeKey(null)
+      }
+
       navigate('/')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed')
@@ -70,13 +113,13 @@ export default function Login() {
               disabled={loading}
               className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-mono font-bold py-2 rounded transition-colors"
             >
-              {loading ? 'Signing in...' : 'Sign In'}
+              {loading ? 'Establishing secure channel...' : 'Sign In'}
             </button>
           </div>
         </form>
 
         <p className="text-center text-xs text-gray-600 font-mono mt-4">
-          Unauthorized access is prohibited.
+          E2EE protected. Unauthorized access is prohibited.
         </p>
       </div>
     </div>

@@ -9,27 +9,35 @@ export default function Devices() {
 
   useEffect(() => {
     api.getDevices()
-      .then(setDevices)
-      .catch((e) => setError(e.message))
+      .then((res) => setDevices(res.devices))
+      .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false))
   }, [])
 
   const columns = [
     {
-      key: 'status',
+      key: 'adopted',
       header: '',
       render: (r: Device) => (
-        <span className={`w-2 h-2 rounded-full inline-block ${
-          r.status === 'online' ? 'bg-emerald-400' :
-          r.status === 'pending' ? 'bg-amber-400' : 'bg-red-400'
-        }`} />
+        <span className={`w-2 h-2 rounded-full inline-block ${r.adopted ? 'bg-emerald-400' : 'bg-amber-400'}`} />
       ),
     },
-    { key: 'name', header: 'Name' },
-    { key: 'model', header: 'Model' },
-    { key: 'ip', header: 'IP Address' },
+    {
+      key: 'name',
+      header: 'Name',
+      render: (r: Device) => r.name || '(unnamed)',
+    },
+    {
+      key: 'model',
+      header: 'Model',
+      render: (r: Device) => r.model || '---',
+    },
+    {
+      key: 'ip',
+      header: 'IP',
+      render: (r: Device) => r.ip || '---',
+    },
     { key: 'mac', header: 'MAC' },
-    { key: 'firmware', header: 'Firmware' },
     {
       key: 'adopted',
       header: 'Adopted',
@@ -42,13 +50,7 @@ export default function Devices() {
     {
       key: 'last_seen',
       header: 'Last Seen',
-      render: (r: Device) => {
-        try {
-          return new Date(r.last_seen).toLocaleString()
-        } catch {
-          return r.last_seen
-        }
-      },
+      render: (r: Device) => r.last_seen ? new Date(r.last_seen).toLocaleString() : '---',
     },
   ]
 
@@ -56,11 +58,7 @@ export default function Devices() {
     <div>
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-lg font-bold font-mono">Devices</h2>
-        <div className="flex items-center gap-4 text-xs font-mono text-gray-500">
-          <span>{devices.filter((d) => d.status === 'online').length} online</span>
-          <span>{devices.filter((d) => d.status === 'pending').length} pending</span>
-          <span>{devices.length} total</span>
-        </div>
+        <span className="text-xs font-mono text-gray-500">{devices.length} total</span>
       </div>
 
       {error && (
@@ -71,9 +69,14 @@ export default function Devices() {
 
       {loading ? (
         <p className="text-sm font-mono text-gray-500">Loading devices...</p>
+      ) : devices.length === 0 ? (
+        <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">
+          <p className="text-sm font-mono text-gray-500">No devices discovered.</p>
+          <p className="text-xs font-mono text-gray-600 mt-2">Devices will appear here when adopted.</p>
+        </div>
       ) : (
         <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-          <Table columns={columns} data={devices} keyField="id" />
+          <Table columns={columns} data={devices} keyField="mac" />
         </div>
       )}
     </div>
