@@ -4,20 +4,27 @@
 //!
 //! Security-first defaults: DROP input, DROP forward, ACCEPT output.
 //! All rule application is atomic via `nft -f`.
+//!
+//! Zone-based security model: WAN, LAN, DMZ, MGMT, GUEST.
 
 pub mod nft;
+pub mod wan;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // ── Zone model ──────────────────────────────────────────────────────
 
 /// Network zone classification for firewall rules.
+///
+/// Core zones: WAN, LAN, DMZ. Others kept for compatibility.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FirewallZone {
     Wan,
     Lan,
+    Dmz,
     Guest,
     #[serde(rename = "iot")]
     IoT,
@@ -31,6 +38,7 @@ impl std::fmt::Display for FirewallZone {
         match self {
             Self::Wan => write!(f, "wan"),
             Self::Lan => write!(f, "lan"),
+            Self::Dmz => write!(f, "dmz"),
             Self::Guest => write!(f, "guest"),
             Self::IoT => write!(f, "iot"),
             Self::Mgmt => write!(f, "mgmt"),
@@ -38,6 +46,64 @@ impl std::fmt::Display for FirewallZone {
             Self::Custom(name) => write!(f, "{name}"),
         }
     }
+}
+
+impl FirewallZone {
+    /// Parse a zone from the `role` column in the interfaces table.
+    pub fn from_role(role: &str) -> Self {
+        match role.to_lowercase().as_str() {
+            "wan" => Self::Wan,
+            "lan" => Self::Lan,
+            "dmz" => Self::Dmz,
+            "guest" => Self::Guest,
+            "iot" => Self::IoT,
+            "mgmt" => Self::Mgmt,
+            "vpn" => Self::Vpn,
+            other => Self::Custom(other.to_string()),
+        }
+    }
+}
+
+// ── Zone policy ─────────────────────────────────────────────────────
+
+/// Per-zone default security policies with assigned interfaces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZonePolicy {
+    pub zone: FirewallZone,
+    pub interfaces: Vec<String>,
+}
+
+// ── WAN failover / load-balance ─────────────────────────────────────
+
+/// WAN failover/load-balance group configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WanGroup {
+    pub name: String,
+    pub mode: WanMode,
+    pub interfaces: Vec<WanMember>,
+}
+
+/// WAN group operating mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WanMode {
+    Failover,
+    LoadBalance,
+}
+
+/// A single WAN interface within a WAN group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WanMember {
+    pub interface: String,
+    /// Weight for load balancing (1-100).
+    pub weight: u8,
+    /// Gateway IP address.
+    pub gateway: String,
+    /// Priority for failover (lower = higher priority).
+    pub priority: u8,
+    /// IP address to ping for health checks.
+    pub check_target: String,
+    pub enabled: bool,
 }
 
 // ── Rule action ─────────────────────────────────────────────────────
@@ -258,11 +324,100 @@ pub async fn toggle_rule(db: &sfgw_db::Db, id: i64, enabled: bool) -> Result<()>
 
 /// Load rules, generate nftables config, and atomically apply it.
 /// This is the main entry point — call after any rule change.
+///
+/// Now zone-aware: loads interface zones from the DB and generates
+/// zone-based nftables rules instead of hardcoded interface names.
 pub async fn apply_rules(db: &sfgw_db::Db) -> Result<()> {
     let rules = load_enabled_rules(db).await?;
+    let zones = load_interface_zones(db).await?;
+    let wan_groups = load_wan_groups(db).await?;
     let policy = FirewallPolicy::default();
-    let config = nft::generate_ruleset(&rules, &policy);
+
+    let config = if zones.is_empty() {
+        // Fallback to legacy generation when no zones are configured.
+        nft::generate_ruleset(&rules, &policy)
+    } else {
+        nft::generate_zone_ruleset(&zones, &rules, &policy, &[])
+    };
+
     nft::apply_ruleset(&config).await?;
-    tracing::info!("firewall rules applied successfully");
+
+    // Apply WAN routing if groups are configured.
+    if !wan_groups.is_empty() {
+        wan::apply_wan_routing(&wan_groups).await?;
+    }
+
+    tracing::info!("firewall rules applied successfully (zone-aware)");
+    Ok(())
+}
+
+// ── Zone DB functions ───────────────────────────────────────────────
+
+/// Load interface-to-zone assignments from the `interfaces` table,
+/// grouping by the `role` column.
+pub async fn load_interface_zones(db: &sfgw_db::Db) -> Result<Vec<ZonePolicy>> {
+    let conn = db.lock().await;
+    let mut stmt = conn
+        .prepare("SELECT name, role FROM interfaces WHERE enabled = 1 ORDER BY role, name")
+        .context("failed to prepare interfaces query")?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+            ))
+        })
+        .context("failed to query interfaces")?;
+
+    let mut zone_map: HashMap<String, Vec<String>> = HashMap::new();
+    for row in rows {
+        let (name, role) = row.context("failed to read interfaces row")?;
+        zone_map.entry(role).or_default().push(name);
+    }
+
+    let zones = zone_map
+        .into_iter()
+        .map(|(role, interfaces)| ZonePolicy {
+            zone: FirewallZone::from_role(&role),
+            interfaces,
+        })
+        .collect();
+
+    Ok(zones)
+}
+
+/// Load WAN group configuration from the `meta` table (key: `wan_groups`).
+pub async fn load_wan_groups(db: &sfgw_db::Db) -> Result<Vec<WanGroup>> {
+    let conn = db.lock().await;
+    let mut stmt = conn
+        .prepare("SELECT value FROM meta WHERE key = 'wan_groups'")
+        .context("failed to prepare meta query for wan_groups")?;
+
+    let result: Option<String> = stmt
+        .query_row([], |row| row.get(0))
+        .ok();
+
+    match result {
+        Some(json) => {
+            let groups: Vec<WanGroup> = serde_json::from_str(&json)
+                .context("failed to parse wan_groups JSON from meta table")?;
+            tracing::info!("loaded {} WAN groups from database", groups.len());
+            Ok(groups)
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Save WAN group configuration to the `meta` table (key: `wan_groups`).
+pub async fn save_wan_groups(db: &sfgw_db::Db, groups: &[WanGroup]) -> Result<()> {
+    let json = serde_json::to_string(groups).context("failed to serialize wan_groups")?;
+    let conn = db.lock().await;
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('wan_groups', ?1)",
+        rusqlite::params![json],
+    )
+    .context("failed to save wan_groups to meta table")?;
+    tracing::info!("saved {} WAN groups to database", groups.len());
     Ok(())
 }

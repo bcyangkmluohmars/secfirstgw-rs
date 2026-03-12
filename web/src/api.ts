@@ -141,6 +141,118 @@ export interface LoginResponse {
   envelope?: { iv: string; data: string };
 }
 
+// Firewall types
+export interface FirewallRule {
+  id: number;
+  chain: string;
+  priority: number;
+  detail: {
+    action: string;
+    protocol?: string;
+    source?: string;
+    destination?: string;
+    port?: number;
+    comment?: string;
+    vlan?: number;
+    rate_limit?: string;
+  };
+  enabled: boolean;
+}
+
+// VPN types
+export interface VpnTunnel {
+  id: number;
+  name: string;
+  tunnel_type: string;
+  enabled: boolean;
+  listen_port: number;
+  public_key: string;
+  address: string;
+  dns: string | null;
+  mtu: number;
+  peers: WgPeer[];
+}
+
+export interface WgPeer {
+  public_key: string;
+  preshared_key?: string;
+  allowed_ips: string[];
+  endpoint?: string;
+  persistent_keepalive?: number;
+}
+
+export interface TunnelStatus {
+  name: string;
+  is_up: boolean;
+  rx_bytes: number;
+  tx_bytes: number;
+  peers: { public_key: string; endpoint: string | null; last_handshake_secs: number; rx_bytes: number; tx_bytes: number }[];
+}
+
+// DNS types
+export interface DnsConfig {
+  upstream_dns: string[];
+  domain: string;
+  dnssec: boolean;
+  rebind_protection: boolean;
+  cache_size: number;
+  bind_interfaces: string[];
+}
+
+export interface DhcpRange {
+  interface: string;
+  start_ip: string;
+  end_ip: string;
+  netmask: string;
+  gateway: string;
+  lease_time: string;
+  vlan_id: number | null;
+}
+
+export interface DhcpStaticLease {
+  mac: string;
+  ip: string;
+  hostname: string;
+}
+
+export interface DhcpLease {
+  expires: number;
+  mac: string;
+  ip: string;
+  hostname: string;
+  client_id: string;
+}
+
+export interface DnsOverride {
+  domain: string;
+  ip: string;
+}
+
+// IDS types
+export interface IdsEvent {
+  id: number;
+  timestamp: string;
+  severity: string;
+  detector: string;
+  source_mac: string;
+  source_ip: string;
+  interface: string;
+  vlan: number | null;
+  description: string;
+}
+
+// Device types
+export interface DeviceSummary {
+  id: number;
+  mac: string;
+  name: string | null;
+  model: string | null;
+  ip: string | null;
+  adopted: boolean;
+  last_seen: string | null;
+  state: string;
+}
+
 // ---- API endpoints ----
 
 export const api = {
@@ -148,7 +260,6 @@ export const api = {
   getStatus: () => request<SystemStatus>('/api/v1/status'),
   getSystem: () => request<Record<string, unknown>>('/api/v1/system'),
   getInterfaces: () => request<{ interfaces: NetworkInterface[] }>('/api/v1/interfaces'),
-  getDevices: () => request<{ devices: Device[] }>('/api/v1/devices'),
   getMe: () => request<{ user: { id: number; username: string; role: string } }>('/api/v1/auth/me'),
   logout: () => request<void>('/api/v1/auth/logout', { method: 'POST' }),
 
@@ -159,6 +270,54 @@ export const api = {
     request<LoginResponse>('/api/v1/auth/login', { method: 'POST', body, skipE2EE: true }),
   setup: (creds: { username: string; password: string }) =>
     request<{ user_id: number }>('/api/v1/auth/setup', { method: 'POST', body: creds, skipE2EE: true }),
+
+  // Firewall
+  getFirewallRules: () => request<{ rules: FirewallRule[] }>('/api/v1/firewall/rules'),
+  createFirewallRule: (rule: Omit<FirewallRule, 'id'>) => request<{ id: number }>('/api/v1/firewall/rules', { method: 'POST', body: rule }),
+  updateFirewallRule: (id: number, rule: FirewallRule) => request<void>(`/api/v1/firewall/rules/${id}`, { method: 'PUT', body: rule }),
+  deleteFirewallRule: (id: number) => request<void>(`/api/v1/firewall/rules/${id}`, { method: 'DELETE' }),
+  toggleFirewallRule: (id: number, enabled: boolean) => request<void>(`/api/v1/firewall/rules/${id}/toggle`, { method: 'POST', body: { enabled } }),
+  applyFirewall: () => request<void>('/api/v1/firewall/apply', { method: 'POST' }),
+
+  // VPN
+  getVpnTunnels: () => request<{ tunnels: VpnTunnel[] }>('/api/v1/vpn/tunnels'),
+  createVpnTunnel: (body: { name: string; listen_port: number; address: string; dns?: string; mtu?: number }) => request<VpnTunnel>('/api/v1/vpn/tunnels', { method: 'POST', body }),
+  getVpnTunnel: (name: string) => request<VpnTunnel>(`/api/v1/vpn/tunnels/${name}`),
+  deleteVpnTunnel: (name: string) => request<void>(`/api/v1/vpn/tunnels/${name}`, { method: 'DELETE' }),
+  startVpnTunnel: (name: string) => request<void>(`/api/v1/vpn/tunnels/${name}/start`, { method: 'POST' }),
+  stopVpnTunnel: (name: string) => request<void>(`/api/v1/vpn/tunnels/${name}/stop`, { method: 'POST' }),
+  getVpnTunnelStatus: (name: string) => request<TunnelStatus>(`/api/v1/vpn/tunnels/${name}/status`),
+  addVpnPeer: (tunnelName: string, peer: WgPeer) => request<void>(`/api/v1/vpn/tunnels/${tunnelName}/peers`, { method: 'POST', body: peer }),
+  removeVpnPeer: (tunnelName: string, peerKey: string) => request<void>(`/api/v1/vpn/tunnels/${tunnelName}/peers/${encodeURIComponent(peerKey)}`, { method: 'DELETE' }),
+
+  // DNS
+  getDnsConfig: () => request<DnsConfig>('/api/v1/dns/config'),
+  saveDnsConfig: (config: DnsConfig) => request<void>('/api/v1/dns/config', { method: 'PUT', body: config }),
+  getDhcpRanges: () => request<{ ranges: DhcpRange[] }>('/api/v1/dns/dhcp/ranges'),
+  saveDhcpRanges: (ranges: DhcpRange[]) => request<void>('/api/v1/dns/dhcp/ranges', { method: 'PUT', body: ranges }),
+  getDhcpLeases: () => request<{ leases: DhcpLease[] }>('/api/v1/dns/dhcp/leases'),
+  getDhcpStaticLeases: () => request<{ leases: DhcpStaticLease[] }>('/api/v1/dns/dhcp/static'),
+  saveDhcpStaticLeases: (leases: DhcpStaticLease[]) => request<void>('/api/v1/dns/dhcp/static', { method: 'PUT', body: leases }),
+  getDnsOverrides: () => request<{ overrides: DnsOverride[] }>('/api/v1/dns/overrides'),
+  saveDnsOverrides: (overrides: DnsOverride[]) => request<void>('/api/v1/dns/overrides', { method: 'PUT', body: overrides }),
+
+  // IDS
+  getIdsEvents: (limit?: number, severity?: string) => {
+    const params = new URLSearchParams();
+    if (limit) params.set('limit', String(limit));
+    if (severity) params.set('severity', severity);
+    const qs = params.toString();
+    return request<{ events: IdsEvent[] }>(`/api/v1/ids/events${qs ? '?' + qs : ''}`);
+  },
+  getIdsStats: () => request<Record<string, unknown>>('/api/v1/ids/events/stats'),
+
+  // Devices
+  getDevices: () => request<{ devices: DeviceSummary[] }>('/api/v1/devices'),
+  getPendingDevices: () => request<{ devices: DeviceSummary[] }>('/api/v1/devices/pending'),
+  approveDevice: (mac: string) => request<unknown>(`/api/v1/devices/${encodeURIComponent(mac)}/approve`, { method: 'POST' }),
+  rejectDevice: (mac: string) => request<void>(`/api/v1/devices/${encodeURIComponent(mac)}/reject`, { method: 'POST' }),
+  getDeviceConfig: (mac: string) => request<unknown>(`/api/v1/devices/${encodeURIComponent(mac)}/config`),
+  pushDeviceConfig: (mac: string, config: unknown) => request<{ sequence: number }>(`/api/v1/devices/${encodeURIComponent(mac)}/config`, { method: 'PUT', body: config }),
 };
 
 export { BASE_URL };

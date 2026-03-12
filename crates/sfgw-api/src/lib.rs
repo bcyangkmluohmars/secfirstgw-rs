@@ -7,10 +7,10 @@ pub mod middleware;
 use anyhow::{Context, Result};
 use axum::{
     Extension, Json, Router,
-    extract::ConnectInfo,
+    extract::{ConnectInfo, Path, Query},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post, put},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use serde::Deserialize;
@@ -43,12 +43,40 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
     // Protected routes (auth required)
     // E2EE middleware handles transparent encrypt/decrypt for all these
     let protected_routes = Router::new()
+        // System
         .route("/api/v1/status", get(status_handler))
         .route("/api/v1/system", get(system_handler))
         .route("/api/v1/interfaces", get(interfaces_handler))
-        .route("/api/v1/devices", get(devices_handler))
         .route("/api/v1/auth/me", get(me_handler))
         .route("/api/v1/auth/logout", post(logout_handler))
+        // Firewall
+        .route("/api/v1/firewall/rules", get(fw_list_rules).post(fw_insert_rule))
+        .route("/api/v1/firewall/rules/{id}", put(fw_update_rule).delete(fw_delete_rule))
+        .route("/api/v1/firewall/rules/{id}/toggle", post(fw_toggle_rule))
+        .route("/api/v1/firewall/apply", post(fw_apply_rules))
+        // VPN
+        .route("/api/v1/vpn/tunnels", get(vpn_list_tunnels).post(vpn_create_tunnel))
+        .route("/api/v1/vpn/tunnels/{name}", get(vpn_get_tunnel).delete(vpn_delete_tunnel))
+        .route("/api/v1/vpn/tunnels/{name}/start", post(vpn_start_tunnel))
+        .route("/api/v1/vpn/tunnels/{name}/stop", post(vpn_stop_tunnel))
+        .route("/api/v1/vpn/tunnels/{name}/status", get(vpn_get_status))
+        .route("/api/v1/vpn/tunnels/{name}/peers", post(vpn_add_peer))
+        .route("/api/v1/vpn/tunnels/{name}/peers/{key}", delete(vpn_remove_peer))
+        // DNS/DHCP
+        .route("/api/v1/dns/config", get(dns_get_config).put(dns_save_config))
+        .route("/api/v1/dns/dhcp/ranges", get(dns_get_dhcp_ranges).put(dns_save_dhcp_ranges))
+        .route("/api/v1/dns/dhcp/leases", get(dns_get_dhcp_leases))
+        .route("/api/v1/dns/dhcp/static", get(dns_get_static_leases).put(dns_save_static_leases))
+        .route("/api/v1/dns/overrides", get(dns_get_overrides).put(dns_save_overrides))
+        // IDS
+        .route("/api/v1/ids/events", get(ids_list_events))
+        .route("/api/v1/ids/events/stats", get(ids_event_stats))
+        // Devices
+        .route("/api/v1/devices", get(devices_list))
+        .route("/api/v1/devices/pending", get(devices_list_pending))
+        .route("/api/v1/devices/{mac}/approve", post(devices_approve))
+        .route("/api/v1/devices/{mac}/reject", post(devices_reject))
+        .route("/api/v1/devices/{mac}/config", get(devices_get_config).put(devices_push_config))
         .layer(axum::middleware::from_fn(e2ee::e2ee_layer));
 
     let app = if let Some(web_dir) = std::env::var("SFGW_WEB_DIR")
@@ -572,34 +600,6 @@ async fn interfaces_handler(
     Json(json!({ "interfaces": interfaces }))
 }
 
-async fn devices_handler(
-    _auth: AuthUser,
-    Extension(db): Extension<sfgw_db::Db>,
-) -> Json<Value> {
-    let devices = {
-        let conn = db.lock().await;
-        let mut stmt = conn
-            .prepare("SELECT mac, name, model, ip, adopted, last_seen FROM devices")
-            .unwrap();
-        let rows: Vec<Value> = stmt
-            .query_map([], |row| {
-                Ok(json!({
-                    "mac": row.get::<_, String>(0)?,
-                    "name": row.get::<_, Option<String>>(1)?,
-                    "model": row.get::<_, Option<String>>(2)?,
-                    "ip": row.get::<_, Option<String>>(3)?,
-                    "adopted": row.get::<_, bool>(4)?,
-                    "last_seen": row.get::<_, Option<String>>(5)?,
-                }))
-            })
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect();
-        rows
-    };
-    Json(json!({ "devices": devices }))
-}
-
 async fn me_handler(auth_user: AuthUser) -> Json<Value> {
     Json(json!({
         "user": {
@@ -624,5 +624,507 @@ async fn logout_handler(
                 Json(json!({ "error": "internal server error" })),
             )
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: convert anyhow::Error → JSON error response
+// ---------------------------------------------------------------------------
+
+fn err_response(status: StatusCode, e: anyhow::Error) -> (StatusCode, Json<Value>) {
+    (status, Json(json!({ "error": e.to_string() })))
+}
+
+fn internal_err(e: anyhow::Error) -> (StatusCode, Json<Value>) {
+    tracing::error!("{e:#}");
+    err_response(StatusCode::INTERNAL_SERVER_ERROR, e)
+}
+
+// ===========================================================================
+// Firewall handlers
+// ===========================================================================
+
+async fn fw_list_rules(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_fw::load_rules(&db).await {
+        Ok(rules) => (StatusCode::OK, Json(json!({ "rules": rules }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn fw_insert_rule(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(rule): Json<sfgw_fw::FirewallRule>,
+) -> impl IntoResponse {
+    match sfgw_fw::insert_rule(&db, &rule).await {
+        Ok(id) => (StatusCode::CREATED, Json(json!({ "id": id }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn fw_update_rule(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+    Json(mut rule): Json<sfgw_fw::FirewallRule>,
+) -> impl IntoResponse {
+    rule.id = Some(id);
+    match sfgw_fw::update_rule(&db, &rule).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "updated" }))),
+        Err(e) => err_response(StatusCode::NOT_FOUND, e),
+    }
+}
+
+async fn fw_delete_rule(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match sfgw_fw::delete_rule(&db, id).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "deleted" }))),
+        Err(e) => err_response(StatusCode::NOT_FOUND, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ToggleBody {
+    enabled: bool,
+}
+
+async fn fw_toggle_rule(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+    Json(body): Json<ToggleBody>,
+) -> impl IntoResponse {
+    match sfgw_fw::toggle_rule(&db, id, body.enabled).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "toggled", "enabled": body.enabled }))),
+        Err(e) => err_response(StatusCode::NOT_FOUND, e),
+    }
+}
+
+async fn fw_apply_rules(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_fw::apply_rules(&db).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "applied" }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+// ===========================================================================
+// VPN handlers
+// ===========================================================================
+
+async fn vpn_list_tunnels(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_vpn::tunnel::list_tunnels(&db).await {
+        Ok(tunnels) => (StatusCode::OK, Json(json!({ "tunnels": tunnels }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateTunnelBody {
+    name: String,
+    listen_port: u16,
+    address: String,
+    dns: Option<String>,
+    mtu: Option<u16>,
+}
+
+async fn vpn_create_tunnel(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(body): Json<CreateTunnelBody>,
+) -> impl IntoResponse {
+    match sfgw_vpn::tunnel::create_tunnel(
+        &db,
+        &body.name,
+        body.listen_port,
+        &body.address,
+        body.dns.as_deref(),
+        body.mtu,
+    )
+    .await
+    {
+        Ok(tunnel) => (StatusCode::CREATED, Json(json!({ "tunnel": tunnel }))),
+        Err(e) => err_response(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn vpn_get_tunnel(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_vpn::tunnel::get_tunnel(&db, &name).await {
+        Ok(Some(tunnel)) => (StatusCode::OK, Json(json!({ "tunnel": tunnel }))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("tunnel '{}' not found", name) })),
+        ),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn vpn_delete_tunnel(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_vpn::tunnel::delete_tunnel(&db, &name).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "deleted" }))),
+        Err(e) => err_response(StatusCode::NOT_FOUND, e),
+    }
+}
+
+async fn vpn_start_tunnel(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_vpn::tunnel::start_tunnel(&db, &name).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "started" }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn vpn_stop_tunnel(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_vpn::tunnel::stop_tunnel(&db, &name).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "stopped" }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn vpn_get_status(
+    _auth: AuthUser,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_vpn::tunnel::get_status(&name).await {
+        Ok(status) => (StatusCode::OK, Json(json!({ "status": status }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn vpn_add_peer(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(name): Path<String>,
+    Json(peer): Json<sfgw_vpn::WgPeer>,
+) -> impl IntoResponse {
+    match sfgw_vpn::tunnel::add_peer(&db, &name, peer).await {
+        Ok(()) => (StatusCode::CREATED, Json(json!({ "status": "peer added" }))),
+        Err(e) => err_response(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn vpn_remove_peer(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path((name, key)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match sfgw_vpn::tunnel::remove_peer(&db, &name, &key).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "peer removed" }))),
+        Err(e) => err_response(StatusCode::NOT_FOUND, e),
+    }
+}
+
+// ===========================================================================
+// DNS/DHCP handlers
+// ===========================================================================
+
+async fn dns_get_config(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_dns::load_dns_config(&db).await {
+        Ok(cfg) => (StatusCode::OK, Json(json!({ "config": cfg }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn dns_save_config(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(cfg): Json<sfgw_dns::DnsConfig>,
+) -> impl IntoResponse {
+    match sfgw_dns::save_dns_config(&db, &cfg).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "saved" }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn dns_get_dhcp_ranges(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_dns::load_dhcp_ranges(&db).await {
+        Ok(ranges) => (StatusCode::OK, Json(json!({ "ranges": ranges }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn dns_save_dhcp_ranges(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(ranges): Json<Vec<sfgw_dns::DhcpRange>>,
+) -> impl IntoResponse {
+    match sfgw_dns::save_dhcp_ranges(&db, &ranges).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "saved" }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn dns_get_dhcp_leases(
+    _auth: AuthUser,
+) -> impl IntoResponse {
+    match sfgw_dns::read_leases(None).await {
+        Ok(leases) => (StatusCode::OK, Json(json!({ "leases": leases }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn dns_get_static_leases(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_dns::load_static_leases(&db).await {
+        Ok(leases) => (StatusCode::OK, Json(json!({ "leases": leases }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn dns_save_static_leases(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(leases): Json<Vec<sfgw_dns::DhcpStaticLease>>,
+) -> impl IntoResponse {
+    match sfgw_dns::save_static_leases(&db, &leases).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "saved" }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn dns_get_overrides(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_dns::load_dns_overrides(&db).await {
+        Ok(overrides) => (StatusCode::OK, Json(json!({ "overrides": overrides }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn dns_save_overrides(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(overrides): Json<Vec<sfgw_dns::DnsOverride>>,
+) -> impl IntoResponse {
+    match sfgw_dns::save_dns_overrides(&db, &overrides).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "saved" }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+// ===========================================================================
+// IDS handlers
+// ===========================================================================
+
+#[derive(Deserialize)]
+struct IdsEventsQuery {
+    limit: Option<i64>,
+    severity: Option<String>,
+}
+
+async fn ids_list_events(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Query(params): Query<IdsEventsQuery>,
+) -> impl IntoResponse {
+    let limit = params.limit.unwrap_or(100).min(1000);
+
+    let result = {
+        let conn = db.lock().await;
+
+        let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Value> {
+            Ok(json!({
+                "id": row.get::<_, i64>(0)?,
+                "timestamp": row.get::<_, String>(1)?,
+                "severity": row.get::<_, String>(2)?,
+                "detector": row.get::<_, String>(3)?,
+                "source_mac": row.get::<_, Option<String>>(4)?,
+                "source_ip": row.get::<_, Option<String>>(5)?,
+                "interface": row.get::<_, String>(6)?,
+                "vlan": row.get::<_, Option<i64>>(7)?,
+                "description": row.get::<_, String>(8)?,
+            }))
+        };
+
+        let events: Result<Vec<Value>, _> = if let Some(ref severity) = params.severity {
+            let mut stmt = match conn.prepare(
+                "SELECT id, timestamp, severity, detector, source_mac, source_ip, interface, vlan, description \
+                 FROM ids_events WHERE severity = ?1 ORDER BY id DESC LIMIT ?2",
+            ) {
+                Ok(s) => s,
+                Err(e) => return internal_err(anyhow::anyhow!("{e}")),
+            };
+            stmt.query_map(rusqlite::params![severity, limit], map_row)
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        } else {
+            let mut stmt = match conn.prepare(
+                "SELECT id, timestamp, severity, detector, source_mac, source_ip, interface, vlan, description \
+                 FROM ids_events ORDER BY id DESC LIMIT ?1",
+            ) {
+                Ok(s) => s,
+                Err(e) => return internal_err(anyhow::anyhow!("{e}")),
+            };
+            stmt.query_map(rusqlite::params![limit], map_row)
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        };
+
+        match events {
+            Ok(v) => v,
+            Err(e) => return internal_err(anyhow::anyhow!("{e}")),
+        }
+    };
+
+    (StatusCode::OK, Json(json!({ "events": result })))
+}
+
+async fn ids_event_stats(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    let result = {
+        let conn = db.lock().await;
+
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ids_events", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        let mut by_severity = json!({});
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT severity, COUNT(*) FROM ids_events GROUP BY severity")
+        {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            }) {
+                for row in rows.flatten() {
+                    by_severity[row.0] = json!(row.1);
+                }
+            }
+        }
+
+        let mut by_detector = json!({});
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT detector, COUNT(*) FROM ids_events GROUP BY detector")
+        {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            }) {
+                for row in rows.flatten() {
+                    by_detector[row.0] = json!(row.1);
+                }
+            }
+        }
+
+        json!({
+            "total": total,
+            "by_severity": by_severity,
+            "by_detector": by_detector,
+        })
+    };
+
+    (StatusCode::OK, Json(result))
+}
+
+// ===========================================================================
+// Device handlers
+// ===========================================================================
+
+async fn devices_list(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_adopt::list_devices(&db).await {
+        Ok(devices) => (StatusCode::OK, Json(json!({ "devices": devices }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn devices_list_pending(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_adopt::list_pending(&db).await {
+        Ok(devices) => (StatusCode::OK, Json(json!({ "devices": devices }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn devices_approve(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(mac): Path<String>,
+    Json(body): Json<sfgw_adopt::AdoptionRequest>,
+) -> impl IntoResponse {
+    // Ensure the MAC in the path matches the body
+    let mut request = body;
+    request.device_mac = mac;
+
+    // Initialize the CA for signing
+    let ca = match sfgw_adopt::start(&db).await {
+        Ok(ca) => ca,
+        Err(e) => return internal_err(e),
+    };
+
+    match sfgw_adopt::approve_device(&db, &ca, &request).await {
+        Ok(response) => (StatusCode::OK, Json(json!({ "adoption": response }))),
+        Err(e) => err_response(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn devices_reject(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(mac): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_adopt::reject_device(&db, &mac).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "rejected" }))),
+        Err(e) => err_response(StatusCode::NOT_FOUND, e),
+    }
+}
+
+async fn devices_get_config(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(mac): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_adopt::get_device_config(&db, &mac).await {
+        Ok(config) => (StatusCode::OK, Json(json!({ "config": config }))),
+        Err(e) => err_response(StatusCode::NOT_FOUND, e),
+    }
+}
+
+async fn devices_push_config(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(mac): Path<String>,
+    Json(config): Json<Value>,
+) -> impl IntoResponse {
+    match sfgw_adopt::push_config(&db, &mac, config).await {
+        Ok(seq) => (StatusCode::OK, Json(json!({ "status": "queued", "sequence_number": seq }))),
+        Err(e) => err_response(StatusCode::NOT_FOUND, e),
     }
 }
