@@ -27,6 +27,12 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
+    dnsmasq \
+    nftables \
+    iproute2 \
+    wireguard-tools \
+    iputils-ping \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/sfgw /usr/local/bin/sfgw

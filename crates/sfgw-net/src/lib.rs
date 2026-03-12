@@ -19,8 +19,13 @@ pub struct InterfaceInfo {
 const SYSFS_NET: &str = "/sys/class/net";
 
 /// Detect network interfaces on the system and store them in the database.
-pub async fn configure(db: &sfgw_db::Db, _platform: &sfgw_hal::Platform) -> Result<()> {
-    let interfaces = detect_interfaces()?;
+///
+/// Role assignment is platform-aware:
+/// - **Docker**: single NIC → LAN (web UI must be reachable)
+/// - **Bare metal**: eth0/ens*/enp* first physical → WAN, rest → LAN
+/// - **VM**: same as bare metal
+pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Result<()> {
+    let interfaces = detect_interfaces_for_platform(platform)?;
 
     let conn = db.lock().await;
     for iface in &interfaces {
@@ -102,6 +107,31 @@ pub async fn list_interfaces(db: &sfgw_db::Db) -> Result<Vec<InterfaceInfo>> {
 // ---------------------------------------------------------------------------
 // Private helpers: read from /sys/class/net/
 // ---------------------------------------------------------------------------
+
+/// Platform-aware interface detection.
+///
+/// In Docker, all non-virtual interfaces are assigned LAN role because
+/// there is only one NIC and the web UI must be reachable.
+/// On bare metal / VM, the first physical interface is WAN, rest are LAN.
+fn detect_interfaces_for_platform(platform: &sfgw_hal::Platform) -> Result<Vec<InterfaceInfo>> {
+    let mut interfaces = detect_interfaces()?;
+
+    if *platform == sfgw_hal::Platform::Docker {
+        // Docker: only one NIC, must be LAN for web UI access.
+        // Override any WAN assignments.
+        for iface in &mut interfaces {
+            if iface.role == "wan" {
+                iface.role = "lan".to_string();
+                tracing::info!(
+                    name = %iface.name,
+                    "Docker mode: reassigned interface from WAN to LAN"
+                );
+            }
+        }
+    }
+
+    Ok(interfaces)
+}
 
 /// Detect all network interfaces by reading sysfs.
 fn detect_interfaces() -> Result<Vec<InterfaceInfo>> {

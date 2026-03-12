@@ -4,12 +4,21 @@ services:
     ports:
       - "8443:8443"
       - "18080:8080"
+      # DNS/DHCP ports are internal to the gateway network — not mapped to host.
+      # On bare metal / VM these bind directly. In Docker, use --network=host
+      # or a macvlan network if LAN clients need DNS/DHCP from this container.
     volumes:
       - sfgw-data:/data
     environment:
       SFGW_DB_PATH: /data/sfgw.db
       SFGW_LISTEN_ADDR: 0.0.0.0:8443
       RUST_LOG: sfgw=info
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
 
 volumes:
   sfgw-data:

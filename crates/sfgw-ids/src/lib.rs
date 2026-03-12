@@ -150,38 +150,40 @@ pub async fn start(db: &sfgw_db::Db, role: IdsRole) -> Result<()> {
     // Drop original sender so the loop exits when all monitors stop
     drop(event_tx);
 
-    // Alert engine + collector process all events
-    let mut alert_engine = alert::AlertEngine::new(db.clone());
-    let mut event_collector = collector::Collector::new(30); // 30s correlation window
+    // Spawn alert engine + collector as background task so start() returns
+    let db_alert = db.clone();
+    tokio::spawn(async move {
+        let mut alert_engine = alert::AlertEngine::new(db_alert);
+        let mut event_collector = collector::Collector::new(30); // 30s correlation window
 
-    while let Some(event) = event_rx.recv().await {
-        // Process through alert engine (store, rate-limit, respond)
-        match alert_engine.process_event(&event).await {
-            Ok(actions) => {
-                for action in &actions {
-                    tracing::debug!("IDS response: {action:?}");
+        while let Some(event) = event_rx.recv().await {
+            // Process through alert engine (store, rate-limit, respond)
+            match alert_engine.process_event(&event).await {
+                Ok(actions) => {
+                    for action in &actions {
+                        tracing::debug!("IDS response: {action:?}");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Alert engine error: {e}");
                 }
             }
-            Err(e) => {
-                tracing::error!("Alert engine error: {e}");
+
+            // Feed into collector for cross-node correlation
+            match event_collector.ingest(event) {
+                Ok(Some(action)) => {
+                    tracing::warn!("Collector correlation triggered: {action:?}");
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!("Collector error: {e}");
+                }
             }
         }
 
-        // Feed into collector for cross-node correlation
-        match event_collector.ingest(event) {
-            Ok(Some(action)) => {
-                tracing::warn!("Collector correlation triggered: {action:?}");
-                // Execute the correlated response through the alert engine
-                // (the alert engine handles nftables calls etc.)
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::error!("Collector error: {e}");
-            }
-        }
-    }
+        tracing::info!("IDS engine stopped");
+    });
 
-    tracing::info!("IDS engine stopped");
     Ok(())
 }
 
