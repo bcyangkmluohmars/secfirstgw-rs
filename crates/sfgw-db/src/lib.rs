@@ -49,6 +49,10 @@ fn init_schema(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS interfaces (
             id        INTEGER PRIMARY KEY AUTOINCREMENT,
             name      TEXT NOT NULL UNIQUE,
+            mac       TEXT NOT NULL DEFAULT '',
+            ips       TEXT NOT NULL DEFAULT '[]',
+            mtu       INTEGER NOT NULL DEFAULT 1500,
+            is_up     INTEGER NOT NULL DEFAULT 0,
             role      TEXT NOT NULL DEFAULT 'lan',
             vlan_id   INTEGER,
             enabled   INTEGER NOT NULL DEFAULT 1,
