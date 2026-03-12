@@ -261,14 +261,18 @@ impl AlertEngine {
             }
             ResponseAction::BlockMac { mac, duration_secs } => {
                 tracing::warn!("IDS: blocking MAC {} for {}s", mac, duration_secs);
-                // Add nftables rule to block this MAC
-                let rule = format!(
-                    "nft add rule inet filter input ether saddr {} drop",
-                    mac
+                // Use nftables set with timeout for automatic expiry.
+                // Requires a pre-configured set:
+                //   nft add set inet sfgw blocked_macs { type ether_addr; flags timeout; }
+                // and an input chain rule:
+                //   nft add rule inet sfgw input ether saddr @blocked_macs drop
+                let cmd = format!(
+                    "nft add element inet sfgw blocked_macs {{ {} timeout {}s }}",
+                    mac, duration_secs
                 );
                 match tokio::process::Command::new("sh")
                     .arg("-c")
-                    .arg(&rule)
+                    .arg(&cmd)
                     .output()
                     .await
                 {
@@ -278,13 +282,18 @@ impl AlertEngine {
                                 "nftables block failed: {}",
                                 String::from_utf8_lossy(&output.stderr)
                             );
+                        } else {
+                            tracing::info!(
+                                "Blocked MAC {} via nftables set (auto-expires in {}s)",
+                                mac,
+                                duration_secs
+                            );
                         }
                     }
                     Err(e) => {
                         tracing::error!("failed to execute nftables block: {e}");
                     }
                 }
-                // TODO: schedule removal after duration_secs
             }
             ResponseAction::RateLimit { ip, pps } => {
                 tracing::warn!("IDS: rate limiting {} to {} pps", ip, pps);

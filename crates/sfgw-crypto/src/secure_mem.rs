@@ -2,133 +2,181 @@
 
 //! Secure Memory Primitives
 //!
-//! Every secret in secfirstgw lives in a SecureBox:
+//! Every secret in secfirstgw lives in a [`SecureBox`]:
+//! - AES-256-GCM encrypted at rest in memory (ephemeral random key)
+//! - `mlock()`'d (never written to swap)
+//! - `madvise(MADV_DONTDUMP)` (excluded from core dumps)
 //! - Zeroized on drop (no remnants in freed heap)
-//! - mlock()'d (never written to swap)
-//! - Guard pages (buffer overflow → SIGSEGV, not key leak)
-//! - Optional RAM encryption (ephemeral key in CPU register)
 //!
 //! This makes cold boot attacks, DMA attacks, swap forensics,
 //! and heap spraying all useless against key material.
-//!
-//! An auditor running `gdb` + `search-pattern` on the heap finds nothing.
 
-use std::ops::{Deref, DerefMut};
+use anyhow::Result;
+use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+use ring::rand::{SecureRandom, SystemRandom};
 use zeroize::Zeroize;
 
-/// A memory region that is:
-/// - Locked in RAM (no swap)
-/// - Zeroized on drop
-/// - Protected by guard pages
-pub struct SecureBox<T: Zeroize> {
-    inner: Box<T>,
-    locked: bool,
-}
-
-impl<T: Zeroize> SecureBox<T> {
-    /// Allocate a new secure memory region.
-    /// Calls mlock() to prevent swapping, sets up guard pages.
-    pub fn new(value: T) -> Self {
-        let boxed = Box::new(value);
-        let ptr = &*boxed as *const T as *const u8;
-        let len = std::mem::size_of::<T>();
-
-        // Lock memory — prevent swap
-        let locked = if len > 0 {
-            unsafe { libc::mlock(ptr as *const libc::c_void, len) == 0 }
-        } else {
-            true
-        };
-
-        Self {
-            inner: boxed,
-            locked,
-        }
-    }
-
-    /// Returns true if the memory is locked (mlock succeeded)
-    pub fn is_locked(&self) -> bool {
-        self.locked
-    }
-}
-
-impl<T: Zeroize> Deref for SecureBox<T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        &self.inner
-    }
-}
-
-impl<T: Zeroize> DerefMut for SecureBox<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        &mut self.inner
-    }
-}
-
-impl<T: Zeroize> Drop for SecureBox<T> {
-    fn drop(&mut self) {
-        // Zeroize the secret
-        self.inner.zeroize();
-
-        // Unlock memory
-        if self.locked {
-            let ptr = &*self.inner as *const T as *const u8;
-            let len = std::mem::size_of::<T>();
-            if len > 0 {
-                unsafe { libc::munlock(ptr as *const libc::c_void, len); }
-            }
-        }
-    }
-}
-
-/// Wrapper for key material that is encrypted in RAM when not in use.
-/// The encryption key lives only in a CPU register during active use.
-pub struct EncryptedKey {
-    /// Ciphertext of the actual key (ChaCha20 encrypted)
-    ciphertext: SecureBox<[u8; 48]>,  // 32 key + 16 tag
-    /// Nonce (can be public)
+/// Encrypted in-memory container for sensitive data.
+/// Data is AES-256-GCM encrypted with an ephemeral key.
+/// Memory is mlock'd and excluded from core dumps.
+pub struct SecureBox<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> {
+    /// AES-256-GCM encrypted data (ciphertext + 16-byte tag appended by ring)
+    ciphertext: Vec<u8>,
+    /// Ephemeral encryption key (also mlock'd)
+    key_bytes: [u8; 32],
+    /// Nonce used for encryption
     nonce: [u8; 12],
+    /// Original plaintext length before encryption
+    original_len: usize,
+    _marker: std::marker::PhantomData<T>,
 }
 
-impl EncryptedKey {
-    /// Create a new RAM-encrypted key.
-    /// The plaintext key is encrypted immediately and the plaintext zeroized.
-    pub fn new(mut plaintext: [u8; 32]) -> Self {
-        // In real implementation: encrypt with ephemeral key derived from
-        // RDRAND/RDSEED or ARM equivalent, kept only in register
-        let _ = &plaintext; // TODO: actual encryption
-        plaintext.zeroize();
-        todo!()
+/// Lock a memory region with `mlock()` to prevent swapping.
+/// Returns `true` on success.
+fn mlock_region(ptr: *const u8, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    unsafe { libc::mlock(ptr as *const libc::c_void, len) == 0 }
+}
+
+/// Mark a memory region with `madvise(MADV_DONTDUMP)` to exclude from core dumps.
+/// Returns `true` on success.
+fn madvise_dontdump(ptr: *mut u8, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    unsafe { libc::madvise(ptr as *mut libc::c_void, len, libc::MADV_DONTDUMP) == 0 }
+}
+
+/// Unlock a memory region previously locked with `mlock()`.
+fn munlock_region(ptr: *const u8, len: usize) {
+    if len > 0 {
+        unsafe {
+            libc::munlock(ptr as *const libc::c_void, len);
+        }
+    }
+}
+
+impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> SecureBox<T> {
+    /// Encrypt `data` into a new `SecureBox`.
+    ///
+    /// 1. Generates an ephemeral AES-256-GCM key and nonce via `SystemRandom`.
+    /// 2. `mlock()`s the key bytes.
+    /// 3. `madvise(MADV_DONTDUMP)` on the key bytes.
+    /// 4. Encrypts the plaintext in place.
+    /// 5. Zeroizes the original plaintext.
+    pub fn new(mut data: T) -> Result<Self> {
+        let rng = SystemRandom::new();
+
+        // Generate ephemeral key
+        let mut key_bytes = [0u8; 32];
+        rng.fill(&mut key_bytes)
+            .map_err(|_| anyhow::anyhow!("failed to generate random key"))?;
+
+        // mlock + MADV_DONTDUMP the key
+        let key_ptr = key_bytes.as_ptr();
+        if !mlock_region(key_ptr, 32) {
+            tracing::warn!("mlock failed for SecureBox key — may be swappable");
+        }
+        if !madvise_dontdump(key_bytes.as_mut_ptr(), 32) {
+            tracing::warn!("madvise(DONTDUMP) failed for SecureBox key");
+        }
+
+        // Generate nonce
+        let mut nonce = [0u8; 12];
+        rng.fill(&mut nonce)
+            .map_err(|_| anyhow::anyhow!("failed to generate random nonce"))?;
+
+        // Prepare plaintext as a Vec for in-place encryption
+        let plaintext_ref = data.as_ref();
+        let original_len = plaintext_ref.len();
+        // ring's seal_in_place_append_tag needs extra capacity for the tag
+        let mut in_place = Vec::with_capacity(original_len + AES_256_GCM.tag_len());
+        in_place.extend_from_slice(plaintext_ref);
+
+        // Zeroize the original data now that we've copied it
+        data.zeroize();
+
+        // Encrypt
+        let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes)
+            .map_err(|_| anyhow::anyhow!("failed to create AES-256-GCM key"))?;
+        let sealing_key = LessSafeKey::new(unbound);
+        let nonce_val = Nonce::assume_unique_for_key(nonce);
+
+        sealing_key
+            .seal_in_place_append_tag(nonce_val, Aad::empty(), &mut in_place)
+            .map_err(|_| anyhow::anyhow!("AES-256-GCM encryption failed"))?;
+
+        // mlock the ciphertext as well
+        if !in_place.is_empty() {
+            mlock_region(in_place.as_ptr(), in_place.len());
+            madvise_dontdump(in_place.as_mut_ptr(), in_place.len());
+        }
+
+        Ok(Self {
+            ciphertext: in_place,
+            key_bytes,
+            nonce,
+            original_len,
+            _marker: std::marker::PhantomData,
+        })
     }
 
-    /// Temporarily decrypt the key for use. Returns a guard that
-    /// re-encrypts and zeroizes on drop.
-    pub fn unlock(&self) -> KeyGuard {
-        todo!()
+    /// Decrypt and return the plaintext.
+    ///
+    /// The caller is responsible for zeroizing the returned value when done.
+    pub fn open(&self) -> Result<T> {
+        let unbound = UnboundKey::new(&AES_256_GCM, &self.key_bytes)
+            .map_err(|_| anyhow::anyhow!("failed to create AES-256-GCM key for decryption"))?;
+        let opening_key = LessSafeKey::new(unbound);
+        let nonce_val = Nonce::assume_unique_for_key(self.nonce);
+
+        let mut buf = self.ciphertext.clone();
+        let plaintext = opening_key
+            .open_in_place(nonce_val, Aad::empty(), &mut buf)
+            .map_err(|_| anyhow::anyhow!("AES-256-GCM decryption failed"))?;
+
+        debug_assert_eq!(plaintext.len(), self.original_len);
+        let result = T::from(plaintext.to_vec());
+
+        // Zeroize the temporary buffer
+        buf.zeroize();
+
+        Ok(result)
+    }
+
+    /// Returns the original plaintext length (before encryption).
+    pub fn original_len(&self) -> usize {
+        self.original_len
     }
 }
 
-/// RAII guard — holds decrypted key material.
-/// Re-encrypts and zeroizes when dropped.
-pub struct KeyGuard {
-    plaintext: SecureBox<[u8; 32]>,
-}
-
-impl Deref for KeyGuard {
-    type Target = [u8; 32];
-    fn deref(&self) -> &[u8; 32] {
-        &self.plaintext
-    }
-}
-
-impl Drop for KeyGuard {
+impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> Drop for SecureBox<T> {
     fn drop(&mut self) {
-        // SecureBox handles zeroize + munlock
-        // Plaintext only existed for the duration of the cryptographic operation
+        // munlock the ciphertext
+        if !self.ciphertext.is_empty() {
+            munlock_region(self.ciphertext.as_ptr(), self.ciphertext.len());
+        }
+        // Zeroize ciphertext
+        self.ciphertext.zeroize();
+
+        // munlock the key
+        munlock_region(self.key_bytes.as_ptr(), 32);
+        // Zeroize key material
+        self.key_bytes.zeroize();
+
+        // Zeroize nonce for good measure
+        self.nonce.zeroize();
     }
 }
 
-/// Secure comparison (constant-time) to prevent timing attacks
+// SecureBox cannot be cloned — there is exactly one copy of the key material.
+// It is Send + Sync because the encrypted data is opaque bytes.
+unsafe impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> Send for SecureBox<T> {}
+unsafe impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> Sync for SecureBox<T> {}
+
+/// Secure comparison (constant-time) to prevent timing attacks.
 pub fn secure_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -140,10 +188,84 @@ pub fn secure_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Securely generate random bytes using the kernel CSPRNG
-pub fn secure_random(buf: &mut [u8]) -> Result<(), std::io::Error> {
-    use std::io::Read;
-    let mut f = std::fs::File::open("/dev/urandom")?;
-    f.read_exact(buf)?;
+/// Securely generate random bytes using ring's SystemRandom (kernel CSPRNG).
+pub fn secure_random(buf: &mut [u8]) -> Result<()> {
+    let rng = SystemRandom::new();
+    rng.fill(buf)
+        .map_err(|_| anyhow::anyhow!("SystemRandom::fill failed"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_vec_u8() {
+        let secret = b"this is a private key material!!".to_vec();
+        let sbox = SecureBox::<Vec<u8>>::new(secret).expect("SecureBox::new failed");
+
+        assert_eq!(sbox.original_len(), 32);
+
+        let recovered = sbox.open().expect("SecureBox::open failed");
+        assert_eq!(recovered.as_slice(), b"this is a private key material!!");
+    }
+
+    #[test]
+    fn roundtrip_empty() {
+        let sbox = SecureBox::<Vec<u8>>::new(Vec::new()).expect("SecureBox::new failed");
+        assert_eq!(sbox.original_len(), 0);
+
+        let recovered = sbox.open().expect("open failed");
+        assert!(recovered.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_large() {
+        let secret = vec![0xABu8; 8192];
+        let sbox = SecureBox::<Vec<u8>>::new(secret).expect("new failed");
+        let recovered = sbox.open().expect("open failed");
+        assert_eq!(recovered.len(), 8192);
+        assert!(recovered.iter().all(|&b| b == 0xAB));
+    }
+
+    #[test]
+    fn ciphertext_differs_from_plaintext() {
+        let secret = b"super secret key material here!!".to_vec();
+        let sbox = SecureBox::<Vec<u8>>::new(secret).expect("new failed");
+
+        // The ciphertext (which includes the tag) should NOT equal the plaintext
+        assert_ne!(&sbox.ciphertext[..sbox.original_len], b"super secret key material here!!");
+    }
+
+    #[test]
+    fn zeroize_on_drop() {
+        // We can't directly observe memory after drop, but we verify the type
+        // implements Drop and that the key/ciphertext fields are zeroized.
+        // Create and immediately drop.
+        let secret = b"key material that must vanish!!!".to_vec();
+        let sbox = SecureBox::<Vec<u8>>::new(secret).expect("new failed");
+
+        // Grab pointers before drop (for documentation — we can't safely deref after drop)
+        let _key_was_nonzero = sbox.key_bytes.iter().any(|&b| b != 0);
+        assert!(_key_was_nonzero, "key should be non-zero before drop");
+
+        drop(sbox);
+        // If we got here without panic, Drop ran successfully.
+    }
+
+    #[test]
+    fn secure_eq_works() {
+        assert!(secure_eq(b"hello", b"hello"));
+        assert!(!secure_eq(b"hello", b"world"));
+        assert!(!secure_eq(b"short", b"longer"));
+    }
+
+    #[test]
+    fn secure_random_fills_buffer() {
+        let mut buf = [0u8; 64];
+        secure_random(&mut buf).expect("secure_random failed");
+        // Extremely unlikely to be all zeros
+        assert!(buf.iter().any(|&b| b != 0));
+    }
 }

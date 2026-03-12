@@ -127,7 +127,7 @@ async fn start_services() -> Result<()> {
 
     // Phase 4: Logging with forward secrecy
     tracing::info!("initializing encrypted log");
-    sfgw_log::init(&db).await?;
+    let _log = sfgw_log::LogManager::init(&db).await?;
 
     // Phase 5: Network stack
     tracing::info!("configuring network");
@@ -177,42 +177,168 @@ async fn show_status() -> Result<()> {
 
 async fn handle_fw(cmd: FwCommands) -> Result<()> {
     match cmd {
-        FwCommands::List => { /* TODO */ }
-        FwCommands::Reload => { /* TODO */ }
+        FwCommands::List => {
+            let db = sfgw_db::open_or_create().await?;
+            let rules = sfgw_fw::load_rules(&db).await?;
+            for rule in &rules {
+                let status = if rule.enabled { "ON " } else { "OFF" };
+                let id = rule.id.unwrap_or(0);
+                println!(
+                    "[{status}] #{id} {chain} p={pri} {detail}",
+                    chain = rule.chain,
+                    pri = rule.priority,
+                    detail = serde_json::to_string(&rule.detail)?
+                );
+            }
+            println!("{} rules total", rules.len());
+        }
+        FwCommands::Reload => {
+            let db = sfgw_db::open_or_create().await?;
+            sfgw_fw::apply_rules(&db).await?;
+            println!("Firewall rules applied.");
+        }
     }
     Ok(())
 }
 
 async fn handle_vpn(cmd: VpnCommands) -> Result<()> {
     match cmd {
-        VpnCommands::Status => { /* TODO */ }
-        VpnCommands::WgUp => { /* TODO */ }
-        VpnCommands::WgDown => { /* TODO */ }
+        VpnCommands::Status => {
+            let db = sfgw_db::open_or_create().await?;
+            let tunnels = sfgw_vpn::tunnel::list_tunnels(&db).await?;
+            for t in &tunnels {
+                let status = if t.enabled { "UP" } else { "DOWN" };
+                println!(
+                    "[{status}] {} port={} peers={}",
+                    t.name,
+                    t.listen_port,
+                    t.peers.len()
+                );
+            }
+        }
+        VpnCommands::WgUp => {
+            let db = sfgw_db::open_or_create().await?;
+            let tunnels = sfgw_vpn::tunnel::list_tunnels(&db).await?;
+            for t in tunnels.iter().filter(|t| t.enabled) {
+                sfgw_vpn::tunnel::start_tunnel(&db, &t.name).await?;
+                println!("Started tunnel: {}", t.name);
+            }
+        }
+        VpnCommands::WgDown => {
+            let db = sfgw_db::open_or_create().await?;
+            let tunnels = sfgw_vpn::tunnel::list_tunnels(&db).await?;
+            for t in &tunnels {
+                let _ = sfgw_vpn::tunnel::stop_tunnel(&db, &t.name).await;
+                println!("Stopped tunnel: {}", t.name);
+            }
+        }
     }
     Ok(())
 }
 
 async fn handle_net(cmd: NetCommands) -> Result<()> {
     match cmd {
-        NetCommands::Interfaces => { /* TODO */ }
-        NetCommands::Vlans => { /* TODO */ }
+        NetCommands::Interfaces => {
+            let db = sfgw_db::open_or_create().await?;
+            let ifaces = sfgw_net::list_interfaces(&db).await?;
+            for iface in &ifaces {
+                let status = if iface.is_up { "UP  " } else { "DOWN" };
+                println!(
+                    "[{status}] {name:<12} {mac:<18} {role:<8} mtu={mtu} ips={ips}",
+                    name = iface.name,
+                    mac = iface.mac,
+                    role = iface.role,
+                    mtu = iface.mtu,
+                    ips = iface.ips.join(", ")
+                );
+            }
+        }
+        NetCommands::Vlans => {
+            let db = sfgw_db::open_or_create().await?;
+            let vlans: Vec<(String, String, i64)> = {
+                let conn = db.lock().await;
+                let mut stmt = conn.prepare(
+                    "SELECT name, role, vlan_id FROM interfaces WHERE vlan_id IS NOT NULL",
+                )?;
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .filter_map(|r| r.ok())
+                    .collect()
+            };
+            if vlans.is_empty() {
+                println!("No VLANs configured.");
+            } else {
+                for (name, role, vlan_id) in &vlans {
+                    println!("VLAN {vlan_id}: {name} ({role})");
+                }
+            }
+        }
     }
     Ok(())
 }
 
 async fn handle_adopt(cmd: AdoptCommands) -> Result<()> {
     match cmd {
-        AdoptCommands::Scan => { /* TODO */ }
-        AdoptCommands::Device { mac } => { tracing::info!("adopting {mac}"); }
+        AdoptCommands::Scan => {
+            let db = sfgw_db::open_or_create().await?;
+            let pending = sfgw_adopt::list_pending(&db).await?;
+            let all = sfgw_adopt::list_devices(&db).await?;
+            println!(
+                "{} devices total, {} pending approval",
+                all.len(),
+                pending.len()
+            );
+            for d in &all {
+                println!(
+                    "  {} {} {:?} state={}",
+                    d.mac,
+                    d.ip.as_deref().unwrap_or("-"),
+                    d.model.as_deref().unwrap_or("-"),
+                    d.state
+                );
+            }
+        }
+        AdoptCommands::Device { mac } => {
+            let db = sfgw_db::open_or_create().await?;
+            let ca = sfgw_adopt::start(&db).await?;
+            let request = sfgw_adopt::AdoptionRequest {
+                device_mac: mac.clone(),
+                device_model: String::new(),
+                device_ip: String::new(),
+                device_public_key: String::new(),
+                device_kem_public_key: None,
+            };
+            sfgw_adopt::approve_device(&db, &ca, &request).await?;
+            println!("Device {mac} approved.");
+        }
     }
     Ok(())
 }
 
 async fn handle_crypto(cmd: CryptoCommands) -> Result<()> {
     match cmd {
-        CryptoCommands::Init => { /* TODO */ }
-        CryptoCommands::Unlock => { /* TODO */ }
-        CryptoCommands::Status => { /* TODO */ }
+        CryptoCommands::Init => {
+            let platform = sfgw_hal::init()?;
+            println!("Platform: {platform}");
+            println!("LUKS2 init not yet supported via CLI. Use system tools.");
+        }
+        CryptoCommands::Unlock => {
+            let platform = sfgw_hal::init()?;
+            sfgw_crypto::auto_unlock(&platform).await?;
+            println!("Crypto unlock complete.");
+        }
+        CryptoCommands::Status => {
+            let platform = sfgw_hal::init()?;
+            println!("Platform: {platform}");
+            println!(
+                "HDD: {}",
+                if platform.has_hdd() {
+                    "present"
+                } else {
+                    "none"
+                }
+            );
+            println!("Encryption: pending implementation");
+        }
     }
     Ok(())
 }

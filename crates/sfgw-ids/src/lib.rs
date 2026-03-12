@@ -130,8 +130,20 @@ pub async fn start(db: &sfgw_db::Db, role: IdsRole) -> Result<()> {
         }
 
         IdsRole::AccessPoint => {
-            // AP: placeholder for wireless-specific monitors (deauth, evil twin, rogue AP)
-            tracing::info!("AP mode: wireless IDS monitors not yet implemented");
+            // Future work: wireless-specific IDS monitors.
+            //
+            // AP-mode detection targets:
+            // - Deauthentication floods: mass deauth frames targeting clients (Wi-Fi DoS).
+            // - Evil twin detection: another AP advertising the same SSID with a
+            //   different BSSID or on a different channel.
+            // - Rogue AP discovery: unauthorized access points appearing on the
+            //   managed network (detected via beacon frame analysis).
+            // - Client disassociation anomalies: unexpected patterns in
+            //   disassoc/deauth frames that indicate an active attack.
+            //
+            // These require monitor-mode wireless interfaces (e.g. via nl80211)
+            // and 802.11 frame parsing, which will be added in a future release.
+            tracing::info!("AP mode: wireless IDS monitors not yet implemented (see roadmap)");
         }
     }
 

@@ -12,3 +12,7 @@ tokio.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
 libc.workspace = true
+ring.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

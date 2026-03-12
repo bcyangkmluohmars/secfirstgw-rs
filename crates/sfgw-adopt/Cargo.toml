@@ -18,3 +18,5 @@ x25519-dalek = { workspace = true, features = ["static_secrets"] }
 base64.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+fips203.workspace = true
+fips204.workspace = true

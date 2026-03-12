@@ -7,6 +7,16 @@ license.workspace = true
 
 [dependencies]
 sfgw-db = { path = "../sfgw-db" }
-anyhow.workspace = true
-tokio.workspace = true
+ring.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+zeroize.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

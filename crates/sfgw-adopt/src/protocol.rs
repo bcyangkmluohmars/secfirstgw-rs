@@ -6,17 +6,19 @@
 //! 1. **Discovery** — device connects to gateway :8080, gateway records it as
 //!    `Discovered`, then immediately transitions to `Pending`.
 //! 2. **Pending** — admin sees the device in the UI and must manually approve.
-//! 3. **Approval** — admin approves → gateway initiates key exchange.
-//! 4. **Key Exchange** — X25519 ECDH (+ ML-KEM-1024 placeholder for PQ).
+//! 3. **Approval** — admin approves -> gateway initiates key exchange.
+//! 4. **Key Exchange** — hybrid X25519 ECDH + ML-KEM-1024 (FIPS 203).
 //! 5. **Certificate Issue** — gateway CA signs a client cert for the device.
 //! 6. **Adoption Complete** — device receives: gateway CA cert (pinned), its
-//!    own client cert, and the shared symmetric key derived from ECDH.
+//!    own client cert, and the shared symmetric key derived from hybrid KE.
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use fips203::ml_kem_1024;
+use fips203::traits::{Encaps, SerDes};
 use ring::rand::SecureRandom;
+use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::ca::GatewayCA;
@@ -34,7 +36,7 @@ pub struct AdoptionResponse {
     pub gateway_ecdh_public: String,
     /// Initial sequence number (monotone counter).
     pub initial_sequence: u64,
-    /// **TODO**: ML-KEM-1024 ciphertext for hybrid PQ key exchange.
+    /// ML-KEM-1024 ciphertext for hybrid PQ key exchange (base64).
     pub ml_kem_ciphertext: Option<String>,
 }
 
@@ -161,15 +163,45 @@ pub async fn approve_device(
     device_pub_arr.copy_from_slice(&device_pub_bytes);
     let device_pub = PublicKey::from(device_pub_arr);
 
-    let shared_secret = gw_secret.diffie_hellman(&device_pub);
-    // TODO: Combine with ML-KEM-1024 shared secret for hybrid PQ.
+    let x25519_shared = gw_secret.diffie_hellman(&device_pub);
 
-    // 3. Sign device certificate.
-    let device_cert_pem = ca.sign_device_cert(&request.device_mac, &device_pub_bytes)?;
+    // 3. ML-KEM-1024 hybrid key encapsulation (FIPS 203).
+    let mut ml_kem_ct_b64: Option<String> = None;
+    let mut pq_shared_bytes: Option<[u8; 32]> = None;
 
-    // 4. Derive symmetric key (HKDF via ring).
-    let salt = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA256, b"sfgw-adopt-v1");
-    let prk = salt.extract(shared_secret.as_bytes());
+    if let Some(ref device_kem_pk_b64) = request.device_kem_public_key {
+        let device_ek_bytes = B64
+            .decode(device_kem_pk_b64)
+            .context("invalid device ML-KEM encapsulation key base64")?;
+        let device_ek_arr: [u8; ml_kem_1024::EK_LEN] = device_ek_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "device ML-KEM-1024 encapsulation key must be {} bytes, got {}",
+                    ml_kem_1024::EK_LEN,
+                    device_ek_bytes.len()
+                )
+            })?;
+        let device_ek = ml_kem_1024::EncapsKey::try_from_bytes(device_ek_arr)
+            .map_err(|e| anyhow::anyhow!("invalid ML-KEM-1024 encapsulation key: {e:?}"))?;
+        let (pq_ss, ct) = device_ek
+            .try_encaps()
+            .map_err(|e| anyhow::anyhow!("ML-KEM-1024 encapsulation failed: {e:?}"))?;
+        let ct_bytes = ct.into_bytes();
+        ml_kem_ct_b64 = Some(B64.encode(ct_bytes));
+        pq_shared_bytes = Some(pq_ss.into_bytes());
+    }
+
+    // 4. Combine shared secrets via HKDF for hybrid key derivation.
+    let mut ikm = Vec::with_capacity(64);
+    ikm.extend_from_slice(x25519_shared.as_bytes());
+    if let Some(pq_ss) = &pq_shared_bytes {
+        ikm.extend_from_slice(pq_ss);
+    }
+
+    let salt = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA256, b"sfgw-adopt-v1-hybrid");
+    let prk = salt.extract(&ikm);
     let mut symmetric_key = [0u8; 32];
     let okm = prk
         .expand(&[b"device-symmetric-key"], ring::hkdf::HKDF_SHA256)
@@ -177,9 +209,12 @@ pub async fn approve_device(
     okm.fill(&mut symmetric_key)
         .map_err(|_| anyhow::anyhow!("HKDF fill failed"))?;
 
+    // 5. Sign device certificate.
+    let device_cert_pem = ca.sign_device_cert(&request.device_mac, &device_pub_bytes)?;
+
     let initial_sequence: u64 = 1;
 
-    // 5. Persist adoption state.
+    // 6. Persist adoption state.
     let adopted_device = AdoptedDevice {
         id: device_id,
         mac: request.device_mac.clone(),
@@ -207,14 +242,18 @@ pub async fn approve_device(
         )?;
     }
 
-    tracing::info!(mac = %request.device_mac, "device adopted successfully");
+    tracing::info!(
+        mac = %request.device_mac,
+        hybrid_pq = pq_shared_bytes.is_some(),
+        "device adopted successfully"
+    );
 
     Ok(AdoptionResponse {
         gateway_ca_cert: ca.cert_pem.clone(),
         device_cert: device_cert_pem,
         gateway_ecdh_public: B64.encode(gw_public.as_bytes()),
         initial_sequence,
-        ml_kem_ciphertext: None, // TODO: ML-KEM-1024
+        ml_kem_ciphertext: ml_kem_ct_b64,
     })
 }
 

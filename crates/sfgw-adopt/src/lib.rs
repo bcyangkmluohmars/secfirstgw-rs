@@ -7,10 +7,10 @@
 //! - Manual approval — admin must confirm (no auto-adopt)
 //! - Mutual TLS — device gets client cert signed by gateway CA
 //! - Certificate pinning — device accepts only the gateway CA
-//! - Hybrid PQ key exchange — X25519 + ML-KEM-1024 (placeholder)
+//! - Hybrid PQ key exchange — X25519 + ML-KEM-1024 (FIPS 203)
 //! - Monotone sequence numbers — prevents config replay / firmware downgrade
-//! - Signed configs — Ed25519 (+ ML-DSA-65 TODO)
-//! - Signed firmware — Ed25519 (+ ML-DSA-65 TODO)
+//! - Signed configs — ML-DSA-65 (FIPS 204)
+//! - Signed firmware — ML-DSA-65 (FIPS 204)
 
 pub mod ca;
 pub mod inform;
@@ -88,6 +88,11 @@ pub struct AdoptionRequest {
     pub device_ip: String,
     /// Base64-encoded X25519 public key provided by the device.
     pub device_public_key: String,
+    /// Base64-encoded ML-KEM-1024 encapsulation key provided by the device
+    /// for hybrid post-quantum key exchange (FIPS 203). Optional for
+    /// backwards compatibility with devices that do not support PQ.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_kem_public_key: Option<String>,
 }
 
 /// Summary row returned by list functions.
@@ -111,7 +116,7 @@ pub struct DeviceSummary {
 /// a handle to it.
 pub async fn start(db: &Db) -> Result<ca::GatewayCA> {
     let ca = ca::GatewayCA::init(db).await?;
-    tracing::info!("adoption service ready (PQ key exchange pending)");
+    tracing::info!("adoption service ready (hybrid X25519 + ML-KEM-1024, ML-DSA-65 signing)");
     Ok(ca)
 }
 
@@ -224,4 +229,175 @@ pub async fn push_config(db: &Db, mac: &str, new_config: serde_json::Value) -> R
 
     tracing::info!(mac = %mac, seq = next_seq, "config push queued");
     Ok(next_seq)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
+    /// ML-KEM-1024 keygen / encaps / decaps roundtrip.
+    #[test]
+    fn ml_kem_1024_roundtrip() {
+        use fips203::ml_kem_1024;
+        use fips203::traits::{Decaps, Encaps, KeyGen, SerDes};
+
+        // Keygen
+        let (ek, dk) = ml_kem_1024::KG::try_keygen().expect("ML-KEM-1024 keygen");
+
+        // Serialise and deserialise the encapsulation key (simulates network transit).
+        let ek_bytes = ek.into_bytes();
+        let ek2 = ml_kem_1024::EncapsKey::try_from_bytes(ek_bytes)
+            .expect("deserialise encapsulation key");
+
+        // Encapsulate
+        let (ss_enc, ct) = ek2.try_encaps().expect("encapsulation");
+
+        // Serialise ciphertext (simulates network transit).
+        let ct_bytes = ct.into_bytes();
+        let ct2 = ml_kem_1024::CipherText::try_from_bytes(ct_bytes)
+            .expect("deserialise ciphertext");
+
+        // Decapsulate
+        let ss_dec = dk.try_decaps(&ct2).expect("decapsulation");
+
+        assert_eq!(
+            ss_enc.into_bytes(),
+            ss_dec.into_bytes(),
+            "shared secrets must match after encaps/decaps roundtrip"
+        );
+    }
+
+    /// ML-DSA-65 sign / verify roundtrip.
+    #[test]
+    fn ml_dsa_65_sign_verify_roundtrip() {
+        use fips204::ml_dsa_65;
+        use fips204::traits::{KeyGen, SerDes, Signer, Verifier};
+
+        let (vk, sk) = ml_dsa_65::KG::try_keygen().expect("ML-DSA-65 keygen");
+
+        let message = b"test payload for ML-DSA-65 signing";
+        let context = b"";
+
+        let sig_bytes = sk.try_sign(message, context).expect("signing");
+
+        // Deserialise and verify.
+        let vk_bytes = vk.into_bytes();
+        let vk2 = ml_dsa_65::PublicKey::try_from_bytes(vk_bytes)
+            .expect("deserialise public key");
+
+        let valid = vk2.verify(message, &sig_bytes, context);
+        assert!(valid, "ML-DSA-65 signature must verify");
+
+        // Tampered message must not verify.
+        let invalid = vk2.verify(b"tampered message", &sig_bytes, context);
+        assert!(!invalid, "tampered message must not verify");
+    }
+
+    /// Hybrid key derivation: HKDF over X25519 + ML-KEM-1024 shared secrets.
+    #[test]
+    fn hybrid_key_derivation() {
+        use fips203::ml_kem_1024;
+        use fips203::traits::{Decaps, Encaps, KeyGen, SerDes};
+        use ring::hkdf;
+        use x25519_dalek::{PublicKey, StaticSecret};
+
+        // X25519
+        let rng = ring::rand::SystemRandom::new();
+        let mut dev_bytes = [0u8; 32];
+        ring::rand::SecureRandom::fill(&rng, &mut dev_bytes).expect("rng");
+        let device_secret = StaticSecret::from(dev_bytes);
+        let device_public = PublicKey::from(&device_secret);
+        let mut gw_bytes = [0u8; 32];
+        ring::rand::SecureRandom::fill(&rng, &mut gw_bytes).expect("rng");
+        let gw_secret = StaticSecret::from(gw_bytes);
+        let gw_public = PublicKey::from(&gw_secret);
+
+        let x25519_ss_device = device_secret.diffie_hellman(&gw_public);
+        let x25519_ss_gw = gw_secret.diffie_hellman(&device_public);
+        assert_eq!(x25519_ss_device.as_bytes(), x25519_ss_gw.as_bytes());
+
+        // ML-KEM-1024
+        let (ek, dk) = ml_kem_1024::KG::try_keygen().expect("keygen");
+        let ek_bytes = ek.into_bytes();
+        let ek2 = ml_kem_1024::EncapsKey::try_from_bytes(ek_bytes).expect("deser ek");
+        let (pq_ss_enc, ct) = ek2.try_encaps().expect("encaps");
+        let ct2 = ml_kem_1024::CipherText::try_from_bytes(ct.into_bytes()).expect("deser ct");
+        let pq_ss_dec = dk.try_decaps(&ct2).expect("decaps");
+        let pq_enc_bytes = pq_ss_enc.into_bytes();
+        let pq_dec_bytes = pq_ss_dec.into_bytes();
+        assert_eq!(pq_enc_bytes, pq_dec_bytes);
+
+        // Hybrid HKDF
+        let mut ikm = Vec::new();
+        ikm.extend_from_slice(x25519_ss_gw.as_bytes());
+        ikm.extend_from_slice(&pq_dec_bytes);
+
+        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"sfgw-adopt-v1-hybrid");
+        let prk = salt.extract(&ikm);
+        let mut key = [0u8; 32];
+        let okm = prk
+            .expand(&[b"device-symmetric-key"], hkdf::HKDF_SHA256)
+            .expect("HKDF expand");
+        okm.fill(&mut key).expect("HKDF fill");
+
+        // Key must be non-zero (extremely unlikely to be all zeros).
+        assert_ne!(key, [0u8; 32], "derived key must not be all zeros");
+    }
+
+    /// AES-256-GCM encrypt / decrypt roundtrip via inform helpers.
+    #[test]
+    fn inform_encrypt_decrypt_roundtrip() {
+        use crate::inform::InformResponse;
+
+        let response = InformResponse {
+            sequence_number: 42,
+            config_update: None,
+            firmware_update: None,
+            inform_interval_secs: 30,
+        };
+
+        let key = [0xABu8; 32];
+        let encrypted = crate::inform::encrypt_response(&response, &key)
+            .expect("encryption");
+
+        // Decrypt the base64 ciphertext back.
+        let ct_bytes = B64.decode(&encrypted).expect("base64 decode");
+        let plaintext = crate::inform::aes_256_gcm_decrypt(&key, &ct_bytes)
+            .expect("decryption");
+        let recovered: InformResponse =
+            serde_json::from_slice(&plaintext).expect("JSON parse");
+
+        assert_eq!(recovered.sequence_number, 42);
+        assert_eq!(recovered.inform_interval_secs, 30);
+    }
+
+    /// AES-256-GCM: tampered ciphertext must fail authentication.
+    #[test]
+    fn inform_decrypt_tampered_fails() {
+        use crate::inform::InformResponse;
+
+        let response = InformResponse {
+            sequence_number: 1,
+            config_update: None,
+            firmware_update: None,
+            inform_interval_secs: 30,
+        };
+
+        let key = [0xCDu8; 32];
+        let encrypted = crate::inform::encrypt_response(&response, &key)
+            .expect("encryption");
+
+        let mut ct_bytes = B64.decode(&encrypted).expect("base64 decode");
+        // Flip a byte in the ciphertext (after the 12-byte nonce).
+        if ct_bytes.len() > 13 {
+            ct_bytes[13] ^= 0xFF;
+        }
+
+        let result = crate::inform::aes_256_gcm_decrypt(&key, &ct_bytes);
+        assert!(result.is_err(), "tampered ciphertext must fail decryption");
+    }
 }

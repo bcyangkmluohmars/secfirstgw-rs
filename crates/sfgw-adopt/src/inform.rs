@@ -14,6 +14,8 @@
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::Utc;
+use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 use sfgw_db::Db;
 
@@ -104,7 +106,7 @@ pub async fn handle_inform(
         if !pending.is_null() {
             let new_seq = stored_seq + 1;
             let config_blob = serde_json::to_vec(pending)?;
-            let signed = signing::sign_config(&config_blob, ca);
+            let signed = signing::sign_config(&config_blob, ca)?;
 
             // Update stored sequence number and clear pending config.
             cfg["sequence_number"] = serde_json::json!(new_seq);
@@ -129,7 +131,7 @@ pub async fn handle_inform(
             let sha256 = fw.get("sha256").and_then(|v| v.as_str()).unwrap_or("");
             let url = fw.get("url").and_then(|v| v.as_str()).unwrap_or("");
             if !version.is_empty() {
-                let manifest = signing::sign_firmware_manifest(version, sha256, url, ca);
+                let manifest = signing::sign_firmware_manifest(version, sha256, url, ca)?;
                 cfg["pending_firmware"] = serde_json::json!(null);
                 conn.execute(
                     "UPDATE devices SET config = ?1 WHERE id = ?2",
@@ -161,21 +163,76 @@ pub async fn handle_inform(
 
 /// Encrypt an inform response for a specific device using its symmetric key.
 ///
-/// Returns base64-encoded ciphertext.
-/// **TODO**: implement AES-256-GCM encryption using the device's symmetric key.
-pub fn encrypt_response(_response: &InformResponse, _symmetric_key: &[u8]) -> Result<String> {
-    // Placeholder — in production this would AES-256-GCM encrypt.
-    let json = serde_json::to_string(_response)?;
-    Ok(B64.encode(json.as_bytes()))
+/// Uses AES-256-GCM. Returns base64-encoded `nonce || ciphertext || tag`.
+pub fn encrypt_response(response: &InformResponse, symmetric_key: &[u8]) -> Result<String> {
+    if symmetric_key.len() != 32 {
+        bail!("symmetric key must be 32 bytes, got {}", symmetric_key.len());
+    }
+    let json = serde_json::to_vec(response)?;
+    let encrypted = aes_256_gcm_encrypt(symmetric_key, &json)?;
+    Ok(B64.encode(&encrypted))
 }
 
 /// Decrypt an inform payload from a device.
 ///
-/// **TODO**: implement AES-256-GCM decryption using the device's symmetric key.
-pub fn decrypt_payload(_ciphertext: &str, _symmetric_key: &[u8]) -> Result<InformPayload> {
-    // Placeholder — in production this would AES-256-GCM decrypt.
-    let bytes = B64
-        .decode(_ciphertext)
+/// Expects base64-encoded `nonce || ciphertext || tag`.
+pub fn decrypt_payload(ciphertext_b64: &str, symmetric_key: &[u8]) -> Result<InformPayload> {
+    if symmetric_key.len() != 32 {
+        bail!("symmetric key must be 32 bytes, got {}", symmetric_key.len());
+    }
+    let ciphertext = B64
+        .decode(ciphertext_b64)
         .context("invalid base64 in inform payload")?;
-    serde_json::from_slice(&bytes).context("invalid JSON in inform payload")
+    let plaintext = aes_256_gcm_decrypt(symmetric_key, &ciphertext)?;
+    serde_json::from_slice(&plaintext).context("invalid JSON in decrypted inform payload")
+}
+
+// ---------------------------------------------------------------------------
+// AES-256-GCM helpers
+// ---------------------------------------------------------------------------
+
+/// Encrypt `plaintext` with AES-256-GCM. Returns `nonce (12 bytes) || ciphertext || tag (16 bytes)`.
+pub(crate) fn aes_256_gcm_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    let unbound = UnboundKey::new(&AES_256_GCM, key)
+        .map_err(|_| anyhow::anyhow!("invalid AES-256-GCM key"))?;
+    let sealing_key = LessSafeKey::new(unbound);
+
+    let rng = ring::rand::SystemRandom::new();
+    let mut nonce_bytes = [0u8; aead::NONCE_LEN];
+    rng.fill(&mut nonce_bytes)
+        .map_err(|_| anyhow::anyhow!("RNG failure generating nonce"))?;
+
+    let nonce = Nonce::assume_unique_for_key(nonce_bytes);
+    let mut in_out = plaintext.to_vec();
+    sealing_key
+        .seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out)
+        .map_err(|_| anyhow::anyhow!("AES-256-GCM seal failed"))?;
+
+    // Prepend nonce to ciphertext+tag.
+    let mut output = Vec::with_capacity(aead::NONCE_LEN + in_out.len());
+    output.extend_from_slice(&nonce_bytes);
+    output.extend_from_slice(&in_out);
+    Ok(output)
+}
+
+/// Decrypt AES-256-GCM ciphertext. Input must be `nonce (12 bytes) || ciphertext || tag (16 bytes)`.
+pub(crate) fn aes_256_gcm_decrypt(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
+    if data.len() < aead::NONCE_LEN + AES_256_GCM.tag_len() {
+        bail!("ciphertext too short for AES-256-GCM");
+    }
+    let (nonce_bytes, encrypted) = data.split_at(aead::NONCE_LEN);
+    let nonce_arr: [u8; aead::NONCE_LEN] = nonce_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("nonce wrong length"))?;
+
+    let unbound = UnboundKey::new(&AES_256_GCM, key)
+        .map_err(|_| anyhow::anyhow!("invalid AES-256-GCM key"))?;
+    let opening_key = LessSafeKey::new(unbound);
+
+    let nonce = Nonce::assume_unique_for_key(nonce_arr);
+    let mut in_out = encrypted.to_vec();
+    let plaintext = opening_key
+        .open_in_place(nonce, Aad::empty(), &mut in_out)
+        .map_err(|_| anyhow::anyhow!("AES-256-GCM decryption/authentication failed"))?;
+    Ok(plaintext.to_vec())
 }

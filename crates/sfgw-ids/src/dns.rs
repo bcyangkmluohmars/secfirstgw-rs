@@ -432,10 +432,21 @@ pub async fn start_monitor(
 
     let raw_fd = fd.as_raw_fd();
 
-    // TODO: load authorized servers from config/DB
-    let authorized: Vec<IpAddr> = vec![
-        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-    ];
+    // Load authorized DNS servers from the database (interfaces with role 'lan' or 'mgmt').
+    // Falls back to loopback only if loading fails.
+    let authorized = load_authorized_from_db(&_db).await.unwrap_or_else(|e| {
+        tracing::warn!("Failed to load authorized DNS servers from DB: {e}, using loopback only");
+        vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))]
+    });
+    if authorized.is_empty() {
+        tracing::warn!("No authorized DNS servers found in DB, using loopback only");
+    }
+    let authorized = if authorized.is_empty() {
+        vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))]
+    } else {
+        authorized
+    };
+    tracing::info!("Authorized DNS servers: {:?}", authorized);
     let mut monitor = DnsMonitor::new(authorized);
 
     let mut buf = [0u8; 4096];
@@ -478,4 +489,35 @@ pub async fn start_monitor(
 
     #[allow(unreachable_code)]
     Ok(())
+}
+
+/// Load authorized DNS server IPs from the database.
+///
+/// Queries the interfaces table for entries with role 'lan' or 'mgmt',
+/// parses their IP addresses (stripping CIDR prefix if present), and
+/// returns them as the set of IPs that are allowed to send DNS responses.
+async fn load_authorized_from_db(db: &sfgw_db::Db) -> Result<Vec<IpAddr>> {
+    let conn = db.lock().await;
+    let mut stmt = conn.prepare("SELECT ips FROM interfaces WHERE role IN ('lan', 'mgmt')")?;
+    let rows: Vec<String> = stmt
+        .query_map([], |row| row.get(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    drop(conn);
+
+    let mut authorized = Vec::new();
+    for ips_json in rows {
+        // IPs are stored as JSON arrays, e.g. ["192.168.1.1/24", "fd00::1/64"]
+        if let Ok(ips) = serde_json::from_str::<Vec<String>>(&ips_json) {
+            for ip_str in ips {
+                // Strip CIDR prefix length if present (e.g. "192.168.1.1/24" -> "192.168.1.1")
+                let bare_ip = ip_str.split('/').next().unwrap_or(&ip_str);
+                if let Ok(addr) = bare_ip.parse::<IpAddr>() {
+                    authorized.push(addr);
+                }
+            }
+        }
+    }
+    Ok(authorized)
 }
