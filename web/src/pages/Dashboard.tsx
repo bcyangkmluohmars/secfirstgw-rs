@@ -6,6 +6,21 @@ import { useStatus } from '../hooks/useStatus'
 
 const MAX_HISTORY = 60 // 10 min at 10s interval
 
+const fmtRate = (bytesPerSec: number) => {
+  if (bytesPerSec < 1024) return `${bytesPerSec.toFixed(0)} B/s`
+  if (bytesPerSec < 1048576) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`
+  if (bytesPerSec < 1073741824) return `${(bytesPerSec / 1048576).toFixed(1)} MB/s`
+  return `${(bytesPerSec / 1073741824).toFixed(2)} GB/s`
+}
+
+const fmtBytes = (b: number) => {
+  if (b < 1024) return `${b} B`
+  if (b < 1048576) return `${(b / 1024).toFixed(1)} KB`
+  if (b < 1073741824) return `${(b / 1048576).toFixed(1)} MB`
+  if (b < 1099511627776) return `${(b / 1073741824).toFixed(2)} GB`
+  return `${(b / 1099511627776).toFixed(2)} TB`
+}
+
 function UptimeDisplay({ initialSecs }: { initialSecs: number }) {
   const [secs, setSecs] = useState(initialSecs)
   const startRef = useRef(0)
@@ -121,18 +136,44 @@ export default function Dashboard() {
   const { status } = useStatus()
   const [loadHistory, setLoadHistory] = useState<number[]>([])
   const [memHistory, setMemHistory] = useState<number[]>([])
+  const [rxRateHistory, setRxRateHistory] = useState<number[]>([])
+  const [txRateHistory, setTxRateHistory] = useState<number[]>([])
+  const [currentRxRate, setCurrentRxRate] = useState(0)
+  const [currentTxRate, setCurrentTxRate] = useState(0)
   const prevUptime = useRef(0)
+  const prevRx = useRef(0)
+  const prevTx = useRef(0)
+  const prevTime = useRef(0)
 
   // Build sparkline history from shared status updates
   useEffect(() => {
     if (!status) return
-    // Only append when uptime changes (i.e. new data from server, not re-render)
     if (status.uptime_secs === prevUptime.current) return
     prevUptime.current = status.uptime_secs
 
     setLoadHistory((prev) => [...prev.slice(-(MAX_HISTORY - 1)), status.load_average[0]])
     const memPct = status.memory.total_mb > 0 ? (status.memory.used_mb / status.memory.total_mb) * 100 : 0
     setMemHistory((prev) => [...prev.slice(-(MAX_HISTORY - 1)), memPct])
+
+    // Compute net I/O rate (bytes/sec delta)
+    const now = Date.now()
+    const rx = status.network?.total_rx_bytes ?? 0
+    const tx = status.network?.total_tx_bytes ?? 0
+
+    if (prevTime.current > 0 && prevRx.current > 0) {
+      const elapsed = (now - prevTime.current) / 1000
+      if (elapsed > 0) {
+        const rxRate = Math.max(0, (rx - prevRx.current) / elapsed)
+        const txRate = Math.max(0, (tx - prevTx.current) / elapsed)
+        setCurrentRxRate(rxRate)
+        setCurrentTxRate(txRate)
+        setRxRateHistory((prev) => [...prev.slice(-(MAX_HISTORY - 1)), rxRate])
+        setTxRateHistory((prev) => [...prev.slice(-(MAX_HISTORY - 1)), txRate])
+      }
+    }
+    prevRx.current = rx
+    prevTx.current = tx
+    prevTime.current = now
   }, [status])
 
   if (!status) return <Spinner label="Loading system status..." />
@@ -140,6 +181,7 @@ export default function Dashboard() {
   const ramPercent = status.memory.total_mb > 0
     ? (status.memory.used_mb / status.memory.total_mb) * 100 : 0
   const cpuPercent = Math.min((status.load_average[0] / 8) * 100, 100)
+  const netIfaces = status.network?.interfaces ?? []
 
   return (
     <div>
@@ -196,6 +238,74 @@ export default function Dashboard() {
             <Sparkline data={memHistory} width={180} height={32} color={ramPercent > 85 ? '#f87171' : '#34d399'} strokeWidth={1.5} />
           </StatCard>
         </div>
+
+        {/* Network I/O */}
+        <Card title="Network I/O">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* RX */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-emerald-400 text-sm">↓</span>
+                  <span className="text-[11px] text-navy-400 uppercase tracking-wider font-medium">Download</span>
+                </div>
+                <span className="text-sm font-mono text-emerald-400 tabular-nums">{fmtRate(currentRxRate)}</span>
+              </div>
+              <Sparkline
+                data={rxRateHistory}
+                width={400}
+                height={48}
+                color="#34d399"
+                strokeWidth={1.5}
+              />
+              <p className="text-[10px] text-navy-500 font-mono mt-1 tabular-nums">
+                Total: {fmtBytes(status.network?.total_rx_bytes ?? 0)}
+              </p>
+            </div>
+            {/* TX */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-blue-400 text-sm">↑</span>
+                  <span className="text-[11px] text-navy-400 uppercase tracking-wider font-medium">Upload</span>
+                </div>
+                <span className="text-sm font-mono text-blue-400 tabular-nums">{fmtRate(currentTxRate)}</span>
+              </div>
+              <Sparkline
+                data={txRateHistory}
+                width={400}
+                height={48}
+                color="#60a5fa"
+                strokeWidth={1.5}
+              />
+              <p className="text-[10px] text-navy-500 font-mono mt-1 tabular-nums">
+                Total: {fmtBytes(status.network?.total_tx_bytes ?? 0)}
+              </p>
+            </div>
+          </div>
+
+          {/* Per-interface breakdown */}
+          {netIfaces.length > 1 && (
+            <div className="mt-4 pt-4 border-t border-navy-800/30">
+              <p className="text-[10px] text-navy-500 uppercase tracking-wider font-medium mb-2">Per Interface</p>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                {netIfaces.map((iface) => (
+                  <div key={iface.name} className="bg-navy-800/30 rounded-lg px-3 py-2">
+                    <p className="text-xs font-mono text-gray-300 font-semibold">{iface.name}</p>
+                    <div className="flex items-center gap-3 mt-1">
+                      <span className="text-[10px] font-mono text-emerald-400/70 tabular-nums">
+                        ↓ {fmtBytes(iface.rx_bytes)}
+                      </span>
+                      <span className="text-[10px] font-mono text-blue-400/70 tabular-nums">
+                        ↑ {fmtBytes(iface.tx_bytes)}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </Card>
 
         {/* Gauges */}
         <Card>

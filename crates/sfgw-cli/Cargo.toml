@@ -17,7 +17,7 @@ sfgw-crypto = { path = "../sfgw-crypto" }
 sfgw-hal = { path = "../sfgw-hal" }
 sfgw-vpn = { path = "../sfgw-vpn" }
 sfgw-dns = { path = "../sfgw-dns" }
-sfgw-lcd = { path = "../sfgw-lcd" }
+sfgw-display = { path = "../sfgw-display" }
 sfgw-nas = { path = "../sfgw-nas" }
 sfgw-api = { path = "../sfgw-api" }
 sfgw-db = { path = "../sfgw-db" }

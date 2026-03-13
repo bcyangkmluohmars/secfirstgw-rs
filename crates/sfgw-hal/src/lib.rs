@@ -23,10 +23,16 @@ pub enum Platform {
 }
 
 impl Platform {
-    /// Returns `true` if the platform has an LCD panel (bare metal only).
+    /// Returns `true` if the platform may have a display (bare metal only).
+    #[must_use]
+    pub fn has_display(&self) -> bool {
+        matches!(self, Platform::BareMetal)
+    }
+
+    /// Alias for [`has_display`](Self::has_display).
     #[must_use]
     pub fn has_lcd(&self) -> bool {
-        matches!(self, Platform::BareMetal)
+        self.has_display()
     }
 
     /// Returns `true` if the platform has an internal HDD bay.

@@ -1,0 +1,157 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: Check, Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (warnings = errors)
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every crate must have #![deny(unsafe_code)]
+      - name: Verify deny(unsafe_code) in all crates
+        run: |
+          failed=0
+          for lib in crates/*/src/lib.rs crates/*/src/main.rs; do
+            [ -f "$lib" ] || continue
+            if ! grep -q '#!\[deny(unsafe_code)\]' "$lib"; then
+              echo "FAIL: $lib missing #![deny(unsafe_code)]"
+              failed=1
+            fi
+          done
+          if [ "$failed" -eq 1 ]; then
+            echo ""
+            echo "All crates MUST have #![deny(unsafe_code)] per CLAUDE.md."
+            exit 1
+          fi
+          echo "All crates have #![deny(unsafe_code)]"
+
+      # Every unsafe block must have a // SAFETY: comment
+      - name: Verify SAFETY comments on unsafe blocks
+        run: |
+          failed=0
+          while IFS=: read -r file line content; do
+            # Check preceding 5 lines for SAFETY comment
+            start=$((line - 5))
+            [ "$start" -lt 1 ] && start=1
+            context=$(sed -n "${start},${line}p" "$file")
+            if ! echo "$context" | grep -qi 'SAFETY:'; then
+              echo "FAIL: $file:$line — unsafe block without // SAFETY: comment"
+              echo "  $content"
+              failed=1
+            fi
+          done < <(grep -rn 'unsafe {' crates/ --include='*.rs')
+          if [ "$failed" -eq 1 ]; then
+            echo ""
+            echo "All unsafe blocks MUST have a // SAFETY: comment per CLAUDE.md."
+            exit 1
+          fi
+          echo "All unsafe blocks have SAFETY comments"
+
+      # No hardcoded secrets, tokens, passwords
+      - name: Check for hardcoded secrets
+        run: |
+          patterns='password\s*=\s*"[^"]+"|secret\s*=\s*"[^"]+"|token\s*=\s*"[^"]+"|api_key\s*=\s*"[^"]+"'
+          if grep -rPn "$patterns" crates/ --include='*.rs' | grep -v '//.*test\|#\[cfg(test)\|mod tests\|password_hash\|password:\s*String\|password:\s*&str\|"password"'; then
+            echo ""
+            echo "FAIL: Possible hardcoded secrets found. See CLAUDE.md."
+            exit 1
+          fi
+          echo "No hardcoded secrets detected"
+
+      # No println! in library code
+      - name: Check for println! in library code
+        run: |
+          failed=0
+          for f in $(find crates/ -name '*.rs' -not -path '*/sfgw-cli/*'); do
+            # Skip test modules
+            if grep -n 'println!' "$f" | grep -v '#\[cfg(test)\]' | grep -v 'mod tests' | grep -v '//'; then
+              # Check if the println is inside a test block
+              while IFS=: read -r line_num _; do
+                # Count #[cfg(test)] and mod tests before this line
+                in_test=$(head -n "$line_num" "$f" | grep -c '#\[cfg(test)\]\|mod tests')
+                if [ "$in_test" -eq 0 ]; then
+                  echo "FAIL: $f:$line_num — println! in library code (use tracing:: instead)"
+                  failed=1
+                fi
+              done < <(grep -n 'println!' "$f" | grep -v '//')
+            fi
+          done
+          if [ "$failed" -eq 1 ]; then
+            echo ""
+            echo "Library crates must use tracing::, not println!. See CLAUDE.md."
+            exit 1
+          fi
+          echo "No println! in library code"
+
+      # No unwrap()/expect() in library code (outside tests)
+      - name: Check for unwrap/expect in library code
+        run: |
+          # Find unwrap()/expect() outside of test modules and comments
+          # This is a best-effort grep — some false positives from test code are OK
+          hits=$(grep -rn '\.unwrap()' crates/ --include='*.rs' \
+            | grep -v 'sfgw-cli/' \
+            | grep -v '#\[test\]' \
+            | grep -v 'mod tests' \
+            | grep -v '// INVARIANT:' \
+            | grep -v '_test\.' \
+            | grep -v 'tests.rs' || true)
+          if [ -n "$hits" ]; then
+            echo "WARNING: .unwrap() found in library code (review manually):"
+            echo "$hits"
+            echo ""
+            echo "Each must have a // INVARIANT: comment or be inside #[cfg(test)]."
+          fi
+          echo "unwrap/expect audit complete"
+
+  frontend:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install & typecheck & build
+        run: cd web && npm ci && npx tsc -b && npm run build

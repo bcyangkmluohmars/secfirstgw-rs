@@ -162,11 +162,10 @@ async fn start_services() -> Result<()> {
     tracing::info!("starting IDS engine");
     sfgw_ids::start(&db, sfgw_ids::IdsRole::Gateway).await?;
 
-    // Phase 12: LCD display (bare metal only)
-    if platform.has_lcd() {
-        tracing::info!("initializing display");
-        let _lcd = sfgw_lcd::init(std::path::Path::new("/dev/i2c-1"), None)?;
-    }
+    // Phase 12: Display (auto-detect: character LCD, framebuffer touchscreen, or none)
+    tracing::info!("initializing display");
+    let display_config = sfgw_display::auto_detect(&platform);
+    let _display = sfgw_display::init(&display_config)?;
 
     // Phase 13: API server (blocks)
     tracing::info!("starting API server");

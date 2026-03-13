@@ -127,7 +127,7 @@ Every line of code you write must answer: "What happens if an attacker controls 
 | `sfgw-ids` | ARP/DHCP/DNS/VLAN monitoring, alert correlation | Blocking (notifies sfgw-fw) |
 | `sfgw-log` | Forward-secret log encryption, export | Log aggregation |
 | `sfgw-hal` | Hardware abstraction, platform detection | Business logic |
-| `sfgw-lcd` | LCD display on bare metal | Any non-display logic |
+| `sfgw-display` | Display abstraction (HD44780 LCD, framebuffer touchscreen), auto-detect | Any non-display logic |
 | `sfgw-nas` | SMB3/NFS file sharing | Anything non-NAS |
 | `sfgw-controller` | High-level orchestration, service lifecycle | Low-level implementation |
 

@@ -100,11 +100,18 @@ export function isAuthenticated(): boolean {
 
 // ---- Types ----
 
+export interface NetIoStats {
+  total_rx_bytes: number;
+  total_tx_bytes: number;
+  interfaces: { name: string; rx_bytes: number; tx_bytes: number }[];
+}
+
 export interface SystemStatus {
   status: string;
   uptime_secs: number;
   load_average: [number, number, number];
   memory: { total_mb: number; used_mb: number; free_mb: number };
+  network: NetIoStats;
   services: Record<string, string>;
 }
 

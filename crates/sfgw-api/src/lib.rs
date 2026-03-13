@@ -664,6 +664,7 @@ fn read_arch() -> &'static str {
     std::env::consts::ARCH
 }
 
+
 // ---------------------------------------------------------------------------
 // Protected handlers
 // ---------------------------------------------------------------------------
@@ -755,6 +756,8 @@ async fn status_handler(
         }
     };
 
+    let net_io = sfgw_net::read_net_io();
+
     Json(json!({
         "status": "ok",
         "uptime_secs": uptime,
@@ -764,6 +767,7 @@ async fn status_handler(
             "used_mb": mem.used_mb,
             "free_mb": mem.free_mb,
         },
+        "network": net_io,
         "services": {
             "firewall": fw_status,
             "dns": dns_status,

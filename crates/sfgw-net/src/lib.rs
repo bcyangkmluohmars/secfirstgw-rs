@@ -464,6 +464,66 @@ fn guess_role(name: &str) -> String {
     }
 }
 
+/// I/O statistics for a single network interface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IfaceIoStats {
+    pub name: String,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+/// Aggregate network I/O statistics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetIoStats {
+    pub total_rx_bytes: u64,
+    pub total_tx_bytes: u64,
+    pub interfaces: Vec<IfaceIoStats>,
+}
+
+/// Read aggregate network I/O counters from `/proc/net/dev`.
+///
+/// Returns per-interface rx/tx bytes (excluding loopback and zero-traffic
+/// interfaces) plus a total sum across all active interfaces.
+pub fn read_net_io() -> NetIoStats {
+    let content = fs::read_to_string("/proc/net/dev").unwrap_or_default();
+    let mut total_rx: u64 = 0;
+    let mut total_tx: u64 = 0;
+    let mut interfaces = Vec::new();
+
+    // Skip header lines (first 2 lines)
+    for line in content.lines().skip(2) {
+        let line = line.trim();
+        let Some((name, rest)) = line.split_once(':') else { continue };
+        let name = name.trim();
+        // Skip loopback
+        if name == "lo" { continue }
+
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        if fields.len() < 10 { continue }
+
+        let rx_bytes: u64 = fields[0].parse().unwrap_or(0);
+        let tx_bytes: u64 = fields[8].parse().unwrap_or(0);
+
+        // Skip interfaces with zero traffic (not connected)
+        if rx_bytes == 0 && tx_bytes == 0 { continue }
+
+        total_rx += rx_bytes;
+        total_tx += tx_bytes;
+
+        interfaces.push(IfaceIoStats {
+            name: name.to_string(),
+            rx_bytes,
+            tx_bytes,
+        });
+    }
+
+    NetIoStats {
+        total_rx_bytes: total_rx,
+        total_tx_bytes: total_tx,
+        interfaces,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

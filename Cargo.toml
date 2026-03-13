@@ -8,7 +8,7 @@ members = [
     "crates/sfgw-hal",
     "crates/sfgw-vpn",
     "crates/sfgw-dns",
-    "crates/sfgw-lcd",
+    "crates/sfgw-display",
     "crates/sfgw-nas",
     "crates/sfgw-api",
     "crates/sfgw-db",
