@@ -106,5 +106,5 @@ Every design decision prioritizes security:
 
 AGPL-3.0-or-later — [LICENSE](LICENSE)
 
-Contributions require a [CLA](CLA.md) to enable dual-licensing.
+Contributions require a [CLA](https://gist.github.com/CLAassistant/bd1ea8ec8aa0357414e8) to enable dual-licensing.
 Commercial licenses available for organizations that cannot comply with AGPL.
