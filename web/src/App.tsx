@@ -44,7 +44,7 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
 
         if (!cancelled) setReady(true)
       } catch (err) {
-        console.error('Session init failed:', err)
+        if (import.meta.env.DEV) console.error('Session init failed:', err)
         clearToken()
         if (!cancelled) navigate('/login', { replace: true })
       }
@@ -56,10 +56,15 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
 
   if (!ready) {
     return (
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-8 h-8 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-sm text-gray-500 font-mono">Establishing secure channel...</p>
+      <div className="min-h-screen bg-navy-950 flex items-center justify-center">
+        <div className="text-center animate-fade-in">
+          <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center mx-auto mb-4">
+            <svg className="w-5 h-5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2L4 6v6c0 5.25 3.4 10.15 8 11.43C16.6 22.15 20 17.25 20 12V6l-8-4z" />
+            </svg>
+          </div>
+          <div className="w-6 h-6 border-2 border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-sm text-navy-400">Establishing secure channel...</p>
         </div>
       </div>
     )

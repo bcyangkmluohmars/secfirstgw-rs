@@ -33,9 +33,9 @@ const settingGroups: SettingGroup[] = [
   },
 ]
 
+// TODO: Wire to settings API when implemented
 export default function Settings() {
   const [groups, setGroups] = useState(settingGroups)
-  const [saved, setSaved] = useState(false)
 
   function handleChange(gi: number, fi: number, val: string) {
     setGroups((prev) => {
@@ -46,47 +46,38 @@ export default function Settings() {
       }
       return next
     })
-    setSaved(false)
-  }
-
-  function handleSave() {
-    // In the future, POST to /api/v1/settings
-    setSaved(true)
-    setTimeout(() => setSaved(false), 3000)
   }
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="text-lg font-bold font-mono">Settings</h2>
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-gray-100">Settings</h2>
         <button
-          onClick={handleSave}
-          className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-mono rounded transition-colors"
+          disabled
+          className="px-4 py-2 text-xs font-medium rounded-lg border transition-all duration-200 bg-navy-800 text-navy-500 border-navy-700/50 cursor-not-allowed"
         >
-          {saved ? 'Saved' : 'Save Changes'}
+          Not yet implemented
         </button>
       </div>
 
-      <div className="space-y-6">
-        {groups.map((group, gi) => (
-          <div key={group.title} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-            <h3 className="text-sm font-mono text-gray-400 uppercase tracking-wider mb-4">{group.title}</h3>
-            <div className="space-y-3">
-              {group.fields.map((field, fi) => (
-                <div key={field.label} className="flex items-center gap-4">
-                  <label className="w-48 text-sm font-mono text-gray-500 shrink-0">{field.label}</label>
-                  <input
-                    type={field.type ?? 'text'}
-                    value={field.value}
-                    onChange={(e) => handleChange(gi, fi, e.target.value)}
-                    className="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm font-mono text-gray-200 focus:outline-none focus:border-emerald-500"
-                  />
-                </div>
-              ))}
-            </div>
+      {groups.map((group, gi) => (
+        <div key={group.title} className="bg-navy-900 border border-navy-800/50 rounded-xl p-5 animate-fade-in">
+          <p className="text-[11px] font-medium text-navy-400 uppercase tracking-wider mb-5">{group.title}</p>
+          <div className="space-y-4">
+            {group.fields.map((field, fi) => (
+              <div key={field.label} className="flex items-center gap-4">
+                <label className="w-48 text-sm text-navy-400 shrink-0">{field.label}</label>
+                <input
+                  type={field.type ?? 'text'}
+                  value={field.value}
+                  onChange={(e) => handleChange(gi, fi, e.target.value)}
+                  className="flex-1 bg-navy-800 border border-navy-700/50 rounded-lg px-3 py-2 text-sm font-mono text-gray-200 focus:outline-none focus:border-emerald-500/50 transition-colors"
+                />
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </div>
+      ))}
     </div>
   )
 }

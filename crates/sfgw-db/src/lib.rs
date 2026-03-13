@@ -1,12 +1,45 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+#![deny(unsafe_code)]
 
-use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Thread-safe handle to the SQLite database.
 pub type Db = Arc<Mutex<Connection>>;
+
+/// Errors from the database layer.
+#[derive(Debug, thiserror::Error)]
+pub enum DbError {
+    /// SQLite error.
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+
+    /// I/O error (e.g. creating directories).
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    /// Migration or schema error with context.
+    #[error("{context}: {source}")]
+    Migration {
+        context: String,
+        source: rusqlite::Error,
+    },
+
+    /// Failed to open or create the database file.
+    #[error("failed to open database at {path}: {source}")]
+    Open {
+        path: String,
+        source: rusqlite::Error,
+    },
+
+    /// Failed to create the database directory.
+    #[error("failed to create database directory {path}: {source}")]
+    CreateDir {
+        path: String,
+        source: std::io::Error,
+    },
+}
 
 /// Default database path.
 const DEFAULT_DB_PATH: &str = "/var/lib/sfgw/sfgw.db";
@@ -15,113 +48,204 @@ const DEFAULT_DB_PATH: &str = "/var/lib/sfgw/sfgw.db";
 const DB_PATH_ENV: &str = "SFGW_DB_PATH";
 
 /// Open the database (or create it with the initial schema).
-pub async fn open_or_create() -> Result<Db> {
+pub async fn open_or_create() -> Result<Db, DbError> {
     let db_path = std::env::var(DB_PATH_ENV).unwrap_or_else(|_| DEFAULT_DB_PATH.to_string());
 
     // Ensure parent directory exists
     if let Some(parent) = std::path::Path::new(&db_path).parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create db directory: {}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| DbError::CreateDir {
+            path: parent.display().to_string(),
+            source: e,
+        })?;
     }
 
-    let conn = Connection::open(&db_path)
-        .with_context(|| format!("failed to open database: {db_path}"))?;
+    let conn = Connection::open(&db_path).map_err(|e| DbError::Open {
+        path: db_path.clone(),
+        source: e,
+    })?;
 
     // WAL mode for concurrent reads
     conn.pragma_update(None, "journal_mode", "WAL")?;
     // Enforce foreign keys
     conn.pragma_update(None, "foreign_keys", "ON")?;
 
-    init_schema(&conn)?;
+    run_migrations(&conn)?;
 
     tracing::info!("database opened: {db_path}");
     Ok(Arc::new(Mutex::new(conn)))
 }
 
-fn init_schema(conn: &Connection) -> Result<()> {
+/// Open an in-memory database with all migrations applied. Useful for testing.
+pub async fn open_in_memory() -> Result<Db, DbError> {
+    let conn = Connection::open_in_memory()?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    run_migrations(&conn)?;
+    Ok(Arc::new(Mutex::new(conn)))
+}
+
+/// Run all pending migrations.
+fn run_migrations(conn: &Connection) -> Result<(), DbError> {
+    // Bootstrap: ensure the meta table exists so we can track schema version
     conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS meta (
-            key   TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
+        "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    )?;
 
-        CREATE TABLE IF NOT EXISTS interfaces (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            name      TEXT NOT NULL UNIQUE,
-            mac       TEXT NOT NULL DEFAULT '',
-            ips       TEXT NOT NULL DEFAULT '[]',
-            mtu       INTEGER NOT NULL DEFAULT 1500,
-            is_up     INTEGER NOT NULL DEFAULT 0,
-            role      TEXT NOT NULL DEFAULT 'lan',
-            vlan_id   INTEGER,
-            enabled   INTEGER NOT NULL DEFAULT 1,
-            config    TEXT NOT NULL DEFAULT '{}'
-        );
+    // Get current schema version (0 if fresh database)
+    let current_version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(CAST(value AS INTEGER), 0) FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
 
-        CREATE TABLE IF NOT EXISTS firewall_rules (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            chain     TEXT NOT NULL,
-            priority  INTEGER NOT NULL DEFAULT 0,
-            rule      TEXT NOT NULL,
-            enabled   INTEGER NOT NULL DEFAULT 1
-        );
+    // Embed migration files at compile time
+    let migrations: &[(&str, &str)] = &[
+        ("001", include_str!("../migrations/001_initial.sql")),
+        (
+            "002",
+            include_str!("../migrations/002_firmware_manifests.sql"),
+        ),
+    ];
 
-        CREATE TABLE IF NOT EXISTS devices (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            mac        TEXT NOT NULL UNIQUE,
-            name       TEXT,
-            model      TEXT,
-            ip         TEXT,
-            adopted    INTEGER NOT NULL DEFAULT 0,
-            last_seen  TEXT,
-            config     TEXT NOT NULL DEFAULT '{}'
-        );
-
-        CREATE TABLE IF NOT EXISTS vpn_tunnels (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            name      TEXT NOT NULL UNIQUE,
-            type      TEXT NOT NULL,
-            enabled   INTEGER NOT NULL DEFAULT 0,
-            config    TEXT NOT NULL DEFAULT '{}'
-        );
-
-        CREATE TABLE IF NOT EXISTS users (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            username      TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL,
-            role          TEXT NOT NULL DEFAULT 'admin',
-            created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS sessions (
-            token         TEXT PRIMARY KEY,
-            user_id       INTEGER NOT NULL REFERENCES users(id),
-            tls_session   TEXT NOT NULL,
-            client_ip     TEXT NOT NULL,
-            fingerprint   TEXT NOT NULL,
-            envelope_key  TEXT NOT NULL,
-            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-            expires_at    TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS ids_events (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp   TEXT NOT NULL,
-            severity    TEXT NOT NULL,
-            detector    TEXT NOT NULL,
-            source_mac  TEXT,
-            source_ip   TEXT,
-            interface   TEXT NOT NULL,
-            vlan        INTEGER,
-            description TEXT NOT NULL
-        );
-
-        -- Set schema version
-        INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '1');
-        ",
-    )
-    .context("failed to initialize database schema")?;
+    for (version_str, sql) in migrations {
+        let version: i64 = version_str.parse().expect("migration version must be numeric");
+        if version > current_version {
+            tracing::info!(version, "applying database migration");
+            conn.execute_batch(sql).map_err(|e| DbError::Migration {
+                context: format!("failed to apply migration {version_str}"),
+                source: e,
+            })?;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
+                rusqlite::params![version.to_string()],
+            )?;
+        }
+    }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_open_in_memory() {
+        let db = open_in_memory().await.expect("open_in_memory should succeed");
+        let conn = db.lock().await;
+        // Verify we can query the meta table
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("schema_version should exist in meta table");
+        assert!(!version.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_schema_version() {
+        let db = open_in_memory().await.expect("open_in_memory should succeed");
+        let conn = db.lock().await;
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("schema_version should exist");
+        // After both migrations, schema version should be "2"
+        assert_eq!(version, "2");
+    }
+
+    #[tokio::test]
+    async fn test_tables_exist() {
+        let db = open_in_memory().await.expect("open_in_memory should succeed");
+        let conn = db.lock().await;
+
+        let expected_tables = [
+            "meta",
+            "interfaces",
+            "firewall_rules",
+            "devices",
+            "vpn_tunnels",
+            "vpn_peers",
+            "users",
+            "sessions",
+            "ids_events",
+            "firmware_manifests",
+        ];
+
+        for table in &expected_tables {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    rusqlite::params![table],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            assert!(exists, "table '{table}' should exist after migrations");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_idempotent_init() {
+        // Running open_in_memory twice should not fail — migrations are
+        // idempotent (CREATE TABLE IF NOT EXISTS).
+        let db1 = open_in_memory().await.expect("first open_in_memory should succeed");
+        drop(db1);
+
+        let db2 = open_in_memory().await.expect("second open_in_memory should succeed");
+        let conn = db2.lock().await;
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("schema_version should exist after second init");
+        assert_eq!(version, "2");
+    }
+
+    #[tokio::test]
+    async fn test_idempotent_migrations_on_same_db() {
+        // Run migrations twice on the same connection — should be a no-op
+        // the second time.
+        let conn = Connection::open_in_memory()
+            .expect("failed to open in-memory db");
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+
+        run_migrations(&conn).expect("first migration run should succeed");
+        run_migrations(&conn).expect("second migration run should succeed (idempotent)");
+
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("schema_version should exist");
+        assert_eq!(version, "2");
+    }
+
+    #[tokio::test]
+    async fn test_foreign_keys_enforced() {
+        let db = open_in_memory().await.expect("open_in_memory should succeed");
+        let conn = db.lock().await;
+
+        // Inserting a vpn_peer referencing a non-existent tunnel_id should fail
+        let result = conn.execute(
+            "INSERT INTO vpn_peers (tunnel_id, public_key, private_key_enc, address)
+             VALUES (9999, 'pk', 'sk', '10.0.0.1')",
+            [],
+        );
+        assert!(
+            result.is_err(),
+            "foreign key constraint should prevent inserting vpn_peer with invalid tunnel_id"
+        );
+    }
 }

@@ -1,12 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+#![deny(unsafe_code)]
 
 //! Distributed Intrusion Detection System
 //!
 //! Runs on gateway, switches, and APs. Each node monitors locally,
 //! reports to the gateway controller which correlates and alerts.
 
-use anyhow::Result;
 use tokio::sync::mpsc;
+
+/// Errors from the IDS crate.
+#[derive(Debug, thiserror::Error)]
+pub enum IdsError {
+    /// Database error.
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
+    /// Wrapped anyhow error for internal context propagation.
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+/// Convenience alias for results from this crate.
+type Result<T> = std::result::Result<T, IdsError>;
 
 pub mod alert;
 pub mod arp;

@@ -160,6 +160,18 @@ export interface FirewallRule {
 }
 
 // VPN types
+export interface VpnPeer {
+  id: number;
+  tunnel_id: number;
+  name: string | null;
+  public_key: string;
+  preshared_key?: string;
+  allowed_ips: string[];
+  endpoint?: string;
+  persistent_keepalive?: number;
+  created_at: string;
+}
+
 export interface VpnTunnel {
   id: number;
   name: string;
@@ -170,7 +182,7 @@ export interface VpnTunnel {
   address: string;
   dns: string | null;
   mtu: number;
-  peers: WgPeer[];
+  peers: VpnPeer[];
 }
 
 export interface WgPeer {
@@ -281,14 +293,13 @@ export const api = {
 
   // VPN
   getVpnTunnels: () => request<{ tunnels: VpnTunnel[] }>('/api/v1/vpn/tunnels'),
-  createVpnTunnel: (body: { name: string; listen_port: number; address: string; dns?: string; mtu?: number }) => request<VpnTunnel>('/api/v1/vpn/tunnels', { method: 'POST', body }),
-  getVpnTunnel: (name: string) => request<VpnTunnel>(`/api/v1/vpn/tunnels/${name}`),
-  deleteVpnTunnel: (name: string) => request<void>(`/api/v1/vpn/tunnels/${name}`, { method: 'DELETE' }),
-  startVpnTunnel: (name: string) => request<void>(`/api/v1/vpn/tunnels/${name}/start`, { method: 'POST' }),
-  stopVpnTunnel: (name: string) => request<void>(`/api/v1/vpn/tunnels/${name}/stop`, { method: 'POST' }),
-  getVpnTunnelStatus: async (name: string) => (await request<{ status: TunnelStatus }>(`/api/v1/vpn/tunnels/${name}/status`)).status,
-  addVpnPeer: (tunnelName: string, peer: WgPeer) => request<void>(`/api/v1/vpn/tunnels/${tunnelName}/peers`, { method: 'POST', body: peer }),
-  removeVpnPeer: (tunnelName: string, peerKey: string) => request<void>(`/api/v1/vpn/tunnels/${tunnelName}/peers/${encodeURIComponent(peerKey)}`, { method: 'DELETE' }),
+  createVpnTunnel: (body: { name: string; listen_port: number; address: string; dns?: string; mtu?: number }) => request<{ tunnel: VpnTunnel }>('/api/v1/vpn/tunnels', { method: 'POST', body }),
+  deleteVpnTunnel: (id: number) => request<void>(`/api/v1/vpn/tunnels/${id}`, { method: 'DELETE' }),
+  startVpnTunnel: (id: number) => request<void>(`/api/v1/vpn/tunnels/${id}/start`, { method: 'POST' }),
+  stopVpnTunnel: (id: number) => request<void>(`/api/v1/vpn/tunnels/${id}/stop`, { method: 'POST' }),
+  getVpnTunnelStatus: async (id: number) => (await request<{ status: TunnelStatus }>(`/api/v1/vpn/tunnels/${id}/status`)).status,
+  addVpnPeer: (tunnelId: number, peer: WgPeer) => request<void>(`/api/v1/vpn/tunnels/${tunnelId}/peers`, { method: 'POST', body: peer }),
+  removeVpnPeer: (tunnelId: number, peerId: number) => request<void>(`/api/v1/vpn/tunnels/${tunnelId}/peers/${peerId}`, { method: 'DELETE' }),
 
   // DNS
   getDnsConfig: () => request<{ config: DnsConfig }>('/api/v1/dns/config'),
@@ -314,7 +325,7 @@ export const api = {
   // Devices
   getDevices: () => request<{ devices: DeviceSummary[] }>('/api/v1/devices'),
   getPendingDevices: () => request<{ devices: DeviceSummary[] }>('/api/v1/devices/pending'),
-  approveDevice: (mac: string) => request<unknown>(`/api/v1/devices/${encodeURIComponent(mac)}/approve`, { method: 'POST' }),
+  approveDevice: (mac: string, body: { device_mac: string; device_model: string; device_ip: string; device_public_key: string; device_kem_public_key?: string }) => request<unknown>(`/api/v1/devices/${encodeURIComponent(mac)}/approve`, { method: 'POST', body }),
   rejectDevice: (mac: string) => request<void>(`/api/v1/devices/${encodeURIComponent(mac)}/reject`, { method: 'POST' }),
   getDeviceConfig: (mac: string) => request<unknown>(`/api/v1/devices/${encodeURIComponent(mac)}/config`),
   pushDeviceConfig: (mac: string, config: unknown) => request<{ sequence: number }>(`/api/v1/devices/${encodeURIComponent(mac)}/config`, { method: 'PUT', body: config }),

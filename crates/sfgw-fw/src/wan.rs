@@ -7,8 +7,25 @@
 //! re-adding them on recovery.
 
 use crate::{WanGroup, WanMember, WanMode};
+use crate::nft::validate_interface_name;
 use anyhow::{Context, Result};
+use std::net::IpAddr;
 use tokio::process::Command;
+
+/// Validate a WAN member's fields before using them in commands.
+fn validate_wan_member(member: &WanMember) -> Result<()> {
+    validate_interface_name(&member.interface)
+        .with_context(|| format!("invalid WAN interface name: {}", member.interface))?;
+    let _gw: IpAddr = member
+        .gateway
+        .parse()
+        .with_context(|| format!("invalid WAN gateway address: {}", member.gateway))?;
+    let _target: IpAddr = member
+        .check_target
+        .parse()
+        .with_context(|| format!("invalid WAN check_target address: {}", member.check_target))?;
+    Ok(())
+}
 
 /// Base routing table number. WAN interfaces get tables 100, 101, etc.
 const RT_TABLE_BASE: u32 = 100;
@@ -64,6 +81,12 @@ pub async fn apply_wan_routing(groups: &[WanGroup]) -> Result<()> {
 ///
 /// Returns `true` if the target is reachable, `false` otherwise.
 pub async fn check_wan_health(member: &WanMember) -> Result<bool> {
+    validate_interface_name(&member.interface)?;
+    let _target: IpAddr = member
+        .check_target
+        .parse()
+        .with_context(|| format!("invalid check_target for health check: {}", member.check_target))?;
+
     let output = Command::new("ping")
         .args([
             "-I",
@@ -180,16 +203,25 @@ pub async fn wan_health_monitor(db: sfgw_db::Db) -> Result<()> {
 
 /// Set up a per-interface routing table with a default route via its gateway.
 async fn setup_interface_table(member: &WanMember, table_id: u32) -> Result<()> {
+    validate_wan_member(member)?;
     let table_str = table_id.to_string();
 
     // Add default route in the per-interface table.
-    let _ = run_ip(&[
+    if let Err(e) = run_ip(&[
         "route", "replace", "default",
         "via", &member.gateway,
         "dev", &member.interface,
         "table", &table_str,
     ])
-    .await;
+    .await
+    {
+        tracing::error!(
+            interface = member.interface.as_str(),
+            table = table_id,
+            "failed to set per-interface default route: {e}"
+        );
+        return Err(e);
+    }
 
     tracing::debug!(
         "routing table {} configured for {} via {}",
@@ -210,6 +242,9 @@ async fn apply_failover_route(members: &[&WanMember]) -> Result<()> {
     let primary = sorted
         .first()
         .context("no healthy WAN members for failover")?;
+
+    // Validate the primary member before using in command.
+    validate_wan_member(primary)?;
 
     // Replace default route with the primary WAN.
     run_ip(&[
@@ -232,6 +267,11 @@ async fn apply_failover_route(members: &[&WanMember]) -> Result<()> {
 
 /// Apply load-balance routing: ECMP default route with weights.
 async fn apply_loadbalance_route(members: &[&WanMember]) -> Result<()> {
+    // Validate all members before building command.
+    for member in members {
+        validate_wan_member(member)?;
+    }
+
     // Build nexthop arguments: ip route replace default nexthop via <gw1> dev <if1> weight <w1> ...
     let mut args: Vec<String> = vec![
         "route".to_string(),
@@ -288,9 +328,24 @@ async fn run_ip(args: &[&str]) -> Result<std::process::Output> {
 
 /// Generate the `ip` commands that would be executed for a WAN group.
 /// Useful for testing without root privileges.
+///
+/// Validates all member fields before generating commands.
+/// Members with invalid fields are skipped with a warning.
 pub fn generate_wan_routing_commands(group: &WanGroup) -> Vec<Vec<String>> {
     let mut commands = Vec::new();
-    let enabled: Vec<&WanMember> = group.interfaces.iter().filter(|m| m.enabled).collect();
+    let enabled: Vec<&WanMember> = group
+        .interfaces
+        .iter()
+        .filter(|m| m.enabled)
+        .filter(|m| {
+            if let Err(e) = validate_wan_member(m) {
+                tracing::error!("skipping invalid WAN member {}: {e}", m.interface);
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
 
     // Per-interface table setup.
     for (i, member) in enabled.iter().enumerate() {

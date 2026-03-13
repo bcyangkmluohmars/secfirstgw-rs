@@ -9,15 +9,15 @@ const statusColors = {
   ok: 'text-emerald-400',
   warn: 'text-amber-400',
   error: 'text-red-400',
-  neutral: 'text-gray-300',
+  neutral: 'text-gray-100',
 }
 
 export default function StatusCard({ title, value, subtitle, status = 'neutral' }: StatusCardProps) {
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-      <p className="text-xs text-gray-500 uppercase tracking-wider font-mono mb-1">{title}</p>
-      <p className={`text-xl font-mono font-bold ${statusColors[status]}`}>{value}</p>
-      {subtitle && <p className="text-xs text-gray-600 font-mono mt-1">{subtitle}</p>}
+    <div className="bg-navy-900 border border-navy-800/50 rounded-xl p-5 animate-fade-in">
+      <p className="text-[11px] font-medium text-navy-400 uppercase tracking-wider mb-2">{title}</p>
+      <p className={`text-xl font-light tabular-nums ${statusColors[status]}`}>{value}</p>
+      {subtitle && <p className="text-[11px] text-navy-500 font-mono mt-1.5">{subtitle}</p>}
     </div>
   )
 }

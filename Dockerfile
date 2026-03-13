@@ -7,7 +7,7 @@ COPY web/ .
 RUN npm run build
 
 # ---------------------------------------------------------------------------
-FROM rust:1.87-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
@@ -41,7 +41,7 @@ COPY --from=frontend /web/dist /usr/share/sfgw/web
 EXPOSE 8443 8080
 
 ENV SFGW_DB_PATH=/data/sfgw.db
-ENV SFGW_LISTEN_ADDR=0.0.0.0:8443
+ENV SFGW_LISTEN_ADDR=[::]:8443
 ENV SFGW_WEB_DIR=/usr/share/sfgw/web
 
 VOLUME /data

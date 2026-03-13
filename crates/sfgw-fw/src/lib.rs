@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+#![deny(unsafe_code)]
 
 //! Firewall management — nftables rule generation and CRUD via DB.
 //!
@@ -10,9 +11,47 @@
 pub mod nft;
 pub mod wan;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+// ── Error types ─────────────────────────────────────────────────────
+
+/// Errors from the firewall crate.
+#[derive(Debug, thiserror::Error)]
+pub enum FwError {
+    /// Database query failed.
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
+    /// JSON serialization/deserialization failed.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// Rule not found in the database.
+    #[error("firewall rule id={0} not found")]
+    RuleNotFound(i64),
+
+    /// Rule is missing a required field.
+    #[error("rule missing id")]
+    MissingId,
+
+    /// Invalid rule JSON stored in the database.
+    #[error("invalid JSON in rule id={id}: {json}")]
+    InvalidRuleJson { id: i64, json: String },
+
+    /// nftables command failed.
+    #[error("nft command failed: {0}")]
+    NftFailed(String),
+
+    /// WAN routing command failed.
+    #[error("WAN routing error: {0}")]
+    WanRouting(String),
+
+    /// Wrapped anyhow error for internal context propagation.
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
 
 // ── Zone model ──────────────────────────────────────────────────────
 
@@ -222,7 +261,7 @@ struct DbRow {
 // ── DB CRUD ─────────────────────────────────────────────────────────
 
 /// Load all firewall rules from the database, ordered by priority.
-pub async fn load_rules(db: &sfgw_db::Db) -> Result<Vec<FirewallRule>> {
+pub async fn load_rules(db: &sfgw_db::Db) -> Result<Vec<FirewallRule>, FwError> {
     let conn = db.lock().await;
     let mut stmt = conn
         .prepare("SELECT id, chain, priority, rule, enabled FROM firewall_rules ORDER BY priority ASC, id ASC")
@@ -259,13 +298,13 @@ pub async fn load_rules(db: &sfgw_db::Db) -> Result<Vec<FirewallRule>> {
 }
 
 /// Load only enabled rules.
-pub async fn load_enabled_rules(db: &sfgw_db::Db) -> Result<Vec<FirewallRule>> {
+pub async fn load_enabled_rules(db: &sfgw_db::Db) -> Result<Vec<FirewallRule>, FwError> {
     let all = load_rules(db).await?;
     Ok(all.into_iter().filter(|r| r.enabled).collect())
 }
 
 /// Insert a new firewall rule. Returns the new row ID.
-pub async fn insert_rule(db: &sfgw_db::Db, rule: &FirewallRule) -> Result<i64> {
+pub async fn insert_rule(db: &sfgw_db::Db, rule: &FirewallRule) -> Result<i64, FwError> {
     let json = serde_json::to_string(&rule.detail).context("failed to serialize rule detail")?;
     let enabled_int: i32 = if rule.enabled { 1 } else { 0 };
     let conn = db.lock().await;
@@ -280,8 +319,8 @@ pub async fn insert_rule(db: &sfgw_db::Db, rule: &FirewallRule) -> Result<i64> {
 }
 
 /// Update an existing firewall rule by ID.
-pub async fn update_rule(db: &sfgw_db::Db, rule: &FirewallRule) -> Result<()> {
-    let id = rule.id.context("cannot update rule without id")?;
+pub async fn update_rule(db: &sfgw_db::Db, rule: &FirewallRule) -> Result<(), FwError> {
+    let id = rule.id.ok_or(FwError::MissingId)?;
     let json = serde_json::to_string(&rule.detail).context("failed to serialize rule detail")?;
     let enabled_int: i32 = if rule.enabled { 1 } else { 0 };
     let conn = db.lock().await;
@@ -291,24 +330,28 @@ pub async fn update_rule(db: &sfgw_db::Db, rule: &FirewallRule) -> Result<()> {
             rusqlite::params![rule.chain, rule.priority, json, enabled_int, id],
         )
         .context("failed to update firewall rule")?;
-    anyhow::ensure!(affected == 1, "firewall rule id={id} not found");
+    if affected != 1 {
+        return Err(FwError::RuleNotFound(id));
+    }
     tracing::info!("updated firewall rule id={id}");
     Ok(())
 }
 
 /// Delete a firewall rule by ID.
-pub async fn delete_rule(db: &sfgw_db::Db, id: i64) -> Result<()> {
+pub async fn delete_rule(db: &sfgw_db::Db, id: i64) -> Result<(), FwError> {
     let conn = db.lock().await;
     let affected = conn
         .execute("DELETE FROM firewall_rules WHERE id = ?1", rusqlite::params![id])
         .context("failed to delete firewall rule")?;
-    anyhow::ensure!(affected == 1, "firewall rule id={id} not found");
+    if affected != 1 {
+        return Err(FwError::RuleNotFound(id));
+    }
     tracing::info!("deleted firewall rule id={id}");
     Ok(())
 }
 
 /// Toggle the enabled state of a rule.
-pub async fn toggle_rule(db: &sfgw_db::Db, id: i64, enabled: bool) -> Result<()> {
+pub async fn toggle_rule(db: &sfgw_db::Db, id: i64, enabled: bool) -> Result<(), FwError> {
     let enabled_int: i32 = if enabled { 1 } else { 0 };
     let conn = db.lock().await;
     let affected = conn
@@ -317,7 +360,9 @@ pub async fn toggle_rule(db: &sfgw_db::Db, id: i64, enabled: bool) -> Result<()>
             rusqlite::params![enabled_int, id],
         )
         .context("failed to toggle firewall rule")?;
-    anyhow::ensure!(affected == 1, "firewall rule id={id} not found");
+    if affected != 1 {
+        return Err(FwError::RuleNotFound(id));
+    }
     tracing::info!("toggled firewall rule id={id} enabled={enabled}");
     Ok(())
 }
@@ -327,7 +372,7 @@ pub async fn toggle_rule(db: &sfgw_db::Db, id: i64, enabled: bool) -> Result<()>
 ///
 /// Now zone-aware: loads interface zones from the DB and generates
 /// zone-based nftables rules instead of hardcoded interface names.
-pub async fn apply_rules(db: &sfgw_db::Db) -> Result<()> {
+pub async fn apply_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
     let rules = load_enabled_rules(db).await?;
     let zones = load_interface_zones(db).await?;
     let wan_groups = load_wan_groups(db).await?;
@@ -355,7 +400,7 @@ pub async fn apply_rules(db: &sfgw_db::Db) -> Result<()> {
 
 /// Load interface-to-zone assignments from the `interfaces` table,
 /// grouping by the `role` column.
-pub async fn load_interface_zones(db: &sfgw_db::Db) -> Result<Vec<ZonePolicy>> {
+pub async fn load_interface_zones(db: &sfgw_db::Db) -> Result<Vec<ZonePolicy>, FwError> {
     let conn = db.lock().await;
     let mut stmt = conn
         .prepare("SELECT name, role FROM interfaces WHERE enabled = 1 ORDER BY role, name")
@@ -388,7 +433,7 @@ pub async fn load_interface_zones(db: &sfgw_db::Db) -> Result<Vec<ZonePolicy>> {
 }
 
 /// Load WAN group configuration from the `meta` table (key: `wan_groups`).
-pub async fn load_wan_groups(db: &sfgw_db::Db) -> Result<Vec<WanGroup>> {
+pub async fn load_wan_groups(db: &sfgw_db::Db) -> Result<Vec<WanGroup>, FwError> {
     let conn = db.lock().await;
     let mut stmt = conn
         .prepare("SELECT value FROM meta WHERE key = 'wan_groups'")
@@ -410,7 +455,7 @@ pub async fn load_wan_groups(db: &sfgw_db::Db) -> Result<Vec<WanGroup>> {
 }
 
 /// Save WAN group configuration to the `meta` table (key: `wan_groups`).
-pub async fn save_wan_groups(db: &sfgw_db::Db, groups: &[WanGroup]) -> Result<()> {
+pub async fn save_wan_groups(db: &sfgw_db::Db, groups: &[WanGroup]) -> Result<(), FwError> {
     let json = serde_json::to_string(groups).context("failed to serialize wan_groups")?;
     let conn = db.lock().await;
     conn.execute(

@@ -10,7 +10,10 @@ use tokio::sync::Mutex;
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use sfgw_adopt::ca::GatewayCA;
-use sfgw_adopt::inform::{decrypt_payload, encrypt_response, InformPayload, InformResponse};
+use sfgw_adopt::inform::{
+    decrypt_payload, encrypt_response, load_latest_firmware, register_firmware, InformPayload,
+    InformResponse,
+};
 use sfgw_adopt::protocol::{approve_device, discover_device, parse_state, reject_device};
 use sfgw_adopt::signing::{sign_config, sign_firmware_manifest, verify_signature, SignedPayload};
 use sfgw_adopt::{AdoptionRequest, AdoptionState, DeviceInfo};
@@ -34,7 +37,19 @@ async fn fresh_db() -> sfgw_db::Db {
              last_seen TEXT,
              config TEXT NOT NULL DEFAULT '{}'
          );
-         INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '1');",
+         CREATE TABLE firmware_manifests (
+             id         INTEGER PRIMARY KEY AUTOINCREMENT,
+             model      TEXT NOT NULL,
+             version    TEXT NOT NULL,
+             sha256     TEXT NOT NULL,
+             size_bytes INTEGER NOT NULL,
+             url        TEXT NOT NULL,
+             signature  TEXT NOT NULL,
+             created_at TEXT NOT NULL DEFAULT (datetime('now'))
+         );
+         CREATE INDEX idx_firmware_manifests_model_version
+             ON firmware_manifests(model, version);
+         INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2');",
     )
     .expect("failed to initialise test schema");
     Arc::new(Mutex::new(conn))
@@ -202,7 +217,7 @@ async fn sign_config_verify_roundtrip() {
 
     let payload = b"test config payload for signing roundtrip";
     let signed = sign_config(payload, &ca).expect("sign_config");
-    let recovered = verify_signature(&signed, ca.public_key()).expect("verify_signature");
+    let recovered = verify_signature(&signed, ca.public_key(), Some(ca.ed25519_public_key())).expect("verify_signature");
 
     assert_eq!(
         recovered, payload,
@@ -222,9 +237,10 @@ async fn verify_signature_tampered_payload_fails() {
     let tampered = SignedPayload {
         payload: B64.encode(b"tampered payload"),
         signature_ml_dsa_65: signed.signature_ml_dsa_65.clone(),
+        signature_ed25519: signed.signature_ed25519.clone(),
     };
 
-    let result = verify_signature(&tampered, ca.public_key());
+    let result = verify_signature(&tampered, ca.public_key(), Some(ca.ed25519_public_key()));
     assert!(
         result.is_err(),
         "verification must fail for tampered payload"
@@ -243,7 +259,7 @@ async fn verify_signature_wrong_public_key_fails() {
     let db2 = fresh_db().await;
     let ca2 = GatewayCA::init(&db2).await.expect("second CA init");
 
-    let result = verify_signature(&signed, ca2.public_key());
+    let result = verify_signature(&signed, ca2.public_key(), Some(ca2.ed25519_public_key()));
     assert!(
         result.is_err(),
         "verification must fail with a different CA public key"
@@ -259,6 +275,7 @@ async fn sign_firmware_manifest_produces_valid_manifest() {
         "2.0.0",
         "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
         "https://fw.example.com/firmware-2.0.0.bin",
+        1024,
         &ca,
     )
     .expect("sign_firmware_manifest");
@@ -272,7 +289,7 @@ async fn sign_firmware_manifest_produces_valid_manifest() {
 
     // The embedded signed payload must verify against the CA public key.
     let recovered_bytes =
-        verify_signature(&manifest.signed, ca.public_key()).expect("manifest signature verify");
+        verify_signature(&manifest.signed, ca.public_key(), Some(ca.ed25519_public_key())).expect("manifest signature verify");
     let recovered: serde_json::Value =
         serde_json::from_slice(&recovered_bytes).expect("manifest JSON parse");
     assert_eq!(recovered["version"], "2.0.0");
@@ -690,5 +707,152 @@ fn inform_wrong_key_fails_decryption() {
     assert!(
         result.is_err(),
         "decryption with wrong key must fail"
+    );
+}
+
+// ===========================================================================
+// Firmware Manifest Tests
+// ===========================================================================
+
+#[tokio::test]
+async fn load_latest_firmware_returns_none_when_no_firmware_registered() {
+    let db = fresh_db().await;
+
+    let result = load_latest_firmware(&db, "USW-24-PoE")
+        .await
+        .expect("load_latest_firmware");
+
+    assert!(
+        result.is_none(),
+        "must return None when no firmware manifests exist for the model"
+    );
+}
+
+#[tokio::test]
+async fn firmware_version_comparison_returns_newer_manifest() {
+    let db = fresh_db().await;
+    let ca = GatewayCA::init(&db).await.expect("CA init");
+
+    // Register two firmware versions for the same model.
+    register_firmware(
+        &db,
+        &ca,
+        "USW-24-PoE",
+        "1.0.0",
+        "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111",
+        2048,
+        "https://fw.example.com/usw-1.0.0.bin",
+    )
+    .await
+    .expect("register firmware 1.0.0");
+
+    register_firmware(
+        &db,
+        &ca,
+        "USW-24-PoE",
+        "2.1.0",
+        "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
+        4096,
+        "https://fw.example.com/usw-2.1.0.bin",
+    )
+    .await
+    .expect("register firmware 2.1.0");
+
+    // Latest firmware should be version 2.1.0 (highest id).
+    let latest = load_latest_firmware(&db, "USW-24-PoE")
+        .await
+        .expect("load_latest_firmware")
+        .expect("firmware row must exist");
+
+    assert_eq!(latest.version, "2.1.0");
+    assert_eq!(latest.size_bytes, 4096);
+    assert_eq!(latest.model, "USW-24-PoE");
+
+    // A device on version 1.0.0 should see 2.1.0 as newer.
+    assert!(
+        sfgw_adopt::inform::is_newer_version(&latest.version, "1.0.0"),
+        "2.1.0 must be newer than 1.0.0"
+    );
+
+    // A device already on 2.1.0 should NOT see it as newer.
+    assert!(
+        !sfgw_adopt::inform::is_newer_version(&latest.version, "2.1.0"),
+        "2.1.0 must not be newer than itself"
+    );
+
+    // A device on 3.0.0 should NOT see 2.1.0 as newer.
+    assert!(
+        !sfgw_adopt::inform::is_newer_version(&latest.version, "3.0.0"),
+        "2.1.0 must not be newer than 3.0.0"
+    );
+}
+
+#[tokio::test]
+async fn firmware_manifest_signature_is_verified_by_ca_public_key() {
+    let db = fresh_db().await;
+    let ca = GatewayCA::init(&db).await.expect("CA init");
+
+    register_firmware(
+        &db,
+        &ca,
+        "UAP-AC-Pro",
+        "3.5.2",
+        "cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333",
+        8192,
+        "https://fw.example.com/uap-3.5.2.bin",
+    )
+    .await
+    .expect("register firmware");
+
+    let row = load_latest_firmware(&db, "UAP-AC-Pro")
+        .await
+        .expect("load_latest_firmware")
+        .expect("firmware row must exist");
+
+    // Decode the stored signature and verify it against the CA public key.
+    let sig_bytes = B64.decode(&row.signature).expect("decode signature base64");
+
+    // Reconstruct the canonical payload that was signed.
+    let canonical = serde_json::json!({
+        "model": row.model,
+        "version": row.version,
+        "sha256": row.sha256,
+        "size_bytes": row.size_bytes,
+        "url": row.url,
+    });
+    let payload_bytes = serde_json::to_vec(&canonical).expect("serialise canonical payload");
+
+    // Verify using ML-DSA-65.
+    use fips204::ml_dsa_65;
+    use fips204::traits::{SerDes, Verifier};
+
+    let vk_arr: &[u8; ml_dsa_65::PK_LEN] = ca
+        .public_key()
+        .try_into()
+        .expect("CA public key correct length");
+    let vk = ml_dsa_65::PublicKey::try_from_bytes(*vk_arr).expect("deserialise CA public key");
+
+    let sig_arr: [u8; ml_dsa_65::SIG_LEN] = sig_bytes
+        .as_slice()
+        .try_into()
+        .expect("signature correct length");
+
+    assert!(
+        vk.verify(&payload_bytes, &sig_arr, b""),
+        "firmware manifest signature must verify against the gateway CA public key"
+    );
+
+    // Tampered payload must NOT verify.
+    let tampered = serde_json::json!({
+        "model": row.model,
+        "version": "9.9.9",
+        "sha256": row.sha256,
+        "size_bytes": row.size_bytes,
+        "url": row.url,
+    });
+    let tampered_bytes = serde_json::to_vec(&tampered).expect("serialise tampered payload");
+    assert!(
+        !vk.verify(&tampered_bytes, &sig_arr, b""),
+        "tampered firmware manifest must NOT verify"
     );
 }

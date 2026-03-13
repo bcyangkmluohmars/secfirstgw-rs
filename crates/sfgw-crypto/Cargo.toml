@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 sfgw-hal = { path = "../sfgw-hal" }
 anyhow.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 zeroize.workspace = true

@@ -110,7 +110,13 @@ async fn fresh_db() -> (sfgw_db::Db, NamedTempFile) {
 
 /// Build the full axum Router (public + protected) suitable for tower testing.
 fn build_app(db: sfgw_db::Db) -> Router {
+    build_app_with_ip(db, "127.0.0.1:12345".parse().unwrap())
+}
+
+/// Build the app with a custom ConnectInfo IP (for IP-binding tests).
+fn build_app_with_ip(db: sfgw_db::Db, addr: std::net::SocketAddr) -> Router {
     let negotiate_store = sfgw_api::e2ee::new_negotiate_store();
+    let envelope_key_store = sfgw_api::e2ee::new_envelope_key_store();
 
     let public_routes = Router::new()
         .route("/api/v1/auth/session", post(proxy_session))
@@ -126,6 +132,8 @@ fn build_app(db: sfgw_db::Db) -> Router {
         .merge(protected_routes)
         .layer(Extension(db))
         .layer(Extension(negotiate_store))
+        .layer(Extension(envelope_key_store))
+        .layer(Extension(axum::extract::ConnectInfo(addr)))
 }
 
 // We need thin wrapper handlers because the real handlers are private (non-pub)
@@ -189,10 +197,19 @@ async fn proxy_setup(
             Json(json!({ "error": "username and password are required" })),
         );
     }
-    if body.password.len() < 8 {
+    if body.password.len() < 12 {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "password must be at least 8 characters" })),
+            Json(json!({ "error": "password must be at least 12 characters" })),
+        );
+    }
+    if !body.password.chars().any(|c| c.is_ascii_uppercase())
+        || !body.password.chars().any(|c| c.is_ascii_lowercase())
+        || !body.password.chars().any(|c| c.is_ascii_digit())
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "password must contain at least one uppercase letter, one lowercase letter, and one digit" })),
         );
     }
     let hash = sfgw_api::auth::hash_password(&body.password).unwrap();
@@ -230,6 +247,7 @@ struct E2eeCredentials {
 async fn proxy_login(
     Extension(db): Extension<sfgw_db::Db>,
     Extension(negotiate_store): Extension<sfgw_api::e2ee::NegotiateStore>,
+    Extension(envelope_key_store): Extension<sfgw_api::e2ee::EnvelopeKeyStore>,
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
@@ -284,22 +302,14 @@ async fn proxy_login(
     }
 
     let fingerprint = sfgw_api::middleware::fingerprint_from_headers(&headers);
-    let client_ip = sfgw_api::middleware::client_ip_from_headers(&headers);
-    let client_ip = if client_ip == "unknown" {
-        "127.0.0.1".to_string()
-    } else {
-        client_ip
-    };
+    let test_addr: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
+    let client_ip = sfgw_api::middleware::client_ip_from_addr(&test_addr);
 
     let envelope_key = negotiate_key
         .as_ref()
         .and_then(|_| sfgw_api::e2ee::generate_envelope_key().ok());
-    let envelope_key_b64 = envelope_key
-        .as_ref()
-        .map(|k| B64.encode(k))
-        .unwrap_or_default();
 
-    match sfgw_api::auth::create_session(&db, user.id, &client_ip, &fingerprint, &envelope_key_b64)
+    match sfgw_api::auth::create_session(&db, user.id, &client_ip, &fingerprint, "")
         .await
     {
         Ok((token, expires_at)) => {
@@ -308,6 +318,10 @@ async fn proxy_login(
                 "expires_at": expires_at.to_rfc3339(),
             });
             if let (Some(neg_key), Some(env_key)) = (&negotiate_key, &envelope_key) {
+                {
+                    let mut store = envelope_key_store.lock().await;
+                    store.insert(token.clone(), env_key.to_vec());
+                }
                 if let Ok(sealed) = sfgw_api::e2ee::Envelope::seal(neg_key, env_key) {
                     response["envelope"] = json!({ "iv": sealed.iv, "data": sealed.data });
                 }
@@ -330,6 +344,7 @@ struct SessionRequest {
 async fn proxy_session(
     Extension(db): Extension<sfgw_db::Db>,
     Extension(negotiate_store): Extension<sfgw_api::e2ee::NegotiateStore>,
+    Extension(envelope_key_store): Extension<sfgw_api::e2ee::EnvelopeKeyStore>,
     headers: HeaderMap,
     Json(body): Json<SessionRequest>,
 ) -> impl IntoResponse {
@@ -343,26 +358,24 @@ async fn proxy_session(
         }
     };
 
-    let (negotiate_id, server_pub) =
-        match sfgw_api::e2ee::negotiate(&negotiate_store, &client_pub).await {
+    let neg_result =
+        match sfgw_api::e2ee::negotiate(&negotiate_store, &client_pub, None).await {
             Ok(r) => r,
             Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))),
         };
 
+    let negotiate_id = neg_result.negotiate_id;
+
     let mut response = json!({
         "negotiate_id": negotiate_id,
-        "server_public_key": B64.encode(&server_pub),
+        "server_public_key": B64.encode(&neg_result.server_public_key),
         "authenticated": false,
     });
 
     if let Some(ref token) = body.token {
         let client_ip = {
-            let ip = sfgw_api::middleware::client_ip_from_headers(&headers);
-            if ip == "unknown" {
-                "127.0.0.1".to_string()
-            } else {
-                ip
-            }
+            let addr: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
+            sfgw_api::middleware::client_ip_from_addr(&addr)
         };
         let fingerprint = sfgw_api::middleware::fingerprint_from_headers(&headers);
 
@@ -371,8 +384,10 @@ async fn proxy_session(
         {
             if let Ok(Some(user)) = sfgw_api::auth::get_user_by_id(&db, user_id).await {
                 if let Ok(env_key) = sfgw_api::e2ee::generate_envelope_key() {
-                    let env_key_b64 = B64.encode(&env_key);
-                    let _ = sfgw_api::auth::update_envelope_key(&db, token, &env_key_b64).await;
+                    {
+                        let mut store = envelope_key_store.lock().await;
+                        store.insert(token.to_string(), env_key.to_vec());
+                    }
                     if let Ok(neg_key) =
                         sfgw_api::e2ee::take_negotiate_key(&negotiate_store, &negotiate_id).await
                     {
@@ -468,12 +483,12 @@ async fn setup_admin(
 
 /// Create admin + login via plain credentials, return (app, token, db, tmpfile).
 async fn setup_and_login() -> (Router, String, sfgw_db::Db, NamedTempFile) {
-    let (app, db, tmp) = setup_admin("admin", "password1234").await;
+    let (app, db, tmp) = setup_admin("admin", "Password1234").await;
     let (status, body) = send(
         &app,
         post_json(
             "/api/v1/auth/login",
-            &json!({ "username": "admin", "password": "password1234" }),
+            &json!({ "username": "admin", "password": "Password1234" }),
         ),
     )
     .await;
@@ -495,7 +510,7 @@ async fn test_setup_creates_admin() {
         &app,
         post_json(
             "/api/v1/auth/setup",
-            &json!({ "username": "admin", "password": "supersecret1" }),
+            &json!({ "username": "admin", "password": "Supersecret1" }),
         ),
     )
     .await;
@@ -508,7 +523,7 @@ async fn test_setup_creates_admin() {
 
 #[tokio::test]
 async fn test_setup_rejects_when_users_exist() {
-    let (app, _db, _tmp) = setup_admin("admin", "supersecret1").await;
+    let (app, _db, _tmp) = setup_admin("admin", "Supersecret1").await;
 
     // Second setup should be rejected
     let (status, body) = send(
@@ -526,13 +541,13 @@ async fn test_setup_rejects_when_users_exist() {
 
 #[tokio::test]
 async fn test_plain_login() {
-    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+    let (app, _db, _tmp) = setup_admin("admin", "Password1234").await;
 
     let (status, body) = send(
         &app,
         post_json(
             "/api/v1/auth/login",
-            &json!({ "username": "admin", "password": "password1234" }),
+            &json!({ "username": "admin", "password": "Password1234" }),
         ),
     )
     .await;
@@ -544,7 +559,7 @@ async fn test_plain_login() {
 
 #[tokio::test]
 async fn test_plain_login_bad_password() {
-    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+    let (app, _db, _tmp) = setup_admin("admin", "Password1234").await;
 
     let (status, body) = send(
         &app,
@@ -650,7 +665,7 @@ async fn test_protected_route_works_with_token() {
 #[tokio::test]
 async fn test_e2ee_login_flow() {
     // 1. Setup admin
-    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+    let (app, _db, _tmp) = setup_admin("admin", "Password1234").await;
 
     // 2. Client generates X25519 keypair
     let client_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
@@ -702,7 +717,7 @@ async fn test_e2ee_login_flow() {
     // 6. Encrypt credentials with the negotiate AES key
     let creds_json = serde_json::to_vec(&json!({
         "username": "admin",
-        "password": "password1234",
+        "password": "Password1234",
     }))
     .unwrap();
 
@@ -762,7 +777,7 @@ async fn test_setup_rejects_short_password() {
     assert!(body["error"]
         .as_str()
         .unwrap()
-        .contains("at least 8 characters"));
+        .contains("at least 12 characters"));
 }
 
 #[tokio::test]
@@ -774,7 +789,7 @@ async fn test_setup_rejects_empty_fields() {
         &app,
         post_json(
             "/api/v1/auth/setup",
-            &json!({ "username": "", "password": "supersecret1" }),
+            &json!({ "username": "", "password": "Supersecret1" }),
         ),
     )
     .await;
@@ -785,13 +800,13 @@ async fn test_setup_rejects_empty_fields() {
 
 #[tokio::test]
 async fn test_login_nonexistent_user() {
-    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+    let (app, _db, _tmp) = setup_admin("admin", "Password1234").await;
 
     let (status, _) = send(
         &app,
         post_json(
             "/api/v1/auth/login",
-            &json!({ "username": "nobody", "password": "password1234" }),
+            &json!({ "username": "nobody", "password": "Password1234" }),
         ),
     )
     .await;
@@ -851,12 +866,12 @@ async fn negotiate_and_derive_key(
 
 #[tokio::test]
 async fn test_e2ee_login_tampered_ciphertext_rejected() {
-    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+    let (app, _db, _tmp) = setup_admin("admin", "Password1234").await;
     let (negotiate_id, aes_key, _) = negotiate_and_derive_key(&app).await;
 
     let creds_json = serde_json::to_vec(&json!({
         "username": "admin",
-        "password": "password1234",
+        "password": "Password1234",
     }))
     .unwrap();
     let (mut ciphertext, iv) = sfgw_api::e2ee::encrypt(&aes_key, &creds_json).unwrap();
@@ -885,12 +900,12 @@ async fn test_e2ee_login_tampered_ciphertext_rejected() {
 
 #[tokio::test]
 async fn test_e2ee_login_tampered_iv_rejected() {
-    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+    let (app, _db, _tmp) = setup_admin("admin", "Password1234").await;
     let (negotiate_id, aes_key, _) = negotiate_and_derive_key(&app).await;
 
     let creds_json = serde_json::to_vec(&json!({
         "username": "admin",
-        "password": "password1234",
+        "password": "Password1234",
     }))
     .unwrap();
     let (ciphertext, mut iv) = sfgw_api::e2ee::encrypt(&aes_key, &creds_json).unwrap();
@@ -919,12 +934,12 @@ async fn test_e2ee_login_tampered_iv_rejected() {
 async fn test_e2ee_negotiate_id_replay_rejected() {
     // Negotiate IDs are consumed on first use (take_negotiate_key removes the entry).
     // A second login attempt with the same negotiate_id must fail.
-    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+    let (app, _db, _tmp) = setup_admin("admin", "Password1234").await;
     let (negotiate_id, aes_key, _) = negotiate_and_derive_key(&app).await;
 
     let creds_json = serde_json::to_vec(&json!({
         "username": "admin",
-        "password": "password1234",
+        "password": "Password1234",
     }))
     .unwrap();
     let (ciphertext, iv) = sfgw_api::e2ee::encrypt(&aes_key, &creds_json).unwrap();
@@ -969,13 +984,13 @@ async fn test_e2ee_negotiate_id_replay_rejected() {
 #[tokio::test]
 async fn test_e2ee_wrong_key_decryption_fails() {
     // Encrypt with a random key that doesn't match the negotiate key
-    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+    let (app, _db, _tmp) = setup_admin("admin", "Password1234").await;
     let (negotiate_id, _aes_key, _) = negotiate_and_derive_key(&app).await;
 
     let wrong_key = sfgw_api::e2ee::generate_envelope_key().unwrap();
     let creds_json = serde_json::to_vec(&json!({
         "username": "admin",
-        "password": "password1234",
+        "password": "Password1234",
     }))
     .unwrap();
     let (ciphertext, iv) = sfgw_api::e2ee::encrypt(&wrong_key, &creds_json).unwrap();
@@ -1015,7 +1030,7 @@ async fn test_protected_route_401_with_invalid_token() {
 #[tokio::test]
 async fn test_protected_route_401_with_expired_token() {
     // Manually insert an expired session and verify it's rejected
-    let (app, db, _tmp) = setup_admin("admin", "password1234").await;
+    let (app, db, _tmp) = setup_admin("admin", "Password1234").await;
 
     // Get user id
     let user_id: i64 = {
@@ -1051,45 +1066,53 @@ async fn test_protected_route_401_with_expired_token() {
 #[tokio::test]
 async fn test_session_binding_rejects_different_ip() {
     // Create a session bound to 127.0.0.1, then try accessing from a different IP
-    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+    let (db, _tmp) = fresh_db().await;
 
-    // Login from 127.0.0.1
-    let (status, body) = send(
-        &app,
+    // Build app with 127.0.0.1
+    let app1 = build_app_with_ip(db.clone(), "127.0.0.1:12345".parse().unwrap());
+
+    // Setup admin
+    let (status, _) = send(
+        &app1,
         post_json(
-            "/api/v1/auth/login",
-            &json!({ "username": "admin", "password": "password1234" }),
+            "/api/v1/auth/setup",
+            &json!({ "username": "admin", "password": "Password1234" }),
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let token = body["token"].as_str().unwrap();
+    assert!(status.is_success());
 
-    // Try accessing from a different IP — build request with different x-forwarded-for
-    let req = Request::builder()
-        .method("GET")
-        .uri("/api/v1/status")
-        .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .header(header::USER_AGENT, "test-agent")
-        .header("x-forwarded-for", "10.99.99.99")
-        .body(Body::empty())
-        .unwrap();
+    // Login from 127.0.0.1
+    let (status, body) = send(
+        &app1,
+        post_json(
+            "/api/v1/auth/login",
+            &json!({ "username": "admin", "password": "Password1234" }),
+        ),
+    )
+    .await;
+    assert!(status.is_success());
+    let token = body["token"].as_str().unwrap().to_string();
 
-    let (status, body) = send(&app, req).await;
+    // Build a second app instance with a DIFFERENT IP using the same DB
+    let app2 = build_app_with_ip(db, "10.99.99.99:54321".parse().unwrap());
+
+    // Try accessing from the different IP — should be rejected
+    let (status, body) = send(&app2, get_with_token("/api/v1/status", Some(&token))).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(body["error"].as_str().is_some());
 }
 
 #[tokio::test]
 async fn test_session_binding_rejects_different_user_agent() {
-    let (app, _db, _tmp) = setup_admin("admin", "password1234").await;
+    let (app, _db, _tmp) = setup_admin("admin", "Password1234").await;
 
     // Login with "test-agent" user-agent
     let (status, body) = send(
         &app,
         post_json(
             "/api/v1/auth/login",
-            &json!({ "username": "admin", "password": "password1234" }),
+            &json!({ "username": "admin", "password": "Password1234" }),
         ),
     )
     .await;

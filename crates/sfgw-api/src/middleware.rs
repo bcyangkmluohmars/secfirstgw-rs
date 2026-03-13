@@ -115,17 +115,10 @@ fn extract_token(parts: &Parts) -> Option<String> {
 }
 
 /// Extract client IP from the request.
+///
+/// Always uses the socket peer address (ConnectInfo). Never trusts
+/// X-Forwarded-For or other proxy headers — they are attacker-controlled.
 fn extract_client_ip(parts: &Parts) -> String {
-    // Check X-Forwarded-For first (for reverse proxy setups)
-    if let Some(forwarded) = parts.headers.get("x-forwarded-for") {
-        if let Ok(value) = forwarded.to_str() {
-            if let Some(first_ip) = value.split(',').next() {
-                return first_ip.trim().to_string();
-            }
-        }
-    }
-
-    // Fall back to ConnectInfo if available
     if let Some(addr) = parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>() {
         return addr.0.ip().to_string();
     }
@@ -143,16 +136,11 @@ fn extract_fingerprint(parts: &Parts) -> String {
         .to_string()
 }
 
-/// Helper to extract client IP from headers (used by endpoint handlers).
-pub fn client_ip_from_headers(headers: &axum::http::HeaderMap) -> String {
-    if let Some(forwarded) = headers.get("x-forwarded-for") {
-        if let Ok(value) = forwarded.to_str() {
-            if let Some(first_ip) = value.split(',').next() {
-                return first_ip.trim().to_string();
-            }
-        }
-    }
-    "unknown".to_string()
+/// Helper to extract client IP from a socket address (used by endpoint handlers).
+///
+/// Never trusts X-Forwarded-For or other proxy headers.
+pub fn client_ip_from_addr(addr: &std::net::SocketAddr) -> String {
+    addr.ip().to_string()
 }
 
 /// Helper to extract fingerprint from headers (used by endpoint handlers).

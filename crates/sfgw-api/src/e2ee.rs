@@ -34,6 +34,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 const NEGOTIATE_TTL_SECS: u64 = 120;
+const NEGOTIATE_MAX_CAPACITY: usize = 10_000;
 const HKDF_INFO: &[u8] = b"sfgw-e2ee-v1";
 
 // ---------------------------------------------------------------------------
@@ -52,18 +53,55 @@ pub fn new_negotiate_store() -> NegotiateStore {
     NegotiateStore(Arc::new(Mutex::new(HashMap::new())))
 }
 
-/// Perform the server side of the X25519 key exchange.
-/// Returns `(negotiate_id, server_public_key_bytes)`.
+// ---------------------------------------------------------------------------
+// Envelope key store (in-memory only — never persisted to disk)
+// ---------------------------------------------------------------------------
+
+/// In-memory store for E2EE envelope keys, keyed by session token.
+///
+/// Envelope keys are intentionally NOT persisted to the database.  If the
+/// server restarts, clients receive a 401 and must re-negotiate — this is
+/// the correct security trade-off: a DB compromise never exposes envelope
+/// keys.
+pub type EnvelopeKeyStore = Arc<Mutex<HashMap<String, Vec<u8>>>>;
+
+pub fn new_envelope_key_store() -> EnvelopeKeyStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Result of a hybrid negotiate operation.
+pub struct NegotiateResult {
+    /// Unique session identifier.
+    pub negotiate_id: String,
+    /// Server's X25519 public key (32 bytes).
+    pub server_public_key: Vec<u8>,
+    /// ML-KEM-1024 ciphertext, present only when the client sent a
+    /// `kem_public_key`.  The client decapsulates this to obtain
+    /// `shared_secret_2`.
+    pub kem_ciphertext: Option<Vec<u8>>,
+}
+
+/// Perform the server side of the hybrid X25519 + ML-KEM-1024 key exchange.
+///
+/// When `client_kem_public_key` is `Some`, the server also performs ML-KEM
+/// encapsulation and combines both shared secrets via HKDF:
+///   combined = HKDF-SHA256(x25519_ss || ml_kem_ss, info="sfgw-e2ee-v1")
+///
+/// When `client_kem_public_key` is `None`, falls back to X25519-only for
+/// backwards compatibility with clients that do not yet support ML-KEM
+/// (e.g. browsers without a WASM ML-KEM library).
 pub async fn negotiate(
     store: &NegotiateStore,
     client_public_key: &[u8],
-) -> Result<(String, Vec<u8>), &'static str> {
+    client_kem_public_key: Option<&[u8]>,
+) -> Result<NegotiateResult, &'static str> {
     if client_public_key.len() != 32 {
         return Err("client public key must be 32 bytes");
     }
 
     let rng = SystemRandom::new();
 
+    // --- X25519 ECDH ---
     let server_private = EphemeralPrivateKey::generate(&X25519, &rng)
         .map_err(|_| "failed to generate server keypair")?;
     let server_public = server_private
@@ -72,17 +110,45 @@ pub async fn negotiate(
     let server_public_bytes = server_public.as_ref().to_vec();
 
     let peer_public = UnparsedPublicKey::new(&X25519, client_public_key);
-    let shared_secret = agreement::agree_ephemeral(server_private, &peer_public, |secret| {
+    let x25519_shared = agreement::agree_ephemeral(server_private, &peer_public, |secret| {
         secret.to_vec()
     })
     .map_err(|_| "ECDH key agreement failed")?;
 
-    let aes_key = derive_aes_key(&shared_secret)?;
+    // --- ML-KEM-1024 (optional, hybrid) ---
+    let (combined_ikm, kem_ciphertext) = if let Some(kem_pk_bytes) = client_kem_public_key {
+        use fips203::ml_kem_1024;
+        use fips203::traits::{Encaps, SerDes};
+
+        let ek_arr: [u8; ml_kem_1024::EK_LEN] = kem_pk_bytes
+            .try_into()
+            .map_err(|_| "ML-KEM-1024 encapsulation key wrong length")?;
+        let ek = ml_kem_1024::EncapsKey::try_from_bytes(ek_arr)
+            .map_err(|_| "invalid ML-KEM-1024 encapsulation key")?;
+        let (kem_ss, ct) = ek
+            .try_encaps()
+            .map_err(|_| "ML-KEM-1024 encapsulation failed")?;
+
+        // Combine: x25519_ss || ml_kem_ss
+        let mut ikm = Vec::with_capacity(x25519_shared.len() + 32);
+        ikm.extend_from_slice(&x25519_shared);
+        ikm.extend_from_slice(&kem_ss.into_bytes());
+
+        (ikm, Some(ct.into_bytes().to_vec()))
+    } else {
+        (x25519_shared, None)
+    };
+
+    let aes_key = derive_aes_key(&combined_ikm)?;
     let negotiate_id = Uuid::new_v4().to_string();
 
     let mut store = store.0.lock().await;
     // Purge expired
     store.retain(|_, entry| entry.created_at.elapsed().as_secs() < NEGOTIATE_TTL_SECS);
+    // Prevent unbounded growth (DoS protection)
+    if store.len() >= NEGOTIATE_MAX_CAPACITY {
+        return Err("too many pending negotiations, try again later");
+    }
     store.insert(
         negotiate_id.clone(),
         NegotiateEntry {
@@ -91,7 +157,11 @@ pub async fn negotiate(
         },
     );
 
-    Ok((negotiate_id, server_public_bytes))
+    Ok(NegotiateResult {
+        negotiate_id,
+        server_public_key: server_public_bytes,
+        kem_ciphertext,
+    })
 }
 
 /// Consume a negotiate entry and return its AES key.
@@ -228,42 +298,31 @@ pub async fn e2ee_layer(request: Request<Body>, next: Next) -> Response<Body> {
         }
     };
 
-    // Look up envelope key from session via DB
-    let db = match request.extensions().get::<sfgw_db::Db>().cloned() {
-        Some(db) => db,
+    // Look up envelope key from in-memory store (never persisted to DB)
+    let env_store = match request.extensions().get::<EnvelopeKeyStore>().cloned() {
+        Some(s) => s,
         None => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "db not available")
+            return (StatusCode::INTERNAL_SERVER_ERROR, "envelope key store not available")
                 .into_response();
         }
     };
 
     let envelope_key = {
-        let conn = db.lock().await;
-        match conn.query_row(
-            "SELECT envelope_key FROM sessions WHERE token = ?1",
-            rusqlite::params![token],
-            |row| row.get::<_, String>(0),
-        ) {
-            Ok(key_b64) if !key_b64.is_empty() => {
-                match B64.decode(&key_b64) {
-                    Ok(k) if k.len() == 32 => {
-                        let mut arr = [0u8; 32];
-                        arr.copy_from_slice(&k);
-                        arr
-                    }
-                    _ => {
-                        return (StatusCode::INTERNAL_SERVER_ERROR, "corrupted envelope key")
-                            .into_response();
-                    }
-                }
+        let store = env_store.lock().await;
+        match store.get(&token) {
+            Some(k) if k.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(k);
+                arr
             }
-            Ok(_) => {
-                // No envelope key for this session — E2EE not set up
-                return (StatusCode::BAD_REQUEST, "session has no E2EE envelope key")
+            Some(_) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "corrupted envelope key")
                     .into_response();
             }
-            Err(_) => {
-                return (StatusCode::UNAUTHORIZED, "invalid session").into_response();
+            None => {
+                // Key not in memory (server restarted or session has no E2EE) — client must re-negotiate
+                return (StatusCode::UNAUTHORIZED, "E2EE session expired, please re-negotiate")
+                    .into_response();
             }
         }
     };
@@ -320,10 +379,12 @@ pub async fn e2ee_layer(request: Request<Body>, next: Next) -> Response<Body> {
             *response.status_mut() = resp_parts.status;
             response.headers_mut().insert(
                 header::CONTENT_TYPE,
+                // INVARIANT: "application/json" is a valid HeaderValue literal
                 "application/json".parse().unwrap(),
             );
             response.headers_mut().insert(
                 "x-sfgw-e2ee",
+                // INVARIANT: "true" is a valid HeaderValue literal
                 "true".parse().unwrap(),
             );
             response

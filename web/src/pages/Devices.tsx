@@ -2,11 +2,11 @@ import { useEffect, useState, useCallback } from 'react'
 import { api, type DeviceSummary } from '../api'
 
 const stateBadge: Record<string, string> = {
-  Discovered: 'bg-blue-900/50 text-blue-300',
-  Pending: 'bg-amber-900/50 text-amber-300',
-  Approved: 'bg-emerald-900/50 text-emerald-300',
-  Adopted: 'bg-emerald-600/50 text-emerald-200',
-  Rejected: 'bg-red-900/50 text-red-300',
+  Discovered: 'bg-sky-500/10 text-sky-400 border-sky-500/20',
+  Pending: 'bg-amber-500/10 text-amber-400 border-amber-500/15',
+  Approved: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+  Adopted: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/25',
+  Rejected: 'bg-red-500/10 text-red-400 border-red-500/15',
 }
 
 export default function Devices() {
@@ -34,9 +34,17 @@ export default function Devices() {
 
   useEffect(() => { load() }, [load])
 
-  const handleApprove = async (mac: string) => {
+  const handleApprove = async (device: DeviceSummary) => {
     try {
-      await api.approveDevice(mac)
+      // The backend requires an AdoptionRequest body with device details.
+      // device_public_key and device_kem_public_key are populated by the
+      // backend from stored discovery data; we pass what we have here.
+      await api.approveDevice(device.mac, {
+        device_mac: device.mac,
+        device_model: device.model ?? '',
+        device_ip: device.ip ?? '',
+        device_public_key: '', // Backend fills from stored discovery data
+      })
       load()
     } catch (e: unknown) {
       setError((e as Error).message)
@@ -63,9 +71,11 @@ export default function Devices() {
 
   if (loading) {
     return (
-      <div className="flex items-center gap-3">
-        <div className="w-5 h-5 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin" />
-        <span className="text-sm font-mono text-gray-500">Loading devices...</span>
+      <div className="flex items-center justify-center py-20">
+        <div className="text-center">
+          <div className="w-8 h-8 border-2 border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-sm text-navy-400">Loading devices...</p>
+        </div>
       </div>
     )
   }
@@ -73,78 +83,98 @@ export default function Devices() {
   const currentList = tab === 'all' ? devices : pending
 
   return (
-    <div>
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="text-lg font-bold font-mono">Devices</h2>
-        <span className="text-xs font-mono text-gray-500">{devices.length} total, {pending.length} pending</span>
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-gray-100">Devices</h2>
+        <span className="text-xs font-medium text-navy-400">
+          {devices.length} total{pending.length > 0 && <>, <span className="text-amber-400">{pending.length} pending</span></>}
+        </span>
       </div>
 
       {error && (
-        <div className="bg-red-900/30 border border-red-800 rounded-lg p-4 mb-4">
-          <p className="text-sm font-mono text-red-400">{error}</p>
+        <div className="bg-red-500/5 border border-red-500/20 rounded-xl p-4 animate-fade-in">
+          <p className="text-sm text-red-400">{error}</p>
         </div>
       )}
 
       {/* Tab bar */}
-      <div className="flex gap-1 mb-4">
+      <div className="flex gap-1 bg-navy-900 rounded-lg p-1 w-fit">
         <button
           onClick={() => setTab('all')}
-          className={`px-4 py-2 text-xs font-mono rounded-t ${tab === 'all' ? 'bg-gray-900 text-gray-200 border border-gray-800 border-b-0' : 'bg-gray-800/50 text-gray-500 hover:text-gray-300'}`}
+          className={`px-4 py-2 text-xs font-medium rounded-md transition-all duration-150 ${
+            tab === 'all'
+              ? 'bg-navy-800 text-gray-200 shadow-sm'
+              : 'text-navy-400 hover:text-gray-300'
+          }`}
         >
           All Devices ({devices.length})
         </button>
         <button
           onClick={() => setTab('pending')}
-          className={`px-4 py-2 text-xs font-mono rounded-t ${tab === 'pending' ? 'bg-gray-900 text-gray-200 border border-gray-800 border-b-0' : 'bg-gray-800/50 text-gray-500 hover:text-gray-300'}`}
+          className={`px-4 py-2 text-xs font-medium rounded-md transition-all duration-150 ${
+            tab === 'pending'
+              ? 'bg-navy-800 text-gray-200 shadow-sm'
+              : 'text-navy-400 hover:text-gray-300'
+          }`}
         >
-          Pending Approval ({pending.length})
+          Pending ({pending.length})
         </button>
       </div>
 
       {currentList.length === 0 ? (
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-8 text-center">
-          <p className="text-sm font-mono text-gray-500">
-            {tab === 'all' ? 'No devices discovered.' : 'No pending devices.'}
+        <div className="bg-navy-900 border border-navy-800/50 rounded-xl p-16 text-center animate-fade-in">
+          <svg className="w-12 h-12 text-navy-700 mx-auto mb-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <rect x="4" y="4" width="16" height="12" rx="2" />
+            <line x1="12" y1="16" x2="12" y2="20" />
+            <line x1="8" y1="20" x2="16" y2="20" />
+          </svg>
+          <p className="text-sm font-medium text-navy-400">
+            {tab === 'all' ? 'No devices adopted yet' : 'No pending devices'}
+          </p>
+          <p className="text-xs text-navy-600 mt-2 max-w-xs mx-auto">
+            {tab === 'all'
+              ? 'Connect a device to the MGMT network. It will appear here once discovered.'
+              : 'Devices awaiting approval will appear here.'}
           </p>
         </div>
       ) : (
-        <div className="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+        <div className="bg-navy-900 border border-navy-800/50 rounded-xl overflow-hidden animate-fade-in">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-gray-800">
-                  <th className="text-left px-3 py-2 text-xs text-gray-500 uppercase tracking-wider font-mono font-medium">State</th>
-                  <th className="text-left px-3 py-2 text-xs text-gray-500 uppercase tracking-wider font-mono font-medium">Name</th>
-                  <th className="text-left px-3 py-2 text-xs text-gray-500 uppercase tracking-wider font-mono font-medium">Model</th>
-                  <th className="text-left px-3 py-2 text-xs text-gray-500 uppercase tracking-wider font-mono font-medium">IP</th>
-                  <th className="text-left px-3 py-2 text-xs text-gray-500 uppercase tracking-wider font-mono font-medium">MAC</th>
-                  <th className="text-left px-3 py-2 text-xs text-gray-500 uppercase tracking-wider font-mono font-medium">Last Seen</th>
-                  <th className="text-left px-3 py-2 text-xs text-gray-500 uppercase tracking-wider font-mono font-medium">Actions</th>
+                <tr className="border-b border-navy-800/50">
+                  <th className="text-left px-4 py-3 text-[11px] text-navy-400 uppercase tracking-wider font-medium">State</th>
+                  <th className="text-left px-4 py-3 text-[11px] text-navy-400 uppercase tracking-wider font-medium">Name</th>
+                  <th className="text-left px-4 py-3 text-[11px] text-navy-400 uppercase tracking-wider font-medium">Model</th>
+                  <th className="text-left px-4 py-3 text-[11px] text-navy-400 uppercase tracking-wider font-medium">IP</th>
+                  <th className="text-left px-4 py-3 text-[11px] text-navy-400 uppercase tracking-wider font-medium">MAC</th>
+                  <th className="text-left px-4 py-3 text-[11px] text-navy-400 uppercase tracking-wider font-medium">Last Seen</th>
+                  <th className="text-left px-4 py-3 text-[11px] text-navy-400 uppercase tracking-wider font-medium">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {currentList.map((d) => (
-                  <tr key={d.id} className="border-b border-gray-800/50 hover:bg-gray-800/30">
-                    <td className="px-3 py-2.5">
-                      <span className={`text-xs font-mono font-bold px-1.5 py-0.5 rounded ${stateBadge[d.state] || 'bg-gray-800 text-gray-400'}`}>
+                  <tr key={d.id} className="border-b border-navy-800/30 hover:bg-navy-800/20 transition-colors">
+                    <td className="px-4 py-3">
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${stateBadge[d.state] || 'bg-navy-800 text-navy-400 border-navy-700/50'}`}>
                         {d.state}
                       </span>
                     </td>
-                    <td className="px-3 py-2.5 font-mono text-gray-300">{d.name || '(unnamed)'}</td>
-                    <td className="px-3 py-2.5 font-mono text-gray-300">{d.model || '---'}</td>
-                    <td className="px-3 py-2.5 font-mono text-gray-300">{d.ip || '---'}</td>
-                    <td className="px-3 py-2.5 font-mono text-gray-300">{d.mac}</td>
-                    <td className="px-3 py-2.5 font-mono text-gray-400 text-xs">{d.last_seen ? new Date(d.last_seen).toLocaleString() : '---'}</td>
-                    <td className="px-3 py-2.5">
+                    <td className="px-4 py-3 text-gray-200 text-sm">{d.name || <span className="text-navy-500 italic">unnamed</span>}</td>
+                    <td className="px-4 py-3 font-mono text-gray-400 text-xs">{d.model || '---'}</td>
+                    <td className="px-4 py-3 font-mono text-gray-400 text-xs tabular-nums">{d.ip || '---'}</td>
+                    <td className="px-4 py-3 font-mono text-gray-400 text-xs">{d.mac}</td>
+                    <td className="px-4 py-3 text-navy-500 text-xs">{d.last_seen ? new Date(d.last_seen).toLocaleString() : '---'}</td>
+                    <td className="px-4 py-3">
                       <div className="flex gap-2">
                         {(d.state === 'Pending' || d.state === 'Discovered') && (
                           <>
-                            <button onClick={() => handleApprove(d.mac)} className="px-2 py-1 text-xs font-mono rounded bg-emerald-600 hover:bg-emerald-500 text-white">Approve</button>
-                            <button onClick={() => handleReject(d.mac)} className="px-2 py-1 text-xs font-mono rounded bg-red-600 hover:bg-red-500 text-white">Reject</button>
+                            <button onClick={() => handleApprove(d)} className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors">Approve</button>
+                            <button onClick={() => handleReject(d.mac)} className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-red-500/10 text-red-400 border border-red-500/15 hover:bg-red-500/20 transition-colors">Reject</button>
                           </>
                         )}
                         {d.adopted && (
-                          <button onClick={() => handleViewConfig(d.mac)} className="px-2 py-1 text-xs font-mono rounded bg-gray-700 hover:bg-gray-600 text-white">Config</button>
+                          <button onClick={() => handleViewConfig(d.mac)} className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-navy-800 text-gray-400 border border-navy-700/50 hover:bg-navy-700/50 transition-colors">Config</button>
                         )}
                       </div>
                     </td>

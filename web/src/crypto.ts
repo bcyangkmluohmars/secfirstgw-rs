@@ -12,6 +12,21 @@
  *
  * On login: negotiate via /auth/session (no token), then encrypt creds for /auth/login
  * On reload: negotiate via /auth/session (with token) → immediate resume with envelope key
+ *
+ * HYBRID KEY EXCHANGE LIMITATION:
+ * The server supports hybrid X25519 + ML-KEM-1024 key exchange (FIPS 203).
+ * However, the Web Crypto API does NOT yet support ML-KEM / Kyber.
+ * Until a WASM ML-KEM library is integrated into the frontend, the client
+ * sends only the X25519 public key (kem_public_key is omitted).  The server
+ * gracefully falls back to X25519-only when kem_public_key is absent.
+ *
+ * TODO: Integrate a WASM ML-KEM-1024 library (e.g. pqcrypto-wasm or
+ * crystals-kyber-wasm) to enable full hybrid key exchange from the browser.
+ * When done:
+ *   - Generate ML-KEM-1024 keypair alongside X25519
+ *   - Send kem_public_key in the session request
+ *   - Decapsulate the returned kem_ciphertext to get shared_secret_2
+ *   - Combine: HKDF-SHA256(x25519_ss || ml_kem_ss, info="sfgw-e2ee-v1")
  */
 
 import { api, getToken, type SessionResponse } from './api';

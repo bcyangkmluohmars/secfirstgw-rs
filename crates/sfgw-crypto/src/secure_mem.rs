@@ -11,10 +11,13 @@
 //! This makes cold boot attacks, DMA attacks, swap forensics,
 //! and heap spraying all useless against key material.
 
-use anyhow::Result;
+use crate::CryptoError;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 use ring::rand::{SecureRandom, SystemRandom};
 use zeroize::Zeroize;
+
+/// Convenience alias for results from this module.
+type Result<T> = std::result::Result<T, CryptoError>;
 
 /// Encrypted in-memory container for sensitive data.
 /// Data is AES-256-GCM encrypted with an ephemeral key.
@@ -33,6 +36,7 @@ pub struct SecureBox<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> {
 
 /// Lock a memory region with `mlock()` to prevent swapping.
 /// Returns `true` on success.
+#[allow(unsafe_code)]
 fn mlock_region(ptr: *const u8, len: usize) -> bool {
     if len == 0 {
         return true;
@@ -42,6 +46,7 @@ fn mlock_region(ptr: *const u8, len: usize) -> bool {
 
 /// Mark a memory region with `madvise(MADV_DONTDUMP)` to exclude from core dumps.
 /// Returns `true` on success.
+#[allow(unsafe_code)]
 fn madvise_dontdump(ptr: *mut u8, len: usize) -> bool {
     if len == 0 {
         return true;
@@ -50,6 +55,7 @@ fn madvise_dontdump(ptr: *mut u8, len: usize) -> bool {
 }
 
 /// Unlock a memory region previously locked with `mlock()`.
+#[allow(unsafe_code)]
 fn munlock_region(ptr: *const u8, len: usize) {
     if len > 0 {
         unsafe {
@@ -66,13 +72,14 @@ impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> SecureBox<T> {
     /// 3. `madvise(MADV_DONTDUMP)` on the key bytes.
     /// 4. Encrypts the plaintext in place.
     /// 5. Zeroizes the original plaintext.
+    #[must_use = "dropping a SecureBox without using it wastes the encryption overhead"]
     pub fn new(mut data: T) -> Result<Self> {
         let rng = SystemRandom::new();
 
         // Generate ephemeral key
         let mut key_bytes = [0u8; 32];
         rng.fill(&mut key_bytes)
-            .map_err(|_| anyhow::anyhow!("failed to generate random key"))?;
+            .map_err(|_| CryptoError::CryptoFailed("failed to generate random key".to_string()))?;
 
         // mlock + MADV_DONTDUMP the key
         let key_ptr = key_bytes.as_ptr();
@@ -86,7 +93,7 @@ impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> SecureBox<T> {
         // Generate nonce
         let mut nonce = [0u8; 12];
         rng.fill(&mut nonce)
-            .map_err(|_| anyhow::anyhow!("failed to generate random nonce"))?;
+            .map_err(|_| CryptoError::CryptoFailed("failed to generate random nonce".to_string()))?;
 
         // Prepare plaintext as a Vec for in-place encryption
         let plaintext_ref = data.as_ref();
@@ -100,13 +107,13 @@ impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> SecureBox<T> {
 
         // Encrypt
         let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes)
-            .map_err(|_| anyhow::anyhow!("failed to create AES-256-GCM key"))?;
+            .map_err(|_| CryptoError::CryptoFailed("failed to create AES-256-GCM key".to_string()))?;
         let sealing_key = LessSafeKey::new(unbound);
         let nonce_val = Nonce::assume_unique_for_key(nonce);
 
         sealing_key
             .seal_in_place_append_tag(nonce_val, Aad::empty(), &mut in_place)
-            .map_err(|_| anyhow::anyhow!("AES-256-GCM encryption failed"))?;
+            .map_err(|_| CryptoError::CryptoFailed("AES-256-GCM encryption failed".to_string()))?;
 
         // mlock the ciphertext as well
         if !in_place.is_empty() {
@@ -126,16 +133,17 @@ impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> SecureBox<T> {
     /// Decrypt and return the plaintext.
     ///
     /// The caller is responsible for zeroizing the returned value when done.
+    #[must_use = "decrypted secret must be used and then zeroized"]
     pub fn open(&self) -> Result<T> {
         let unbound = UnboundKey::new(&AES_256_GCM, &self.key_bytes)
-            .map_err(|_| anyhow::anyhow!("failed to create AES-256-GCM key for decryption"))?;
+            .map_err(|_| CryptoError::CryptoFailed("failed to create AES-256-GCM key for decryption".to_string()))?;
         let opening_key = LessSafeKey::new(unbound);
         let nonce_val = Nonce::assume_unique_for_key(self.nonce);
 
         let mut buf = self.ciphertext.clone();
         let plaintext = opening_key
             .open_in_place(nonce_val, Aad::empty(), &mut buf)
-            .map_err(|_| anyhow::anyhow!("AES-256-GCM decryption failed"))?;
+            .map_err(|_| CryptoError::CryptoFailed("AES-256-GCM decryption failed".to_string()))?;
 
         debug_assert_eq!(plaintext.len(), self.original_len);
         let result = T::from(plaintext.to_vec());
@@ -173,10 +181,13 @@ impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> Drop for SecureBox<T> {
 
 // SecureBox cannot be cloned — there is exactly one copy of the key material.
 // It is Send + Sync because the encrypted data is opaque bytes.
+#[allow(unsafe_code)]
 unsafe impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> Send for SecureBox<T> {}
+#[allow(unsafe_code)]
 unsafe impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> Sync for SecureBox<T> {}
 
 /// Secure comparison (constant-time) to prevent timing attacks.
+#[must_use = "ignoring the result of a security comparison is a bug"]
 pub fn secure_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -192,7 +203,7 @@ pub fn secure_eq(a: &[u8], b: &[u8]) -> bool {
 pub fn secure_random(buf: &mut [u8]) -> Result<()> {
     let rng = SystemRandom::new();
     rng.fill(buf)
-        .map_err(|_| anyhow::anyhow!("SystemRandom::fill failed"))?;
+        .map_err(|_| CryptoError::CryptoFailed("SystemRandom::fill failed".to_string()))?;
     Ok(())
 }
 

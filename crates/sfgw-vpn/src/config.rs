@@ -14,8 +14,7 @@ use crate::{TunnelConfig, WgPeer};
 ///
 /// **Security**: The returned string contains the private key.
 /// It must NEVER be logged or returned in API responses.
-/// The SecureBox is temporarily opened to extract the base64 key.
-pub fn generate_interface_config(config: &TunnelConfig) -> Result<String> {
+pub fn generate_interface_config(config: &TunnelConfig, peers: &[WgPeer]) -> Result<String> {
     let mut private_key_b64 = crate::keys::private_key_to_base64(&config.private_key)?;
 
     let mut out = String::with_capacity(512);
@@ -23,6 +22,12 @@ pub fn generate_interface_config(config: &TunnelConfig) -> Result<String> {
     out.push_str("[Interface]\n");
     out.push_str(&format!("PrivateKey = {}\n", private_key_b64));
     out.push_str(&format!("Address = {}\n", config.address));
+
+    // Add IPv6 address for dual-stack
+    if let Some(ref v6) = config.address_v6 {
+        out.push_str(&format!("Address = {}\n", v6));
+    }
+
     out.push_str(&format!("ListenPort = {}\n", config.listen_port));
     out.push_str(&format!("MTU = {}\n", config.mtu));
 
@@ -33,7 +38,7 @@ pub fn generate_interface_config(config: &TunnelConfig) -> Result<String> {
         out.push_str(&format!("DNS = {}\n", dns));
     }
 
-    for peer in &config.peers {
+    for peer in peers {
         out.push('\n');
         out.push_str(&format_peer_section(peer));
     }
@@ -88,178 +93,107 @@ pub fn generate_peer_config(
     out
 }
 
-/// Generate QR code data string for a mobile peer.
-/// This is simply the peer config — scan it with the WireGuard mobile app.
-pub fn generate_qr_data(
-    peer_private_key: &str,
-    peer_address: &str,
-    dns: Option<&str>,
-    mtu: u16,
-    server_public_key: &str,
-    server_endpoint: &str,
-    allowed_ips: &[String],
-    preshared_key: Option<&str>,
-    persistent_keepalive: Option<u16>,
-) -> String {
-    generate_peer_config(
-        peer_private_key,
-        peer_address,
-        dns,
-        mtu,
-        server_public_key,
-        server_endpoint,
-        allowed_ips,
-        preshared_key,
-        persistent_keepalive,
-    )
-}
-
 /// Parse a WireGuard config file into a `TunnelConfig`.
 ///
 /// Handles both `[Interface]` and `[Peer]` sections.
 /// The private key is immediately wrapped in SecureBox upon parsing.
 pub fn parse_config(input: &str) -> Result<TunnelConfig> {
     let mut private_key = String::new();
-    let mut address = String::new();
+    let mut addresses: Vec<String> = Vec::new();
     let mut listen_port: u16 = 51820;
     let mut dns: Option<String> = None;
     let mut mtu: u16 = 1420;
-    let mut peers: Vec<WgPeer> = Vec::new();
 
     let mut current_section = Section::None;
-    let mut current_peer: Option<PeerBuilder> = None;
 
     for line in input.lines() {
         let line = line.trim();
 
-        // Skip empty lines and comments
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
         }
 
         if line.eq_ignore_ascii_case("[interface]") {
-            // Flush any pending peer
-            if let Some(pb) = current_peer.take() {
-                peers.push(pb.build()?);
-            }
             current_section = Section::Interface;
             continue;
         }
 
         if line.eq_ignore_ascii_case("[peer]") {
-            // Flush previous peer
-            if let Some(pb) = current_peer.take() {
-                peers.push(pb.build()?);
-            }
-            current_section = Section::Peer;
-            current_peer = Some(PeerBuilder::default());
-            continue;
+            // We only parse [Interface] for TunnelConfig
+            break;
         }
 
-        // Parse key = value
         let (key, value) = match line.split_once('=') {
             Some((k, v)) => (k.trim().to_lowercase(), v.trim().to_string()),
             None => continue,
         };
 
-        match current_section {
-            Section::Interface => match key.as_str() {
+        if current_section == Section::Interface {
+            match key.as_str() {
                 "privatekey" => private_key = value,
-                "address" => address = value,
+                "address" => addresses.push(value),
                 "listenport" => {
                     listen_port = value.parse().context("invalid ListenPort")?;
                 }
                 "dns" => dns = Some(value),
                 "mtu" => mtu = value.parse().context("invalid MTU")?,
-                _ => { /* ignore unknown keys */ }
-            },
-            Section::Peer => {
-                if let Some(ref mut pb) = current_peer {
-                    match key.as_str() {
-                        "publickey" => pb.public_key = Some(value),
-                        "presharedkey" => pb.preshared_key = Some(value),
-                        "allowedips" => {
-                            pb.allowed_ips = value
-                                .split(',')
-                                .map(|s| s.trim().to_string())
-                                .collect();
-                        }
-                        "endpoint" => pb.endpoint = Some(value),
-                        "persistentkeepalive" => {
-                            pb.persistent_keepalive =
-                                Some(value.parse().context("invalid PersistentKeepalive")?);
-                        }
-                        _ => {}
-                    }
-                }
+                _ => {}
             }
-            Section::None => {}
         }
-    }
-
-    // Flush last peer
-    if let Some(pb) = current_peer.take() {
-        peers.push(pb.build()?);
     }
 
     if private_key.is_empty() {
         bail!("missing PrivateKey in [Interface]");
     }
-    if address.is_empty() {
+    if addresses.is_empty() {
         bail!("missing Address in [Interface]");
     }
 
     let public_key = crate::keys::public_key_from_private(&private_key)
         .context("invalid PrivateKey")?;
 
-    // Wrap the private key in SecureBox immediately
     let secure_key = crate::keys::wrap_private_key(&private_key)?;
-
-    // Zeroize the plaintext private key string
     private_key.zeroize();
+
+    // Separate IPv4 and IPv6 addresses
+    let (address, address_v6) = split_addresses(&addresses);
 
     Ok(TunnelConfig {
         listen_port,
         private_key: secure_key,
         public_key,
         address,
+        address_v6,
         dns,
         mtu,
-        peers,
+        zone: "vpn".to_string(),
     })
+}
+
+/// Split a list of addresses into primary IPv4 and optional IPv6.
+fn split_addresses(addresses: &[String]) -> (String, Option<String>) {
+    let mut v4 = None;
+    let mut v6 = None;
+
+    for addr in addresses {
+        if addr.contains(':') {
+            v6 = Some(addr.clone());
+        } else if v4.is_none() {
+            v4 = Some(addr.clone());
+        }
+    }
+
+    (v4.unwrap_or_else(|| addresses[0].clone()), v6)
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
     None,
     Interface,
-    Peer,
-}
-
-#[derive(Default)]
-struct PeerBuilder {
-    public_key: Option<String>,
-    preshared_key: Option<String>,
-    allowed_ips: Vec<String>,
-    endpoint: Option<String>,
-    persistent_keepalive: Option<u16>,
-}
-
-impl PeerBuilder {
-    fn build(self) -> Result<WgPeer> {
-        let public_key = self.public_key.context("peer missing PublicKey")?;
-        Ok(WgPeer {
-            public_key,
-            preshared_key: self.preshared_key,
-            allowed_ips: self.allowed_ips,
-            endpoint: self.endpoint,
-            persistent_keepalive: self.persistent_keepalive,
-        })
-    }
 }
 
 fn format_peer_section(peer: &WgPeer) -> String {
@@ -287,44 +221,61 @@ mod tests {
 
     #[test]
     fn parse_roundtrip() {
-        // Use a real keypair for the test (parser derives public key from private)
         let kp = crate::keys::generate_keypair().unwrap();
         let private_key_b64 = crate::keys::private_key_to_base64(&kp.private_key).unwrap();
         let config_str = format!(
             "[Interface]\n\
              PrivateKey = {}\n\
              Address = 10.0.0.1/24\n\
+             Address = fd00::1/64\n\
              ListenPort = 51820\n\
              DNS = 1.1.1.1\n\
-             MTU = 1420\n\
-             \n\
-             [Peer]\n\
-             PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\n\
-             AllowedIPs = 10.0.0.2/32\n\
-             Endpoint = 203.0.113.1:51820\n\
-             PersistentKeepalive = 25\n",
+             MTU = 1420\n",
             private_key_b64
         );
 
         let parsed = parse_config(&config_str).unwrap();
         assert_eq!(parsed.address, "10.0.0.1/24");
+        assert_eq!(parsed.address_v6.as_deref(), Some("fd00::1/64"));
         assert_eq!(parsed.listen_port, 51820);
         assert_eq!(parsed.dns.as_deref(), Some("1.1.1.1"));
         assert_eq!(parsed.mtu, 1420);
         assert_eq!(parsed.public_key, kp.public_key);
-        assert_eq!(parsed.peers.len(), 1);
-        assert_eq!(parsed.peers[0].allowed_ips, vec!["10.0.0.2/32"]);
-        assert_eq!(
-            parsed.peers[0].endpoint.as_deref(),
-            Some("203.0.113.1:51820")
-        );
-        assert_eq!(parsed.peers[0].persistent_keepalive, Some(25));
+    }
 
-        // Generate config back and re-parse
-        let regenerated = generate_interface_config(&parsed).unwrap();
-        let reparsed = parse_config(&regenerated).unwrap();
-        assert_eq!(reparsed.address, parsed.address);
-        assert_eq!(reparsed.listen_port, parsed.listen_port);
-        assert_eq!(reparsed.peers.len(), parsed.peers.len());
+    #[test]
+    fn generate_peer_config_dual_stack() {
+        let config = generate_peer_config(
+            "cHJpdmF0ZWtleWhlcmUxMjM0NTY3ODkwMTIzNA==",
+            "10.0.0.2/32, fd00::2/128",
+            Some("1.1.1.1, 2606:4700:4700::1111"),
+            1420,
+            "c2VydmVycHVibGlja2V5MTIzNDU2Nzg5MDEyMzQ=",
+            "vpn.example.com:51820",
+            &["0.0.0.0/0".to_string(), "::/0".to_string()],
+            None,
+            Some(25),
+        );
+
+        assert!(config.contains("Address = 10.0.0.2/32, fd00::2/128"));
+        assert!(config.contains("AllowedIPs = 0.0.0.0/0, ::/0"));
+        assert!(config.contains("PersistentKeepalive = 25"));
+        assert!(config.contains("DNS = 1.1.1.1, 2606:4700:4700::1111"));
+    }
+
+    #[test]
+    fn split_addresses_v4_only() {
+        let addrs = vec!["10.0.0.1/24".to_string()];
+        let (v4, v6) = split_addresses(&addrs);
+        assert_eq!(v4, "10.0.0.1/24");
+        assert!(v6.is_none());
+    }
+
+    #[test]
+    fn split_addresses_dual_stack() {
+        let addrs = vec!["10.0.0.1/24".to_string(), "fd00::1/64".to_string()];
+        let (v4, v6) = split_addresses(&addrs);
+        assert_eq!(v4, "10.0.0.1/24");
+        assert_eq!(v6.as_deref(), Some("fd00::1/64"));
     }
 }

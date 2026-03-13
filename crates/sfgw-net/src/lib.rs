@@ -1,9 +1,33 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+#![deny(unsafe_code)]
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Errors from the network crate.
+#[derive(Debug, thiserror::Error)]
+pub enum NetError {
+    /// Database error.
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
+    /// JSON serialization/deserialization error.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// I/O error.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Wrapped anyhow error for internal context propagation.
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+/// Convenience alias for results from this crate.
+type Result<T> = std::result::Result<T, NetError>;
 
 /// Information about a discovered network interface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,7 +161,7 @@ fn detect_interfaces_for_platform(platform: &sfgw_hal::Platform) -> Result<Vec<I
 fn detect_interfaces() -> Result<Vec<InterfaceInfo>> {
     let sysfs = Path::new(SYSFS_NET);
     if !sysfs.exists() {
-        anyhow::bail!("{SYSFS_NET} does not exist; cannot detect interfaces");
+        return Err(NetError::Internal(anyhow::anyhow!("{SYSFS_NET} does not exist; cannot detect interfaces")));
     }
 
     let mut interfaces = Vec::new();
@@ -180,9 +204,9 @@ fn detect_interfaces() -> Result<Vec<InterfaceInfo>> {
 
 /// Read a sysfs file and return its trimmed contents.
 fn read_sysfs_trimmed(path: &Path) -> Result<String> {
-    fs::read_to_string(path)
+    Ok(fs::read_to_string(path)
         .map(|s| s.trim().to_string())
-        .with_context(|| format!("failed to read {}", path.display()))
+        .with_context(|| format!("failed to read {}", path.display()))?)
 }
 
 /// Read IP addresses assigned to an interface by scanning
@@ -435,5 +459,201 @@ fn guess_role(name: &str) -> String {
         "lan".to_string()
     } else {
         "lan".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    /// Helper: create an in-memory database with the sfgw schema.
+    async fn test_db() -> sfgw_db::Db {
+        let conn = rusqlite::Connection::open_in_memory()
+            .expect("failed to open in-memory db");
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS interfaces (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                name      TEXT NOT NULL UNIQUE,
+                mac       TEXT NOT NULL DEFAULT '',
+                ips       TEXT NOT NULL DEFAULT '[]',
+                mtu       INTEGER NOT NULL DEFAULT 1500,
+                is_up     INTEGER NOT NULL DEFAULT 0,
+                role      TEXT NOT NULL DEFAULT 'lan',
+                vlan_id   INTEGER,
+                enabled   INTEGER NOT NULL DEFAULT 1,
+                config    TEXT NOT NULL DEFAULT '{}'
+            );
+            INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2');
+            ",
+        )
+        .expect("failed to init test schema");
+        Arc::new(Mutex::new(conn))
+    }
+
+    #[test]
+    fn test_interface_info_construction() {
+        let iface = InterfaceInfo {
+            name: "eth0".to_string(),
+            mac: "aa:bb:cc:dd:ee:ff".to_string(),
+            ips: vec!["192.168.1.1".to_string()],
+            mtu: 1500,
+            is_up: true,
+            role: "wan".to_string(),
+        };
+        assert_eq!(iface.name, "eth0");
+        assert_eq!(iface.mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(iface.ips.len(), 1);
+        assert_eq!(iface.mtu, 1500);
+        assert!(iface.is_up);
+        assert_eq!(iface.role, "wan");
+    }
+
+    #[test]
+    fn test_interface_info_serialize_deserialize() {
+        let iface = InterfaceInfo {
+            name: "lo".to_string(),
+            mac: "00:00:00:00:00:00".to_string(),
+            ips: vec!["127.0.0.1".to_string(), "::1/128".to_string()],
+            mtu: 65536,
+            is_up: true,
+            role: "loopback".to_string(),
+        };
+        let json = serde_json::to_string(&iface).expect("serialize failed");
+        let deserialized: InterfaceInfo =
+            serde_json::from_str(&json).expect("deserialize failed");
+        assert_eq!(deserialized.name, "lo");
+        assert_eq!(deserialized.ips.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_interfaces_returns_empty_initially() {
+        let db = test_db().await;
+        let interfaces = list_interfaces(&db).await.expect("list_interfaces failed");
+        assert!(interfaces.is_empty(), "fresh DB should have no interfaces");
+    }
+
+    #[tokio::test]
+    async fn test_list_interfaces_after_insert() {
+        let db = test_db().await;
+
+        // Insert a test interface directly
+        {
+            let conn = db.lock().await;
+            conn.execute(
+                "INSERT INTO interfaces (name, mac, ips, mtu, is_up, role)
+                 VALUES ('lo', '00:00:00:00:00:00', '[\"127.0.0.1\"]', 65536, 1, 'loopback')",
+                [],
+            )
+            .expect("failed to insert test interface");
+        }
+
+        let interfaces = list_interfaces(&db).await.expect("list_interfaces failed");
+        assert_eq!(interfaces.len(), 1);
+        assert_eq!(interfaces[0].name, "lo");
+        assert_eq!(interfaces[0].role, "loopback");
+        assert!(interfaces[0].is_up);
+    }
+
+    #[test]
+    fn test_guess_role_loopback() {
+        assert_eq!(guess_role("lo"), "loopback");
+    }
+
+    #[test]
+    fn test_guess_role_vpn() {
+        assert_eq!(guess_role("wg0"), "vpn");
+        assert_eq!(guess_role("tun0"), "vpn");
+        assert_eq!(guess_role("tap0"), "vpn");
+    }
+
+    #[test]
+    fn test_guess_role_container() {
+        assert_eq!(guess_role("docker0"), "container");
+        assert_eq!(guess_role("br-abc123"), "container");
+        assert_eq!(guess_role("veth1234"), "container");
+    }
+
+    #[test]
+    fn test_guess_role_wifi() {
+        assert_eq!(guess_role("wlan0"), "wifi");
+        assert_eq!(guess_role("wlp2s0"), "wifi");
+    }
+
+    #[test]
+    fn test_guess_role_virtual() {
+        assert_eq!(guess_role("virbr0"), "virtual");
+    }
+
+    #[test]
+    fn test_guess_role_wan() {
+        assert_eq!(guess_role("eth0"), "wan");
+        assert_eq!(guess_role("ens33"), "wan");
+        assert_eq!(guess_role("enp0s3"), "wan");
+    }
+
+    #[test]
+    fn test_guess_role_lan() {
+        assert_eq!(guess_role("eth1"), "lan");
+        assert_eq!(guess_role("en1"), "lan");
+        assert_eq!(guess_role("someother"), "lan");
+    }
+
+    #[test]
+    fn test_hex_to_ipv6_valid() {
+        // ::1 in /proc/net/if_inet6 format
+        let result = hex_to_ipv6("00000000000000000000000000000001");
+        assert!(result.is_some());
+        let addr = result.unwrap();
+        assert!(addr.contains("1"), "expected ::1 representation, got: {addr}");
+    }
+
+    #[test]
+    fn test_hex_to_ipv6_invalid_length() {
+        assert!(hex_to_ipv6("0000").is_none());
+        assert!(hex_to_ipv6("").is_none());
+    }
+
+    #[test]
+    fn test_hex_le_to_ipv4_valid() {
+        // 0100007F: byte 0 = 0x01, byte 1 = 0x00, byte 2 = 0x00, byte 3 = 0x7F
+        // The function reads the u32 and extracts bytes as val&0xFF, (val>>8)&0xFF, etc.
+        // u32::from_str_radix("0100007F", 16) = 0x0100007F
+        // So: byte0 = 0x7F = 127, byte1 = 0x00, byte2 = 0x00, byte3 = 0x01
+        // Output: "127.0.0.1"
+        let result = hex_le_to_ipv4("0100007F");
+        assert_eq!(result, Some("127.0.0.1".to_string()));
+    }
+
+    #[test]
+    fn test_hex_le_to_ipv4_invalid() {
+        assert!(hex_le_to_ipv4("").is_none());
+        assert!(hex_le_to_ipv4("ZZZZZZZZ").is_none());
+        assert!(hex_le_to_ipv4("12345").is_none());
+    }
+
+    #[test]
+    fn test_ipv4_to_u32() {
+        assert_eq!(ipv4_to_u32("127.0.0.1"), Some(0x7F000001));
+        assert_eq!(ipv4_to_u32("0.0.0.0"), Some(0));
+        assert_eq!(ipv4_to_u32("255.255.255.255"), Some(0xFFFFFFFF));
+        assert_eq!(ipv4_to_u32("invalid"), None);
+    }
+
+    #[test]
+    fn test_ip_in_any_subnet() {
+        let subnets = vec![
+            ("192.168.1.0".to_string(), "255.255.255.0".to_string()),
+        ];
+        assert!(ip_in_any_subnet("192.168.1.100", &subnets));
+        assert!(!ip_in_any_subnet("10.0.0.1", &subnets));
     }
 }

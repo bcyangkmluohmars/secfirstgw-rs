@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+#![deny(unsafe_code)]
 
 //! DNS/DHCP service — dnsmasq configuration generation, process management,
 //! and lease monitoring for secfirstgw.
@@ -10,7 +11,7 @@
 //! - Rate limiting on DNS queries
 //! - Query logging for IDS correlation
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,33 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tera::Tera;
 use tokio::sync::Mutex;
+
+/// Errors from the DNS/DHCP crate.
+#[derive(Debug, thiserror::Error)]
+pub enum DnsError {
+    /// Database error.
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
+    /// JSON serialization/deserialization error.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// I/O error.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Signal delivery error.
+    #[error("signal error: {0}")]
+    Signal(#[from] nix::errno::Errno),
+
+    /// Wrapped anyhow error for internal context propagation.
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+/// Convenience alias for results from this crate.
+type Result<T> = std::result::Result<T, DnsError>;
 
 // ---------------------------------------------------------------------------
 // Data model
@@ -302,7 +330,7 @@ impl DnsmasqProcess {
                 Ok(Some(pid))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).context("failed to read dnsmasq pid file"),
+            Err(e) => return Err(anyhow::Error::from(e).context("failed to read dnsmasq pid file").into()),
         }
     }
 
@@ -313,7 +341,7 @@ impl DnsmasqProcess {
                 .with_context(|| format!("failed to send {sig} to dnsmasq (pid {pid})"))?;
             Ok(())
         } else {
-            anyhow::bail!("dnsmasq is not running (no pid file)");
+            return Err(DnsError::Internal(anyhow::anyhow!("dnsmasq is not running (no pid file)")));
         }
     }
 }
@@ -351,8 +379,10 @@ pub async fn start_with_paths(
         .spawn()
         .context("failed to start dnsmasq")?;
 
+    let pid = child.id().ok_or_else(|| anyhow::anyhow!("dnsmasq process has no PID"))?;
+
     tracing::info!(
-        pid = child.id().unwrap_or(0),
+        pid = pid,
         config = %config_path.display(),
         "dnsmasq started"
     );
@@ -414,9 +444,9 @@ pub async fn read_leases(lease_file: Option<&Path>) -> Result<Vec<DhcpLease>> {
             return Ok(Vec::new());
         }
         Err(e) => {
-            return Err(e).with_context(|| {
-                format!("failed to read lease file: {}", path.display())
-            });
+            return Err(anyhow::Error::from(e)
+                .context(format!("failed to read lease file: {}", path.display()))
+                .into());
         }
     };
 

@@ -7,5 +7,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+libc.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

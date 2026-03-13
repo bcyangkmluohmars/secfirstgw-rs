@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+#![deny(unsafe_code)]
 
 //! Forward-secret encrypted logging.
 //!
@@ -6,7 +7,38 @@
 //! Once a day-key is deleted (after export), the corresponding logs become
 //! permanently unreadable — achieving forward secrecy for audit logs.
 
-use anyhow::{bail, Context, Result};
+use anyhow::Context;
+
+/// Errors from the log crate.
+#[derive(Debug, thiserror::Error)]
+pub enum LogError {
+    /// Database error.
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
+    /// JSON serialization/deserialization error.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// Crypto error from sfgw-crypto.
+    #[error("crypto error: {0}")]
+    Crypto(#[from] sfgw_crypto::CryptoError),
+
+    /// Base64 decoding error.
+    #[error("base64 decode error: {0}")]
+    Base64(#[from] base64::DecodeError),
+
+    /// Cryptographic operation failed.
+    #[error("crypto operation failed: {0}")]
+    CryptoFailed(String),
+
+    /// Wrapped anyhow error for internal context propagation.
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+/// Convenience alias for results from this crate.
+type Result<T> = std::result::Result<T, LogError>;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::{NaiveDate, Utc};
@@ -14,6 +46,8 @@ use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 use ring::hkdf;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
+use sfgw_crypto::HkdfLen;
+use sfgw_crypto::secure_mem::SecureBox;
 use zeroize::Zeroize;
 
 /// A decrypted log entry.
@@ -86,11 +120,14 @@ impl LogManager {
                 .context("failed to create encrypted_logs table")?;
         }
 
-        // Ensure master key exists.
-        let master_key = ensure_master_key(db).await?;
+        // Ensure master key exists (held in SecureBox — encrypted in memory).
+        let master_key_box = ensure_master_key(db).await?;
 
         let today = Utc::now().date_naive();
-        let day_key = ensure_day_key(db, &master_key, today).await?;
+        let mut master_key_plain = master_key_box.open()
+            .context("failed to decrypt master key from SecureBox")?;
+        let day_key = ensure_day_key(db, &master_key_plain, today).await?;
+        master_key_plain.zeroize();
 
         tracing::info!("log subsystem initialized (forward-secret encryption active)");
 
@@ -165,8 +202,11 @@ impl LogManager {
             return Ok(());
         }
 
-        let master_key = load_master_key(&self.db).await?;
-        let day_key = ensure_day_key(&self.db, &master_key, today).await?;
+        let master_key_box = load_master_key(&self.db).await?;
+        let mut master_key_plain = master_key_box.open()
+            .context("failed to decrypt master key from SecureBox")?;
+        let day_key = ensure_day_key(&self.db, &master_key_plain, today).await?;
+        master_key_plain.zeroize();
 
         self.current_key = DayKey {
             date: today,
@@ -208,7 +248,7 @@ impl LogManager {
 
         let mut key_bytes = B64.decode(&raw).context("invalid base64 in day key")?;
         let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes)
-            .map_err(|_| anyhow::anyhow!("invalid AES key material"))?;
+            .map_err(|_| LogError::CryptoFailed("invalid AES key material".to_string()))?;
         key_bytes.zeroize();
         Ok(LessSafeKey::new(unbound))
     }
@@ -257,8 +297,8 @@ impl LogManager {
 // Key management helpers
 // ---------------------------------------------------------------------------
 
-/// Load the master key from the meta table.
-async fn load_master_key(db: &sfgw_db::Db) -> Result<Vec<u8>> {
+/// Load the master key from the meta table, wrapped in a SecureBox.
+async fn load_master_key(db: &sfgw_db::Db) -> Result<SecureBox<Vec<u8>>> {
     let conn = db.lock().await;
     let raw: String = conn
         .query_row(
@@ -267,11 +307,13 @@ async fn load_master_key(db: &sfgw_db::Db) -> Result<Vec<u8>> {
             |row| row.get(0),
         )
         .context("master key not found in meta table")?;
-    B64.decode(&raw).context("invalid base64 in master key")
+    let key_bytes = B64.decode(&raw)?;
+    Ok(SecureBox::new(key_bytes).context("failed to wrap master key in SecureBox")?)
 }
 
 /// Ensure a master key exists; generate one if this is the first run.
-async fn ensure_master_key(db: &sfgw_db::Db) -> Result<Vec<u8>> {
+/// Returns the master key wrapped in a SecureBox (encrypted in memory).
+async fn ensure_master_key(db: &sfgw_db::Db) -> Result<SecureBox<Vec<u8>>> {
     let conn = db.lock().await;
     let existing: Option<String> = conn
         .query_row(
@@ -282,14 +324,15 @@ async fn ensure_master_key(db: &sfgw_db::Db) -> Result<Vec<u8>> {
         .ok();
 
     if let Some(raw) = existing {
-        return B64.decode(&raw).context("invalid base64 in master key");
+        let key_bytes = B64.decode(&raw)?;
+        return Ok(SecureBox::new(key_bytes).context("failed to wrap master key in SecureBox")?);
     }
 
     // Generate a fresh 256-bit master key.
     let rng = SystemRandom::new();
     let mut mk = vec![0u8; 32];
     rng.fill(&mut mk)
-        .map_err(|_| anyhow::anyhow!("RNG failure"))?;
+        .map_err(|_| LogError::CryptoFailed("RNG failure".to_string()))?;
     let encoded = B64.encode(&mk);
 
     conn.execute(
@@ -299,7 +342,7 @@ async fn ensure_master_key(db: &sfgw_db::Db) -> Result<Vec<u8>> {
     .context("failed to store master key")?;
 
     tracing::info!("generated new log master key");
-    Ok(mk)
+    Ok(SecureBox::new(mk).context("failed to wrap master key in SecureBox")?)
 }
 
 /// Derive a day-key via HKDF-SHA256 and store it in the meta table if absent.
@@ -324,7 +367,7 @@ async fn ensure_day_key(
         if let Some(raw) = existing {
             let mut key_bytes = B64.decode(&raw).context("invalid base64 in day key")?;
             let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes)
-                .map_err(|_| anyhow::anyhow!("invalid AES key for {date}"))?;
+                .map_err(|_| LogError::CryptoFailed(format!("invalid AES key for {date}")))?;
             key_bytes.zeroize();
             return Ok(LessSafeKey::new(unbound));
         }
@@ -345,7 +388,7 @@ async fn ensure_day_key(
     }
 
     let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes)
-        .map_err(|_| anyhow::anyhow!("invalid derived key"))?;
+        .map_err(|_| LogError::CryptoFailed("invalid derived key".to_string()))?;
     Ok(LessSafeKey::new(unbound))
 }
 
@@ -357,20 +400,11 @@ fn derive_day_key_bytes(master_key: &[u8], date: NaiveDate) -> Result<[u8; 32]> 
     let info = [info_str.as_bytes()];
     let okm = prk
         .expand(&info, HkdfLen(32))
-        .map_err(|_| anyhow::anyhow!("HKDF expand failed"))?;
+        .map_err(|_| LogError::CryptoFailed("HKDF expand failed".to_string()))?;
     let mut out = [0u8; 32];
     okm.fill(&mut out)
-        .map_err(|_| anyhow::anyhow!("HKDF fill failed"))?;
+        .map_err(|_| LogError::CryptoFailed("HKDF fill failed".to_string()))?;
     Ok(out)
-}
-
-/// Helper type to tell ring how many bytes we want from HKDF.
-struct HkdfLen(usize);
-
-impl hkdf::KeyType for HkdfLen {
-    fn len(&self) -> usize {
-        self.0
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -382,12 +416,12 @@ fn encrypt(key: &LessSafeKey, plaintext: &[u8]) -> Result<([u8; 12], Vec<u8>)> {
     let rng = SystemRandom::new();
     let mut nonce_bytes = [0u8; 12];
     rng.fill(&mut nonce_bytes)
-        .map_err(|_| anyhow::anyhow!("RNG failure generating nonce"))?;
+        .map_err(|_| LogError::CryptoFailed("RNG failure generating nonce".to_string()))?;
 
     let nonce = Nonce::assume_unique_for_key(nonce_bytes);
     let mut in_out = plaintext.to_vec();
     key.seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out)
-        .map_err(|_| anyhow::anyhow!("AES-GCM seal failed"))?;
+        .map_err(|_| LogError::CryptoFailed("AES-GCM seal failed".to_string()))?;
 
     Ok((nonce_bytes, in_out))
 }
@@ -395,7 +429,7 @@ fn encrypt(key: &LessSafeKey, plaintext: &[u8]) -> Result<([u8; 12], Vec<u8>)> {
 /// Decrypt `ciphertext_with_tag` using `key` and `nonce_bytes`.
 fn decrypt(key: &LessSafeKey, nonce_bytes: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
     if nonce_bytes.len() != 12 {
-        bail!("invalid nonce length: expected 12, got {}", nonce_bytes.len());
+        return Err(LogError::CryptoFailed(format!("invalid nonce length: expected 12, got {}", nonce_bytes.len())));
     }
 
     let mut nonce_arr = [0u8; 12];
@@ -405,7 +439,7 @@ fn decrypt(key: &LessSafeKey, nonce_bytes: &[u8], ciphertext: &[u8]) -> Result<V
     let mut in_out = ciphertext.to_vec();
     let plaintext = key
         .open_in_place(nonce, Aad::empty(), &mut in_out)
-        .map_err(|_| anyhow::anyhow!("AES-GCM decryption failed (wrong key or tampered data)"))?;
+        .map_err(|_| LogError::CryptoFailed("AES-GCM decryption failed (wrong key or tampered data)".to_string()))?;
 
     Ok(plaintext.to_vec())
 }

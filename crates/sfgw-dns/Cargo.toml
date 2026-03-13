@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 sfgw-db = { path = "../sfgw-db" }
 anyhow.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tera.workspace = true
 tracing.workspace = true

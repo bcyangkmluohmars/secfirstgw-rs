@@ -47,6 +47,7 @@ pub fn hash_password(password: &str) -> Result<String> {
 }
 
 /// Verify a password against an Argon2id hash.
+#[must_use = "ignoring password verification result is a security bug"]
 pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
     let parsed = PasswordHash::new(hash)
         .map_err(|e| anyhow::anyhow!("invalid password hash: {e}"))?;
@@ -97,6 +98,7 @@ pub async fn create_session(
 /// - It has not expired
 /// - The client IP matches
 /// - The fingerprint matches
+#[must_use = "ignoring session validation result is a security bug"]
 pub async fn validate_session(
     db: &sfgw_db::Db,
     token: &str,

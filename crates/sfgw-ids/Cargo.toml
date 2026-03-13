@@ -10,6 +10,7 @@ sfgw-db = { path = "../sfgw-db" }
 sfgw-hal = { path = "../sfgw-hal" }
 tokio.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 nix.workspace = true
 serde.workspace = true

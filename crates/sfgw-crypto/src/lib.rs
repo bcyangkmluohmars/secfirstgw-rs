@@ -1,11 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+#![deny(unsafe_code)]
 
 pub mod secure_mem;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use ring::hkdf;
 use std::path::Path;
 use std::process::Command;
+
+/// Errors from the crypto crate.
+#[derive(Debug, thiserror::Error)]
+pub enum CryptoError {
+    /// I/O error (e.g., reading DMI fields, key files).
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Cryptographic operation failed.
+    #[error("crypto operation failed: {0}")]
+    CryptoFailed(String),
+
+    /// Wrapped anyhow error for internal context propagation.
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+/// Convenience alias for results from this crate.
+type Result<T> = std::result::Result<T, CryptoError>;
 
 /// Path to the LUKS key file used in VM mode.
 const VM_KEY_FILE: &str = "/etc/sfgw/luks.key";
@@ -69,9 +89,9 @@ async fn auto_unlock_bare_metal() -> Result<()> {
     let board_serial = read_dmi_field("board_serial").await?;
 
     if product_serial.is_empty() && board_serial.is_empty() {
-        anyhow::bail!(
-            "bare metal LUKS auto-unlock: both product_serial and board_serial are empty"
-        );
+        return Err(CryptoError::CryptoFailed(
+            "bare metal LUKS auto-unlock: both product_serial and board_serial are empty".to_string(),
+        ));
     }
 
     // Build input keying material: product_serial || ":" || board_serial
@@ -117,7 +137,7 @@ fn cryptsetup_open_keyfile(key_file: &str) -> Result<()> {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("cryptsetup luksOpen failed: {stderr}");
+        return Err(CryptoError::CryptoFailed(format!("cryptsetup luksOpen failed: {stderr}")));
     }
 }
 
@@ -162,7 +182,7 @@ fn cryptsetup_open_stdin(key: &[u8]) -> Result<()> {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("cryptsetup luksOpen failed: {stderr}");
+        return Err(CryptoError::CryptoFailed(format!("cryptsetup luksOpen failed: {stderr}")));
     }
 }
 
@@ -179,25 +199,26 @@ async fn read_dmi_field(field: &str) -> Result<String> {
             tracing::warn!("{path} not found — not a physical machine?");
             Ok(String::new())
         }
-        Err(e) => Err(e).with_context(|| format!("failed to read {path}")),
+        Err(e) => Err(anyhow::Error::from(e).context(format!("failed to read {path}")).into()),
     }
 }
 
 /// Derive a key using HKDF-SHA256 with no salt (salt = all zeros).
+#[must_use = "failing to check HKDF result may use uninitialized key material"]
 fn hkdf_sha256(ikm: &[u8], info: &[u8], out: &mut [u8; 32]) -> Result<()> {
     let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]);
     let prk = salt.extract(ikm);
     let info_refs = [info];
     let okm = prk
         .expand(&info_refs, HkdfLen(32))
-        .map_err(|_| anyhow::anyhow!("HKDF expand failed"))?;
+        .map_err(|_| CryptoError::CryptoFailed("HKDF expand failed".to_string()))?;
     okm.fill(out)
-        .map_err(|_| anyhow::anyhow!("HKDF fill failed"))?;
+        .map_err(|_| CryptoError::CryptoFailed("HKDF fill failed".to_string()))?;
     Ok(())
 }
 
 /// Helper type for ring HKDF output length.
-struct HkdfLen(usize);
+pub struct HkdfLen(pub usize);
 
 impl hkdf::KeyType for HkdfLen {
     fn len(&self) -> usize {

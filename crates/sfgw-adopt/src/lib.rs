@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+#![deny(unsafe_code)]
 
 //! Device adoption protocol for secfirstgw.
 //!
@@ -17,9 +18,28 @@ pub mod inform;
 pub mod protocol;
 pub mod signing;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sfgw_db::Db;
+
+/// Errors from the adoption crate.
+#[derive(Debug, thiserror::Error)]
+pub enum AdoptError {
+    /// Database error.
+    #[error("database error: {0}")]
+    Database(#[from] rusqlite::Error),
+
+    /// JSON serialization/deserialization error.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// Wrapped anyhow error for internal context propagation.
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+/// Convenience alias for results from this crate.
+type Result<T> = std::result::Result<T, AdoptError>;
 
 // ---------------------------------------------------------------------------
 // Data model
@@ -173,12 +193,12 @@ pub async fn approve_device(
     ca: &ca::GatewayCA,
     request: &AdoptionRequest,
 ) -> Result<protocol::AdoptionResponse> {
-    protocol::approve_device(db, ca, request).await
+    Ok(protocol::approve_device(db, ca, request).await?)
 }
 
 /// Reject a pending device.
 pub async fn reject_device(db: &Db, mac: &str) -> Result<()> {
-    protocol::reject_device(db, mac).await
+    Ok(protocol::reject_device(db, mac).await?)
 }
 
 /// Get the current config JSON for a device.
@@ -191,7 +211,7 @@ pub async fn get_device_config(db: &Db, mac: &str) -> Result<serde_json::Value> 
             |r| r.get(0),
         )
         .context("device not found")?;
-    serde_json::from_str(&cfg_json).context("corrupt device config JSON")
+    Ok(serde_json::from_str(&cfg_json).context("corrupt device config JSON")?)
 }
 
 /// Push a new config to a device.

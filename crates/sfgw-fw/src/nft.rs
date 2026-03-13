@@ -3,8 +3,132 @@
 //! nftables ruleset generation and atomic application via `nft -f`.
 
 use crate::{Action, FirewallPolicy, FirewallRule, FirewallZone, PortForward, ZonePolicy};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::fmt::Write;
+use std::net::IpAddr;
+
+// ── Input validation (command injection prevention) ──────────────────
+
+/// Validate that a string is a valid IP address or CIDR notation (e.g. "10.0.0.0/8").
+fn validate_ip_or_cidr(s: &str) -> Result<()> {
+    if let Some((ip_part, prefix_part)) = s.split_once('/') {
+        let _ip: IpAddr = ip_part
+            .parse()
+            .with_context(|| format!("invalid IP in CIDR: {s}"))?;
+        let prefix: u8 = prefix_part
+            .parse()
+            .with_context(|| format!("invalid prefix length in CIDR: {s}"))?;
+        let max = if _ip.is_ipv4() { 32 } else { 128 };
+        if prefix > max {
+            bail!("CIDR prefix {prefix} exceeds maximum {max} for {s}");
+        }
+    } else {
+        let _ip: IpAddr = s
+            .parse()
+            .with_context(|| format!("invalid IP address: {s}"))?;
+    }
+    Ok(())
+}
+
+/// Validate a port specification: single u16, range "80-443", or comma-separated list.
+fn validate_port(s: &str) -> Result<()> {
+    // nftables also accepts comma-separated lists like "80,443,8080"
+    // and ranges like "1024-65535"
+    for part in s.split(',') {
+        let part = part.trim();
+        if let Some((start, end)) = part.split_once('-') {
+            let start: u16 = start
+                .trim()
+                .parse()
+                .with_context(|| format!("invalid port range start in: {s}"))?;
+            let end: u16 = end
+                .trim()
+                .parse()
+                .with_context(|| format!("invalid port range end in: {s}"))?;
+            if start > end {
+                bail!("invalid port range {start}-{end}: start > end");
+            }
+        } else {
+            let _port: u16 = part
+                .parse()
+                .with_context(|| format!("invalid port number: {part}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate protocol is one of the allowed values.
+fn validate_protocol(s: &str) -> Result<()> {
+    const ALLOWED: &[&str] = &["tcp", "udp", "sctp", "icmp", "icmpv6"];
+    if !ALLOWED.contains(&s) {
+        bail!(
+            "invalid protocol '{}': must be one of {}",
+            s,
+            ALLOWED.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Validate rate limit matches pattern like "100/second", "10/minute", "1/hour".
+fn validate_rate_limit(s: &str) -> Result<()> {
+    let Some((count_str, unit)) = s.split_once('/') else {
+        bail!("invalid rate limit '{s}': expected format 'N/unit'");
+    };
+    let _count: u32 = count_str
+        .parse()
+        .with_context(|| format!("invalid rate limit count in: {s}"))?;
+    const ALLOWED_UNITS: &[&str] = &["second", "minute", "hour"];
+    if !ALLOWED_UNITS.contains(&unit) {
+        bail!(
+            "invalid rate limit unit '{}': must be one of {}",
+            unit,
+            ALLOWED_UNITS.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Sanitize a comment: only alphanumeric, spaces, dashes, underscores. Max 64 chars.
+fn sanitize_comment(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_')
+        .take(64)
+        .collect()
+}
+
+/// Validate an interface name: alphanumeric, dots, dashes, underscores, 1-15 chars.
+pub fn validate_interface_name(s: &str) -> Result<()> {
+    if s.is_empty() || s.len() > 15 {
+        bail!(
+            "invalid interface name '{}': must be 1-15 characters",
+            s
+        );
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        bail!(
+            "invalid interface name '{}': only alphanumeric, '.', '_', '-' allowed",
+            s
+        );
+    }
+    Ok(())
+}
+
+/// Validate a chain name for user rules.
+fn validate_chain(s: &str) -> Result<()> {
+    const ALLOWED: &[&str] = &["input", "forward", "output", "prerouting", "postrouting"];
+    if !ALLOWED.contains(&s) {
+        bail!(
+            "invalid chain '{}': must be one of {}",
+            s,
+            ALLOWED.join(", ")
+        );
+    }
+    Ok(())
+}
 
 /// Table name used for all sfgw rules.
 const TABLE: &str = "sfgw";
@@ -12,7 +136,13 @@ const TABLE: &str = "sfgw";
 /// Generate a complete nftables ruleset from DB rules and policy.
 ///
 /// If `rules` is empty, a hardened default ruleset is generated.
+///
+/// # Panics
+/// Uses `writeln!().unwrap()` throughout — these cannot fail because
+/// `fmt::Write` for `String` is infallible (never returns `Err`).
 pub fn generate_ruleset(rules: &[FirewallRule], policy: &FirewallPolicy) -> String {
+    // INVARIANT: All writeln!(out, ...).unwrap() calls below write to a String.
+    // fmt::Write for String is infallible — it can only fail on OOM which aborts.
     let mut out = String::with_capacity(4096);
 
     // Flush and recreate — atomic when loaded via `nft -f`.
@@ -94,21 +224,9 @@ pub fn generate_ruleset_with_forwards(
     writeln!(out).unwrap();
     writeln!(out, "    # ── Port forwarding (DNAT) ──").unwrap();
     for fwd in forwards.iter().filter(|f| f.enabled) {
-        let proto = &fwd.protocol;
-        let comment = fwd.comment.as_deref().unwrap_or("port forward");
-        writeln!(
-            out,
-            "    add rule inet {TABLE} prerouting {proto} dport {} dnat to {}:{} comment \"{}\"",
-            fwd.external_port, fwd.internal_ip, fwd.internal_port, comment,
-        )
-        .unwrap();
-        // Also allow the forwarded traffic in the forward chain.
-        writeln!(
-            out,
-            "    add rule inet {TABLE} forward ip daddr {} {proto} dport {} accept comment \"allow fwd: {}\"",
-            fwd.internal_ip, fwd.internal_port, comment,
-        )
-        .unwrap();
+        if let Err(e) = emit_port_forward(&mut out, fwd, None) {
+            tracing::error!("skipping invalid port forward: {e}");
+        }
     }
 
     writeln!(out, "}}").unwrap();
@@ -182,12 +300,17 @@ pub async fn flush_ruleset() -> Result<()> {
 /// - **DMZ**: Allow 80/443 inbound, no direct LAN/MGMT access, forward to WAN
 /// - **MGMT**: Web UI (443), SSH (22), Inform (8080), access to all internal zones
 /// - **GUEST**: Internet only (forward to WAN), DNS/DHCP to gateway, no internal access
+/// # Panics
+/// Uses `writeln!().unwrap()` throughout — these cannot fail because
+/// `fmt::Write` for `String` is infallible (never returns `Err`).
 pub fn generate_zone_ruleset(
     zones: &[ZonePolicy],
     rules: &[FirewallRule],
     policy: &FirewallPolicy,
     forwards: &[PortForward],
 ) -> String {
+    // INVARIANT: All writeln!(out, ...).unwrap() calls write to a String.
+    // fmt::Write for String is infallible — it can only fail on OOM which aborts.
     let mut out = String::with_capacity(8192);
 
     writeln!(out, "#!/usr/sbin/nft -f").unwrap();
@@ -253,18 +376,9 @@ pub fn generate_zone_ruleset(
 
     // ── Port forwarding (DNAT) ──────────────────────────────────────
     for fwd in forwards.iter().filter(|f| f.enabled) {
-        let proto = &fwd.protocol;
-        let comment = fwd.comment.as_deref().unwrap_or("port forward");
-        writeln!(
-            out,
-            "    add rule inet {TABLE} prerouting iifname @wan_ifaces {proto} dport {} dnat to {}:{} comment \"{}\"",
-            fwd.external_port, fwd.internal_ip, fwd.internal_port, comment,
-        ).unwrap();
-        writeln!(
-            out,
-            "    add rule inet {TABLE} forward ip daddr {} {proto} dport {} accept comment \"allow fwd: {}\"",
-            fwd.internal_ip, fwd.internal_port, comment,
-        ).unwrap();
+        if let Err(e) = emit_port_forward(&mut out, fwd, Some("iifname @wan_ifaces ")) {
+            tracing::error!("skipping invalid port forward: {e}");
+        }
     }
 
     // ── User-defined rules from DB ──────────────────────────────────
@@ -288,16 +402,59 @@ fn emit_zone_defines(out: &mut String, zones: &[ZonePolicy]) {
         if zp.interfaces.is_empty() {
             continue;
         }
+        // Validate every interface name before emitting into nft syntax.
+        let mut valid_ifaces = Vec::new();
+        for iface in &zp.interfaces {
+            if let Err(e) = validate_interface_name(iface) {
+                tracing::error!(
+                    "skipping invalid interface '{}' in zone {}: {e}",
+                    iface,
+                    zp.zone
+                );
+                continue;
+            }
+            valid_ifaces.push(format!("\"{iface}\""));
+        }
+        if valid_ifaces.is_empty() {
+            continue;
+        }
         let set_name = format!("{}_ifaces", zp.zone);
-        let iface_list: Vec<String> = zp.interfaces.iter().map(|i| format!("\"{i}\"")).collect();
         writeln!(
             out,
             "    set {set_name} {{ type ifname; elements = {{ {} }}; }}",
-            iface_list.join(", ")
+            valid_ifaces.join(", ")
         )
         .unwrap();
     }
     writeln!(out).unwrap();
+}
+
+/// Emit a validated port forward rule. `prefix` is an optional string prepended
+/// to the prerouting rule (e.g. "iifname @wan_ifaces " for zone-aware mode).
+fn emit_port_forward(out: &mut String, fwd: &PortForward, prefix: Option<&str>) -> Result<()> {
+    let proto = fwd.protocol.to_lowercase();
+    validate_protocol(&proto)?;
+    // internal_ip must be a valid IP address.
+    let _ip: IpAddr = fwd
+        .internal_ip
+        .parse()
+        .with_context(|| format!("invalid internal_ip in port forward: {}", fwd.internal_ip))?;
+    // external_port and internal_port are u16, inherently safe.
+    let comment = sanitize_comment(fwd.comment.as_deref().unwrap_or("port forward"));
+    let pfx = prefix.unwrap_or("");
+    writeln!(
+        out,
+        "    add rule inet {TABLE} prerouting {pfx}{proto} dport {} dnat to {}:{} comment \"{comment}\"",
+        fwd.external_port, fwd.internal_ip, fwd.internal_port,
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    add rule inet {TABLE} forward ip daddr {} {proto} dport {} accept comment \"allow fwd: {comment}\"",
+        fwd.internal_ip, fwd.internal_port,
+    )
+    .unwrap();
+    Ok(())
 }
 
 fn zone_has_interfaces(zones: &[ZonePolicy], zone: &FirewallZone) -> bool {
@@ -701,12 +858,21 @@ fn emit_user_rules(out: &mut String, rules: &[FirewallRule]) {
 }
 
 fn emit_single_rule(out: &mut String, rule: &FirewallRule) {
+    if let Err(e) = emit_single_rule_validated(out, rule) {
+        tracing::error!("skipping invalid firewall rule id={:?}: {e}", rule.id);
+    }
+}
+
+fn emit_single_rule_validated(out: &mut String, rule: &FirewallRule) -> Result<()> {
     let detail = &rule.detail;
     let chain = &rule.chain;
 
+    // Validate chain name.
+    validate_chain(chain)?;
+
     let mut parts: Vec<String> = Vec::new();
 
-    // VLAN matching.
+    // VLAN matching (vlan is already a u16, safe).
     if let Some(vlan_id) = detail.vlan {
         parts.push(format!("vlan id {vlan_id}"));
     }
@@ -714,16 +880,18 @@ fn emit_single_rule(out: &mut String, rule: &FirewallRule) {
     // Protocol matching.
     let proto = detail.protocol.to_lowercase();
     if proto != "any" && proto != "all" {
+        validate_protocol(&proto)?;
         parts.push(proto.clone());
     }
 
     // Source.
     let src = detail.source.to_lowercase();
     if src != "any" && src != "0.0.0.0/0" {
-        // Could be interface name or IP.
-        if src.starts_with("iif:") {
-            parts.push(format!("iifname \"{}\"", &src[4..]));
+        if let Some(iface) = src.strip_prefix("iif:") {
+            validate_interface_name(iface)?;
+            parts.push(format!("iifname \"{iface}\""));
         } else {
+            validate_ip_or_cidr(&src)?;
             parts.push(format!("ip saddr {src}"));
         }
     }
@@ -731,9 +899,11 @@ fn emit_single_rule(out: &mut String, rule: &FirewallRule) {
     // Destination.
     let dst = detail.destination.to_lowercase();
     if dst != "any" && dst != "0.0.0.0/0" {
-        if dst.starts_with("oif:") {
-            parts.push(format!("oifname \"{}\"", &dst[4..]));
+        if let Some(iface) = dst.strip_prefix("oif:") {
+            validate_interface_name(iface)?;
+            parts.push(format!("oifname \"{iface}\""));
         } else {
+            validate_ip_or_cidr(&dst)?;
             parts.push(format!("ip daddr {dst}"));
         }
     }
@@ -741,6 +911,7 @@ fn emit_single_rule(out: &mut String, rule: &FirewallRule) {
     // Port (only valid for tcp/udp/sctp).
     if let Some(ref port) = detail.port {
         if !port.is_empty() && port != "any" {
+            validate_port(port)?;
             // Only add dport if we have a protocol that supports it.
             if matches!(proto.as_str(), "tcp" | "udp" | "sctp") {
                 parts.push(format!("dport {port}"));
@@ -750,23 +921,26 @@ fn emit_single_rule(out: &mut String, rule: &FirewallRule) {
 
     // Rate limiting.
     if let Some(ref rate) = detail.rate_limit {
+        validate_rate_limit(rate)?;
         parts.push(format!("limit rate {rate}"));
     }
 
     // Action.
     parts.push(detail.action.to_string());
 
-    // Comment.
+    // Comment — sanitize to prevent injection via nft comment syntax.
     if let Some(ref comment) = detail.comment {
         if !comment.is_empty() {
-            // Sanitize comment for nft (no double quotes).
-            let safe = comment.replace('"', "'");
-            parts.push(format!("comment \"{safe}\""));
+            let safe = sanitize_comment(comment);
+            if !safe.is_empty() {
+                parts.push(format!("comment \"{safe}\""));
+            }
         }
     }
 
     let expr = parts.join(" ");
     writeln!(out, "    add rule inet {TABLE} {chain} {expr}").unwrap();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1160,5 +1334,139 @@ mod tests {
         let config =
             generate_zone_ruleset(&test_zones(), &rules, &FirewallPolicy::default(), &[]);
         assert!(config.contains("tcp dport 8080 accept"));
+    }
+
+    // ── Input validation tests ────────────────────────────────────
+
+    #[test]
+    fn validate_ip_or_cidr_rejects_injection() {
+        assert!(validate_ip_or_cidr("10.0.0.1").is_ok());
+        assert!(validate_ip_or_cidr("192.168.1.0/24").is_ok());
+        assert!(validate_ip_or_cidr("::1").is_ok());
+        assert!(validate_ip_or_cidr("fe80::/10").is_ok());
+        // Injection attempts
+        assert!(validate_ip_or_cidr("10.0.0.1; drop table").is_err());
+        assert!(validate_ip_or_cidr("$(whoami)").is_err());
+        assert!(validate_ip_or_cidr("10.0.0.1/33").is_err());
+        assert!(validate_ip_or_cidr("").is_err());
+        assert!(validate_ip_or_cidr("not-an-ip").is_err());
+    }
+
+    #[test]
+    fn validate_port_rejects_injection() {
+        assert!(validate_port("80").is_ok());
+        assert!(validate_port("80-443").is_ok());
+        assert!(validate_port("80,443,8080").is_ok());
+        // Injection attempts
+        assert!(validate_port("80; drop").is_err());
+        assert!(validate_port("abc").is_err());
+        assert!(validate_port("99999").is_err());
+        assert!(validate_port("").is_err());
+    }
+
+    #[test]
+    fn validate_protocol_rejects_injection() {
+        assert!(validate_protocol("tcp").is_ok());
+        assert!(validate_protocol("udp").is_ok());
+        assert!(validate_protocol("icmp").is_ok());
+        assert!(validate_protocol("tcp; drop").is_err());
+        assert!(validate_protocol("any").is_err()); // "any" handled separately
+        assert!(validate_protocol("").is_err());
+    }
+
+    #[test]
+    fn validate_rate_limit_rejects_injection() {
+        assert!(validate_rate_limit("100/second").is_ok());
+        assert!(validate_rate_limit("10/minute").is_ok());
+        assert!(validate_rate_limit("1/hour").is_ok());
+        assert!(validate_rate_limit("100/second; drop").is_err());
+        assert!(validate_rate_limit("abc/second").is_err());
+        assert!(validate_rate_limit("100/day").is_err());
+        assert!(validate_rate_limit("noslash").is_err());
+    }
+
+    #[test]
+    fn sanitize_comment_strips_dangerous_chars() {
+        assert_eq!(sanitize_comment("normal comment"), "normal comment");
+        assert_eq!(sanitize_comment("has-dash_underscore"), "has-dash_underscore");
+        // Strips quotes, semicolons, braces
+        assert_eq!(sanitize_comment("inject\"; drop table"), "inject drop table");
+        assert_eq!(sanitize_comment("a{b}c"), "abc");
+        // Respects max length
+        let long = "a".repeat(100);
+        assert_eq!(sanitize_comment(&long).len(), 64);
+    }
+
+    #[test]
+    fn validate_interface_name_rejects_injection() {
+        assert!(validate_interface_name("eth0").is_ok());
+        assert!(validate_interface_name("br-lan").is_ok());
+        assert!(validate_interface_name("wg0").is_ok());
+        assert!(validate_interface_name("vlan.100").is_ok());
+        // Injection attempts
+        assert!(validate_interface_name("eth0; rm -rf /").is_err());
+        assert!(validate_interface_name("eth0\"").is_err());
+        assert!(validate_interface_name("").is_err());
+        assert!(validate_interface_name("a]bcdefghijklmnop").is_err()); // 17 chars with invalid char
+        assert!(validate_interface_name("a234567890123456").is_err()); // 16 chars
+    }
+
+    #[test]
+    fn malicious_rule_source_is_rejected() {
+        let rules = vec![FirewallRule {
+            id: Some(99),
+            chain: "input".to_string(),
+            priority: 0,
+            detail: RuleDetail {
+                action: Action::Drop,
+                protocol: "tcp".to_string(),
+                source: "10.0.0.1\"; drop table inet sfgw".to_string(),
+                destination: "any".to_string(),
+                port: Some("22".to_string()),
+                comment: None,
+                vlan: None,
+                rate_limit: None,
+            },
+            enabled: true,
+        }];
+        let config = generate_ruleset(&rules, &FirewallPolicy::default());
+        // The malicious rule should NOT appear in the output
+        assert!(!config.contains("drop table inet sfgw"));
+    }
+
+    #[test]
+    fn malicious_port_forward_ip_is_rejected() {
+        let fwd = vec![PortForward {
+            protocol: "tcp".to_string(),
+            external_port: 8443,
+            internal_ip: "192.168.1.1\"; flush ruleset".to_string(),
+            internal_port: 443,
+            comment: None,
+            enabled: true,
+        }];
+        let config =
+            generate_ruleset_with_forwards(&[], &FirewallPolicy::default(), &fwd);
+        assert!(!config.contains("flush ruleset"));
+    }
+
+    #[test]
+    fn malicious_comment_is_sanitized_in_port_forward() {
+        let fwd = vec![PortForward {
+            protocol: "tcp".to_string(),
+            external_port: 8443,
+            internal_ip: "192.168.1.100".to_string(),
+            internal_port: 443,
+            comment: Some("legit\"; flush ruleset; #".to_string()),
+            enabled: true,
+        }];
+        let config =
+            generate_ruleset_with_forwards(&[], &FirewallPolicy::default(), &fwd);
+        assert!(config.contains("dnat to 192.168.1.100:443"));
+        // The injection-critical characters (quotes, semicolons, hash) are stripped.
+        // The comment is safely enclosed in quotes with no way to escape.
+        assert!(!config.contains("\"; flush"));
+        assert!(!config.contains("; #"));
+        // The sanitized comment should only contain safe chars.
+        assert!(config.contains("comment \"legit flush ruleset "));
     }
 }

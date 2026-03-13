@@ -1,112 +1,255 @@
-import { Outlet, NavLink } from 'react-router-dom'
-import { useEffect, useState } from 'react'
-import { api, type SystemStatus } from '../api'
+import { Outlet, NavLink, useNavigate } from 'react-router-dom'
+import { useEffect, useState, useCallback } from 'react'
+import { api, clearToken, type SystemStatus } from '../api'
 
 const navItems = [
-  { to: '/', label: 'Dashboard', icon: 'grid' },
-  { to: '/firewall', label: 'Firewall', icon: 'shield' },
-  { to: '/network', label: 'Network', icon: 'globe' },
-  { to: '/vpn', label: 'VPN', icon: 'lock' },
-  { to: '/devices', label: 'Devices', icon: 'cpu' },
-  { to: '/ids', label: 'IDS', icon: 'alert' },
-  { to: '/settings', label: 'Settings', icon: 'gear' },
+  { to: '/', label: 'Dashboard', icon: 'dashboard' },
+  { to: '/firewall', label: 'Firewall', icon: 'firewall' },
+  { to: '/network', label: 'Network', icon: 'network' },
+  { to: '/vpn', label: 'VPN', icon: 'vpn' },
+  { to: '/devices', label: 'Devices', icon: 'devices' },
+  { to: '/ids', label: 'IDS', icon: 'ids' },
+  { to: '/settings', label: 'Settings', icon: 'settings' },
 ]
 
 function NavIcon({ icon }: { icon: string }) {
-  const icons: Record<string, string> = {
-    grid: 'M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z',
-    shield: 'M12 2L3 7v5c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-9-5z',
-    globe: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z',
-    lock: 'M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z',
-    cpu: 'M15 9H9v6h6V9zm-2 4h-2v-2h2v2zm8-2V9h-2V7c0-1.1-.9-2-2-2h-2V3h-2v2h-2V3H9v2H7c-1.1 0-2 .9-2 2v2H3v2h2v2H3v2h2v2c0 1.1.9 2 2 2h2v2h2v-2h2v2h2v-2h2c1.1 0 2-.9 2-2v-2h2v-2h-2v-2h2zm-4 6H7V7h10v10z',
-    alert: 'M12 2L1 21h22L12 2zm0 3.99L19.53 19H4.47L12 5.99zM11 16h2v2h-2zm0-6h2v4h-2z',
-    gear: 'M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z',
+  const paths: Record<string, React.ReactNode> = {
+    dashboard: (
+      <>
+        <rect x="3" y="3" width="7" height="7" rx="1" />
+        <rect x="14" y="3" width="7" height="7" rx="1" />
+        <rect x="3" y="14" width="7" height="7" rx="1" />
+        <rect x="14" y="14" width="7" height="7" rx="1" />
+      </>
+    ),
+    firewall: (
+      <path d="M12 2L4 6v6c0 5.25 3.4 10.15 8 11.43C16.6 22.15 20 17.25 20 12V6l-8-4zm0 2.18L18 7.6v4.4c0 4.24-2.76 8.2-6 9.58-3.24-1.38-6-5.34-6-9.58V7.6l6-3.42z" />
+    ),
+    network: (
+      <>
+        <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <ellipse cx="12" cy="12" rx="4" ry="9" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <line x1="3" y1="12" x2="21" y2="12" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M4.5 7.5h15M4.5 16.5h15" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.5" />
+      </>
+    ),
+    vpn: (
+      <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 15l-4-4 1.41-1.41L10 13.17l6.59-6.59L18 8l-8 8z" />
+    ),
+    devices: (
+      <>
+        <rect x="4" y="4" width="16" height="12" rx="2" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <line x1="12" y1="16" x2="12" y2="20" stroke="currentColor" strokeWidth="1.5" />
+        <line x1="8" y1="20" x2="16" y2="20" stroke="currentColor" strokeWidth="1.5" />
+      </>
+    ),
+    ids: (
+      <>
+        <path d="M12 2L2 7l10 5 10-5-10-5z" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M2 17l10 5 10-5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M2 12l10 5 10-5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      </>
+    ),
+    settings: (
+      <>
+        <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      </>
+    ),
   }
+
   return (
-    <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24" fill="currentColor">
-      <path d={icons[icon] || icons.grid} />
+    <svg className="w-[18px] h-[18px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      {paths[icon]}
     </svg>
   )
 }
 
 export default function Layout() {
+  const navigate = useNavigate()
   const [status, setStatus] = useState<SystemStatus | null>(null)
   const [online, setOnline] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
+
+  const fetchStatus = useCallback(() => {
+    api.getStatus()
+      .then((s) => { setStatus(s); setOnline(true) })
+      .catch(() => setOnline(false))
+  }, [])
 
   useEffect(() => {
-    const fetchStatus = () => {
-      api.getStatus()
-        .then((s) => { setStatus(s); setOnline(true) })
-        .catch(() => setOnline(false))
-    }
-
     fetchStatus()
     const interval = setInterval(fetchStatus, 10000)
     return () => clearInterval(interval)
-  }, [])
+  }, [fetchStatus])
+
+  const handleLogout = async () => {
+    try { await api.logout() } catch { /* ignore */ }
+    clearToken()
+    navigate('/login', { replace: true })
+  }
+
+  const ramPercent = status && status.memory.total_mb > 0
+    ? Math.round((status.memory.used_mb / status.memory.total_mb) * 100)
+    : 0
 
   return (
-    <div className="flex h-screen bg-gray-950 text-gray-100">
+    <div className="flex h-screen bg-navy-950 text-gray-100">
+      {/* Mobile overlay */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 bg-black/60 z-30 lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
       {/* Sidebar */}
-      <aside className="w-56 bg-gray-900 border-r border-gray-800 flex flex-col">
-        <div className="px-4 py-4 border-b border-gray-800">
-          <h1 className="text-lg font-bold font-mono tracking-tight text-emerald-400">
-            SecFirstGW
-          </h1>
-          <p className="text-xs text-gray-500 font-mono mt-0.5">Security Gateway</p>
+      <aside className={`
+        fixed inset-y-0 left-0 z-40 w-60 bg-navy-900 border-r border-navy-800/50
+        flex flex-col transition-transform duration-200 ease-out
+        lg:static lg:translate-x-0
+        ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+      `}>
+        {/* Logo */}
+        <div className="px-5 py-5 border-b border-navy-800/50">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
+              <svg className="w-4 h-4 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 2L4 6v6c0 5.25 3.4 10.15 8 11.43C16.6 22.15 20 17.25 20 12V6l-8-4z" />
+              </svg>
+            </div>
+            <div>
+              <h1 className="text-sm font-semibold tracking-tight text-gray-100">SecFirstGW</h1>
+              <p className="text-[10px] text-navy-400 font-medium">Security Gateway</p>
+            </div>
+          </div>
         </div>
-        <nav className="flex-1 py-2 overflow-y-auto">
-          {navItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.to === '/'}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-4 py-2.5 text-sm transition-colors ${
-                  isActive
-                    ? 'text-emerald-400 bg-gray-800/60 border-r-2 border-emerald-400'
-                    : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/30'
-                }`
-              }
-            >
-              <NavIcon icon={item.icon} />
-              {item.label}
-            </NavLink>
-          ))}
+
+        {/* Navigation */}
+        <nav className="flex-1 py-3 px-2 overflow-y-auto">
+          <div className="space-y-0.5">
+            {navItems.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.to === '/'}
+                onClick={() => setSidebarOpen(false)}
+                className={({ isActive }) =>
+                  `flex items-center gap-3 px-3 py-2 text-[13px] font-medium rounded-lg transition-all duration-150 ${
+                    isActive
+                      ? 'text-emerald-400 bg-emerald-500/8 border-l-2 border-emerald-400 ml-0 pl-2.5'
+                      : 'text-navy-400 hover:text-gray-200 hover:bg-navy-800/50 border-l-2 border-transparent'
+                  }`
+                }
+              >
+                <NavIcon icon={item.icon} />
+                {item.label}
+              </NavLink>
+            ))}
+          </div>
         </nav>
-        <div className="px-4 py-3 border-t border-gray-800 text-xs text-gray-600 font-mono">
-          v{status?.status === 'ok' ? '0.1.0' : '---'}
+
+        {/* Sidebar footer */}
+        <div className="px-4 py-3 border-t border-navy-800/50">
+          <div className="flex items-center gap-2">
+            <div className={`w-1.5 h-1.5 rounded-full ${online ? 'bg-emerald-400 animate-pulse-dot' : 'bg-red-400'}`} />
+            <span className="text-[11px] text-navy-400 font-mono">{online ? 'Connected' : 'Offline'}</span>
+          </div>
+          <p className="text-[10px] text-navy-600 font-mono mt-1">v0.1.0</p>
         </div>
       </aside>
 
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top bar */}
-        <header className="h-12 bg-gray-900 border-b border-gray-800 flex items-center justify-between px-4">
+        <header className="h-14 bg-navy-900/80 backdrop-blur-sm border-b border-navy-800/50 flex items-center justify-between px-4 sticky top-0 z-20">
           <div className="flex items-center gap-3">
-            <span className="text-sm text-gray-400 font-mono">
-              {status?.status === 'ok' ? 'SecFirstGW' : '---'}
+            {/* Hamburger */}
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="lg:hidden p-1.5 -ml-1.5 text-navy-400 hover:text-gray-200 rounded-lg hover:bg-navy-800/50 transition-colors"
+            >
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
+              </svg>
+            </button>
+            <span className="text-sm font-medium text-gray-300">
+              {status?.status === 'ok' ? 'secfirstgw' : '---'}
             </span>
           </div>
-          <div className="flex items-center gap-4">
-            <span className="flex items-center gap-2 text-xs font-mono">
-              <span className={`w-2 h-2 rounded-full ${online ? 'bg-emerald-400' : 'bg-red-500'}`} />
-              {online ? 'System Online' : 'Offline'}
-            </span>
-            {status && (
-              <span className="text-xs text-gray-500 font-mono">
-                Load {status.load_average[0].toFixed(2)} | RAM {status.memory.used_mb}MB/{status.memory.total_mb}MB
-              </span>
-            )}
+
+          <div className="flex items-center gap-5">
+            {/* Status indicators */}
+            <div className="hidden sm:flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <div className={`w-2 h-2 rounded-full ${online ? 'bg-emerald-400 animate-pulse-dot' : 'bg-red-400'}`} />
+                <span className="text-xs font-medium text-gray-400">{online ? 'Online' : 'Offline'}</span>
+              </div>
+              {status && (
+                <>
+                  <div className="flex items-center gap-1.5 text-xs text-navy-400">
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+                    </svg>
+                    <span className="font-mono tabular-nums">{status.load_average[0].toFixed(2)}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-xs text-navy-400">
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <rect x="2" y="6" width="20" height="12" rx="2" />
+                      <line x1="6" y1="10" x2="6" y2="14" />
+                    </svg>
+                    <span className="font-mono tabular-nums">{ramPercent}%</span>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Divider */}
+            <div className="hidden sm:block w-px h-6 bg-navy-800" />
+
+            {/* User menu */}
+            <div className="relative">
+              <button
+                onClick={() => setUserMenuOpen(!userMenuOpen)}
+                className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-navy-800/50 transition-colors"
+              >
+                <div className="w-7 h-7 rounded-full bg-navy-700 flex items-center justify-center">
+                  <svg className="w-4 h-4 text-navy-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <circle cx="12" cy="8" r="4" />
+                    <path d="M4 21v-1a6 6 0 0112 0v1" />
+                  </svg>
+                </div>
+                <svg className="w-3 h-3 text-navy-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M6 9l6 6 6-6" />
+                </svg>
+              </button>
+
+              {userMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
+                  <div className="absolute right-0 top-full mt-1 w-44 bg-navy-800 border border-navy-700/50 rounded-lg shadow-xl z-50 py-1 animate-fade-in">
+                    <button
+                      onClick={handleLogout}
+                      className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-navy-700/50 hover:text-white transition-colors flex items-center gap-2"
+                    >
+                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                        <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9" />
+                      </svg>
+                      Sign Out
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         </header>
 
         {/* Page content */}
-        <main className="flex-1 overflow-auto p-6">
+        <main className="flex-1 overflow-auto p-6 animate-fade-in">
           <Outlet />
         </main>
       </div>
     </div>
   )
 }
-

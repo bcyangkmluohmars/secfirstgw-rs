@@ -19,6 +19,7 @@ use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 use sfgw_db::Db;
 
+use crate::ca::GatewayCA;
 use crate::signing;
 
 /// Inform payload sent by the device (after decryption).
@@ -124,25 +125,63 @@ pub async fn handle_inform(
         None
     };
 
-    // Check for firmware updates — TODO: compare against a firmware repo.
-    let firmware_update = if let Some(fw) = cfg.get("pending_firmware") {
-        if !fw.is_null() {
-            let version = fw.get("version").and_then(|v| v.as_str()).unwrap_or("");
-            let sha256 = fw.get("sha256").and_then(|v| v.as_str()).unwrap_or("");
-            let url = fw.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            if !version.is_empty() {
-                let manifest = signing::sign_firmware_manifest(version, sha256, url, ca)?;
-                cfg["pending_firmware"] = serde_json::json!(null);
-                conn.execute(
-                    "UPDATE devices SET config = ?1 WHERE id = ?2",
-                    rusqlite::params![serde_json::to_string(&cfg)?, device_id],
-                )?;
-                Some(manifest)
-            } else {
+    // Check for firmware updates by comparing device's reported version
+    // against the latest firmware manifest in the DB for that model.
+    let model: Option<String> = conn
+        .query_row(
+            "SELECT model FROM devices WHERE id = ?1",
+            [device_id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let firmware_update = if let Some(ref model) = model {
+        match load_latest_firmware_inner(&conn, model) {
+            Ok(Some(row)) => {
+                if is_newer_version(&row.version, &payload.firmware_version) {
+                    tracing::info!(
+                        mac = %payload.mac,
+                        model = %model,
+                        device_version = %payload.firmware_version,
+                        latest_version = %row.version,
+                        "firmware update available"
+                    );
+                    let manifest = signing::sign_firmware_manifest(
+                        &row.version,
+                        &row.sha256,
+                        &row.url,
+                        row.size_bytes,
+                        ca,
+                    )?;
+                    Some(manifest)
+                } else {
+                    tracing::debug!(
+                        mac = %payload.mac,
+                        model = %model,
+                        device_version = %payload.firmware_version,
+                        "device firmware is up to date"
+                    );
+                    None
+                }
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    mac = %payload.mac,
+                    model = %model,
+                    "no firmware manifest registered for model"
+                );
                 None
             }
-        } else {
-            None
+            Err(e) => {
+                tracing::warn!(
+                    mac = %payload.mac,
+                    model = %model,
+                    error = %e,
+                    "failed to query firmware manifests"
+                );
+                None
+            }
         }
     } else {
         None
@@ -185,6 +224,122 @@ pub fn decrypt_payload(ciphertext_b64: &str, symmetric_key: &[u8]) -> Result<Inf
         .context("invalid base64 in inform payload")?;
     let plaintext = aes_256_gcm_decrypt(symmetric_key, &ciphertext)?;
     serde_json::from_slice(&plaintext).context("invalid JSON in decrypted inform payload")
+}
+
+// ---------------------------------------------------------------------------
+// Firmware manifest management
+// ---------------------------------------------------------------------------
+
+/// Row from the `firmware_manifests` table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FirmwareRow {
+    pub id: i64,
+    pub model: String,
+    pub version: String,
+    pub sha256: String,
+    pub size_bytes: i64,
+    pub url: String,
+    pub signature: String,
+    pub created_at: String,
+}
+
+/// Load the latest firmware manifest for a given device model.
+///
+/// Returns `None` if no firmware has been registered for the model.
+pub async fn load_latest_firmware(db: &Db, model: &str) -> Result<Option<FirmwareRow>> {
+    let conn = db.lock().await;
+    load_latest_firmware_inner(&conn, model)
+}
+
+/// Inner (synchronous) implementation so it can be called while holding the lock.
+fn load_latest_firmware_inner(
+    conn: &rusqlite::Connection,
+    model: &str,
+) -> Result<Option<FirmwareRow>> {
+    let result = conn.query_row(
+        "SELECT id, model, version, sha256, size_bytes, url, signature, created_at \
+         FROM firmware_manifests \
+         WHERE model = ?1 \
+         ORDER BY id DESC \
+         LIMIT 1",
+        [model],
+        |r| {
+            Ok(FirmwareRow {
+                id: r.get(0)?,
+                model: r.get(1)?,
+                version: r.get(2)?,
+                sha256: r.get(3)?,
+                size_bytes: r.get(4)?,
+                url: r.get(5)?,
+                signature: r.get(6)?,
+                created_at: r.get(7)?,
+            })
+        },
+    );
+    match result {
+        Ok(row) => Ok(Some(row)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e).context("failed to query firmware_manifests"),
+    }
+}
+
+/// Register a new firmware manifest in the database.
+///
+/// The manifest is signed with the gateway CA (ML-DSA-65) and the signature is
+/// stored alongside the metadata.  Callers should provide the SHA-256 hash of
+/// the firmware binary and a download URL.
+pub async fn register_firmware(
+    db: &Db,
+    ca: &GatewayCA,
+    model: &str,
+    version: &str,
+    sha256: &str,
+    size_bytes: i64,
+    url: &str,
+) -> Result<()> {
+    // Build the canonical payload that gets signed.
+    let inner = serde_json::json!({
+        "model": model,
+        "version": version,
+        "sha256": sha256,
+        "size_bytes": size_bytes,
+        "url": url,
+    });
+    let payload_bytes = serde_json::to_vec(&inner)?;
+    let sig = ca.sign(&payload_bytes)?;
+    let sig_b64 = B64.encode(&sig);
+
+    let conn = db.lock().await;
+    conn.execute(
+        "INSERT INTO firmware_manifests (model, version, sha256, size_bytes, url, signature) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![model, version, sha256, size_bytes, url, sig_b64],
+    )?;
+
+    tracing::info!(
+        model = %model,
+        version = %version,
+        size_bytes = size_bytes,
+        "firmware manifest registered"
+    );
+    Ok(())
+}
+
+/// Compare two semver-style version strings (e.g. "1.2.3" > "1.2.0").
+///
+/// Returns `true` if `candidate` is strictly newer than `current`.
+/// Falls back to lexicographic comparison if parsing fails.
+pub fn is_newer_version(candidate: &str, current: &str) -> bool {
+    let parse = |v: &str| -> Option<Vec<u64>> {
+        v.split('.')
+            .map(|part| part.parse::<u64>().ok())
+            .collect()
+    };
+
+    match (parse(candidate), parse(current)) {
+        (Some(c), Some(d)) => c > d,
+        _ => candidate > current,
+    }
 }
 
 // ---------------------------------------------------------------------------

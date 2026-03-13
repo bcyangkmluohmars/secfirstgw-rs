@@ -11,6 +11,7 @@ sfgw-crypto = { path = "../sfgw-crypto" }
 zeroize.workspace = true
 rusqlite.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 serde = { workspace = true }
@@ -20,6 +21,7 @@ x25519-dalek = { workspace = true, features = ["static_secrets"] }
 base64.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+ed25519-dalek.workspace = true
 fips203.workspace = true
 fips204.workspace = true
 

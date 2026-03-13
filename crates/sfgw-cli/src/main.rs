@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+#![deny(unsafe_code)]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -80,7 +81,11 @@ enum AdoptCommands {
 #[derive(Subcommand)]
 enum CryptoCommands {
     /// Initialize LUKS2 on HDD
-    Init,
+    Init {
+        /// Skip confirmation prompt (required — this is a destructive operation)
+        #[arg(long)]
+        confirm: bool,
+    },
     /// Unlock HDD
     Unlock,
     /// Show encryption status
@@ -160,7 +165,7 @@ async fn start_services() -> Result<()> {
     // Phase 12: LCD display (bare metal only)
     if platform.has_lcd() {
         tracing::info!("initializing display");
-        sfgw_lcd::init().await?;
+        let _lcd = sfgw_lcd::init(std::path::Path::new("/dev/i2c-1"), None)?;
     }
 
     // Phase 13: API server (blocks)
@@ -209,10 +214,9 @@ async fn handle_vpn(cmd: VpnCommands) -> Result<()> {
             for t in &tunnels {
                 let status = if t.enabled { "UP" } else { "DOWN" };
                 println!(
-                    "[{status}] {} port={} peers={}",
+                    "[{status}] {} port={}",
                     t.name,
                     t.listen_port,
-                    t.peers.len()
                 );
             }
         }
@@ -220,7 +224,7 @@ async fn handle_vpn(cmd: VpnCommands) -> Result<()> {
             let db = sfgw_db::open_or_create().await?;
             let tunnels = sfgw_vpn::tunnel::list_tunnels(&db).await?;
             for t in tunnels.iter().filter(|t| t.enabled) {
-                sfgw_vpn::tunnel::start_tunnel(&db, &t.name).await?;
+                sfgw_vpn::tunnel::start_tunnel(&db, t.id).await?;
                 println!("Started tunnel: {}", t.name);
             }
         }
@@ -228,7 +232,7 @@ async fn handle_vpn(cmd: VpnCommands) -> Result<()> {
             let db = sfgw_db::open_or_create().await?;
             let tunnels = sfgw_vpn::tunnel::list_tunnels(&db).await?;
             for t in &tunnels {
-                let _ = sfgw_vpn::tunnel::stop_tunnel(&db, &t.name).await;
+                let _ = sfgw_vpn::tunnel::stop_tunnel(&db, t.id).await;
                 println!("Stopped tunnel: {}", t.name);
             }
         }
@@ -316,10 +320,8 @@ async fn handle_adopt(cmd: AdoptCommands) -> Result<()> {
 
 async fn handle_crypto(cmd: CryptoCommands) -> Result<()> {
     match cmd {
-        CryptoCommands::Init => {
-            let platform = sfgw_hal::init()?;
-            println!("Platform: {platform}");
-            println!("LUKS2 init not yet supported via CLI. Use system tools.");
+        CryptoCommands::Init { confirm } => {
+            handle_crypto_init(confirm)?;
         }
         CryptoCommands::Unlock => {
             let platform = sfgw_hal::init()?;
@@ -327,18 +329,172 @@ async fn handle_crypto(cmd: CryptoCommands) -> Result<()> {
             println!("Crypto unlock complete.");
         }
         CryptoCommands::Status => {
-            let platform = sfgw_hal::init()?;
-            println!("Platform: {platform}");
-            println!(
-                "HDD: {}",
-                if platform.has_hdd() {
-                    "present"
-                } else {
-                    "none"
-                }
-            );
-            println!("Encryption: pending implementation");
+            handle_crypto_status()?;
         }
     }
+    Ok(())
+}
+
+/// Show actual LUKS encryption status by querying cryptsetup.
+fn handle_crypto_status() -> Result<()> {
+    use std::path::Path;
+    use std::process::Command;
+
+    let platform = sfgw_hal::init()?;
+    println!("Platform: {platform}");
+
+    if !platform.has_hdd() {
+        println!("HDD: not detected");
+        println!("No HDD detected — encryption status not applicable.");
+        return Ok(());
+    }
+
+    println!("HDD: present");
+
+    let mapper_path = Path::new("/dev/mapper/sfgw-data");
+    if !mapper_path.exists() {
+        println!("Encryption: HDD present but encrypted volume not open");
+        // Check if the underlying device at least has a LUKS header
+        let luks_device = Path::new("/dev/sda1");
+        if luks_device.exists() {
+            let output = Command::new("cryptsetup")
+                .args(["isLuks", "/dev/sda1"])
+                .output();
+            match output {
+                Ok(o) if o.status.success() => {
+                    println!("LUKS header: detected on /dev/sda1");
+                }
+                _ => {
+                    println!("LUKS header: not found on /dev/sda1");
+                }
+            }
+        } else {
+            println!("Device /dev/sda1 not found");
+        }
+        return Ok(());
+    }
+
+    // Volume is open — query cryptsetup for details
+    let output = Command::new("cryptsetup")
+        .args(["status", "sfgw-data"])
+        .output()
+        .context("failed to execute cryptsetup status")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        println!("Encryption: failed to query status — {stderr}");
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Parse key fields from cryptsetup status output
+    let mut device = None;
+    let mut cipher = None;
+    let mut keysize = None;
+    let mut active = false;
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.contains("is active") {
+            active = true;
+        }
+        if let Some(val) = line.strip_prefix("device:") {
+            device = Some(val.trim().to_string());
+        } else if let Some(val) = line.strip_prefix("cipher:") {
+            cipher = Some(val.trim().to_string());
+        } else if let Some(val) = line.strip_prefix("keysize:") {
+            keysize = Some(val.trim().to_string());
+        }
+    }
+
+    println!("Volume:  /dev/mapper/sfgw-data");
+    println!("State:   {}", if active { "active" } else { "inactive" });
+    if let Some(dev) = device {
+        println!("Device:  {dev}");
+    }
+    if let Some(c) = cipher {
+        println!("Cipher:  {c}");
+    }
+    if let Some(k) = keysize {
+        println!("Keysize: {k}");
+    }
+
+    Ok(())
+}
+
+/// Initialize a LUKS2 volume on /dev/sda1.
+fn handle_crypto_init(confirm: bool) -> Result<()> {
+    use std::path::Path;
+    use std::process::Command;
+
+    let platform = sfgw_hal::init()?;
+    println!("Platform: {platform}");
+
+    if !platform.has_hdd() {
+        anyhow::bail!("no HDD detected on this platform — cannot initialize LUKS");
+    }
+
+    let luks_device = Path::new("/dev/sda1");
+    if !luks_device.exists() {
+        anyhow::bail!("/dev/sda1 not found — is the HDD partitioned?");
+    }
+
+    let mapper_path = Path::new("/dev/mapper/sfgw-data");
+    if mapper_path.exists() {
+        anyhow::bail!(
+            "/dev/mapper/sfgw-data already exists — volume is already open. \
+             Close it first with: cryptsetup close sfgw-data"
+        );
+    }
+
+    if !confirm {
+        println!("WARNING: This will DESTROY ALL DATA on /dev/sda1.");
+        println!();
+        println!("To proceed, re-run with --confirm:");
+        println!("  sfgw crypto init --confirm");
+        println!();
+        println!("Or run manually:");
+        println!("  cryptsetup luksFormat --type luks2 \\");
+        println!("    --cipher aes-xts-plain64 --key-size 512 \\");
+        println!("    --pbkdf argon2id /dev/sda1");
+        return Ok(());
+    }
+
+    println!("Initializing LUKS2 on /dev/sda1...");
+    println!("  Type:   LUKS2");
+    println!("  Cipher: aes-xts-plain64 (AES-256-XTS)");
+    println!("  PBKDF:  argon2id");
+
+    let output = Command::new("cryptsetup")
+        .args([
+            "luksFormat",
+            "--type",
+            "luks2",
+            "--cipher",
+            "aes-xts-plain64",
+            "--key-size",
+            "512",
+            "--pbkdf",
+            "argon2id",
+            "--batch-mode",
+            "/dev/sda1",
+        ])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .context("failed to execute cryptsetup luksFormat")?;
+
+    if output.status.success() {
+        println!("LUKS2 volume initialized successfully on /dev/sda1.");
+        println!("Next steps:");
+        println!("  1. Set up auto-unlock key (hardware-derived or key file)");
+        println!("  2. Run: sfgw crypto unlock");
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("cryptsetup luksFormat failed: {stderr}");
+    }
+
     Ok(())
 }

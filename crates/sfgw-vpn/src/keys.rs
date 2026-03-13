@@ -31,6 +31,7 @@ pub struct WgKeypair {
 ///
 /// The private key is immediately wrapped in a `SecureBox` and the
 /// plaintext is zeroized. Only the public key is kept as a plain string.
+#[must_use = "generated keypair contains private key material that must not be discarded"]
 pub fn generate_keypair() -> Result<WgKeypair> {
     let secret = StaticSecret::random_from_rng(OsRng);
     let public = PublicKey::from(&secret);
@@ -108,6 +109,7 @@ pub fn public_key_from_private(private_key_b64: &str) -> Result<String> {
 
 /// Generate a random 256-bit preshared key (base64-encoded).
 /// Used for additional quantum-resistance layer between peers.
+#[must_use = "generated preshared key must not be discarded"]
 pub fn generate_preshared_key() -> String {
     let mut key = [0u8; 32];
     // OsRng implements CryptoRng — suitable for key material
