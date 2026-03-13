@@ -98,7 +98,7 @@ pub fn create_tun_device(name: &str) -> Result<OwnedFd> {
     // SAFETY: TUNSETIFF is the standard ioctl for configuring TUN/TAP devices.
     // fd is a valid file descriptor from open(/dev/net/tun).
     // ifr is a properly initialized ifreq struct.
-    const TUNSETIFF: libc::c_ulong = 0x400454CA;
+    const TUNSETIFF: libc::Ioctl = 0x400454CA as libc::Ioctl;
     let ret = unsafe { libc::ioctl(fd, TUNSETIFF, &ifr) };
     if ret < 0 {
         // SAFETY: fd is valid; close() on a valid fd is always safe.

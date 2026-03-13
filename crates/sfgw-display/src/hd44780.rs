@@ -21,7 +21,7 @@ const LCD_COLS: usize = 20;
 const LCD_ROWS: u8 = 4;
 
 /// I2C_SLAVE ioctl request code (from linux/i2c-dev.h).
-const I2C_SLAVE: u64 = 0x0703;
+const I2C_SLAVE: libc::Ioctl = 0x0703 as libc::Ioctl;
 
 // HD44780 command constants.
 const CMD_CLEAR_DISPLAY: u8 = 0x01;
