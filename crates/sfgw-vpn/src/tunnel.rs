@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! WireGuard tunnel lifecycle management.
+//! VPN tunnel lifecycle management.
 //!
-//! Creates, starts, stops, and manages WireGuard tunnels.
+//! Creates, starts, stops, and manages VPN tunnels (WireGuard and IPsec).
 //! Uses boringtun for userspace WireGuard implementation.
 //! Falls back to kernel WireGuard tools if available.
+//! IPsec/IKEv2 tunnels are managed via strongSwan (swanctl).
 
 use anyhow::{bail, Context, Result};
 use tracing::{info, warn};
@@ -40,6 +41,11 @@ pub async fn create_tunnel(
         validate_tunnel_address(v6)?;
     }
 
+    // Validate bind_interface if specified
+    if let Some(ref iface) = request.bind_interface {
+        validate_interface_name(iface)?;
+    }
+
     // Check for name collision
     if db::get_tunnel_by_name(db, name).await?.is_some() {
         bail!("tunnel '{}' already exists", name);
@@ -57,6 +63,7 @@ pub async fn create_tunnel(
         dns: request.dns.clone(),
         mtu: request.mtu.unwrap_or(1420),
         zone: request.zone.clone(),
+        bind_interface: request.bind_interface.clone(),
     };
 
     let config_json = config.to_db_json()?;
@@ -76,16 +83,27 @@ pub async fn create_tunnel(
         dns: request.dns.clone(),
         mtu: request.mtu.unwrap_or(1420),
         zone: request.zone.clone(),
+        bind_interface: request.bind_interface.clone(),
     })
 }
 
-/// Start a WireGuard tunnel using boringtun userspace or kernel WireGuard.
+/// Start a VPN tunnel (dispatches to WireGuard or IPsec based on tunnel type).
 ///
-/// Creates a TUN interface, configures addresses, and starts the packet loop.
+/// For WireGuard: creates a TUN interface, configures addresses, starts packet loop.
+/// For IPsec: writes swanctl config and loads via strongSwan.
 pub async fn start_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()> {
     let row = db::get_tunnel_by_id(db, tunnel_id)
         .await?
         .context("tunnel not found")?;
+
+    let tunnel_type = crate::TunnelType::from_str_lossy(&row.tunnel_type);
+
+    match tunnel_type {
+        crate::TunnelType::IPsec => {
+            return crate::ipsec::start_ipsec_tunnel(db, tunnel_id).await;
+        }
+        crate::TunnelType::WireGuard => { /* fall through to existing WireGuard logic */ }
+    }
 
     if row.enabled != 0 {
         bail!("tunnel '{}' is already running", row.name);
@@ -101,8 +119,15 @@ pub async fn start_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()> {
         .map(crate::peer::peer_row_to_wg_peer)
         .collect();
 
+    // Resolve bind address from bind_interface if specified
+    let bind_address = if let Some(ref iface) = config.bind_interface {
+        Some(resolve_interface_ip(iface).await?)
+    } else {
+        None
+    };
+
     // Try kernel WireGuard first, fall back to boringtun userspace
-    match start_kernel_wg(&row.name, &config, &wg_peers).await {
+    match start_kernel_wg(&row.name, &config, &wg_peers, bind_address.as_deref()).await {
         Ok(()) => {
             info!(tunnel = row.name, "started WireGuard tunnel (kernel)");
         }
@@ -111,7 +136,7 @@ pub async fn start_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()> {
                 tunnel = row.name,
                 "kernel WireGuard unavailable ({kernel_err}), using boringtun userspace"
             );
-            start_userspace_wg(&row.name, &config, &wg_peers).await?;
+            start_userspace_wg(&row.name, &config, &wg_peers, bind_address.as_deref()).await?;
             info!(tunnel = row.name, "started WireGuard tunnel (boringtun userspace)");
         }
     }
@@ -120,11 +145,20 @@ pub async fn start_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Stop a WireGuard tunnel.
+/// Stop a VPN tunnel (dispatches to WireGuard or IPsec based on tunnel type).
 pub async fn stop_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()> {
     let row = db::get_tunnel_by_id(db, tunnel_id)
         .await?
         .context("tunnel not found")?;
+
+    let tunnel_type = crate::TunnelType::from_str_lossy(&row.tunnel_type);
+
+    match tunnel_type {
+        crate::TunnelType::IPsec => {
+            return crate::ipsec::stop_ipsec_tunnel(db, tunnel_id).await;
+        }
+        crate::TunnelType::WireGuard => { /* fall through to existing WireGuard logic */ }
+    }
 
     // Bring down and delete the interface (warn if commands fail unexpectedly)
     if let Err(e) = run_cmd("ip", &["link", "set", "down", "dev", &row.name]).await {
@@ -141,11 +175,20 @@ pub async fn stop_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()> {
 }
 
 /// Delete a tunnel entirely (stops it first if running).
+///
+/// Dispatches to the appropriate backend (WireGuard or IPsec).
 pub async fn delete_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()> {
     let row = db::get_tunnel_by_id(db, tunnel_id)
         .await?
         .context("tunnel not found")?;
 
+    let tunnel_type = crate::TunnelType::from_str_lossy(&row.tunnel_type);
+
+    if tunnel_type == crate::TunnelType::IPsec {
+        return crate::ipsec::delete_ipsec_tunnel(db, tunnel_id).await;
+    }
+
+    // WireGuard path
     // Best-effort stop
     if row.enabled != 0 {
         if let Err(e) = stop_tunnel(db, tunnel_id).await {
@@ -159,7 +202,9 @@ pub async fn delete_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Query live status of a tunnel interface.
+/// Query live status of a WireGuard tunnel interface.
+///
+/// For IPsec status, use [`crate::ipsec::get_ipsec_status`] instead.
 pub async fn get_status(name: &str) -> Result<TunnelStatus> {
     let is_up = check_interface_up(name).await;
 
@@ -267,6 +312,7 @@ async fn start_kernel_wg(
     name: &str,
     config: &TunnelConfig,
     peers: &[crate::WgPeer],
+    bind_address: Option<&str>,
 ) -> Result<()> {
     // Create WireGuard interface
     run_cmd("ip", &["link", "add", "dev", name, "type", "wireguard"])
@@ -289,6 +335,26 @@ async fn start_kernel_wg(
     )
     .await
     .context("failed to set listen port")?;
+
+    // If bound to a specific WAN interface, set up policy routing via fwmark
+    // so the kernel routes WireGuard UDP packets through the correct interface.
+    if let Some(addr) = bind_address {
+        // Use fwmark to tag packets from this WG interface for policy routing.
+        // The mark value is derived from the listen port to avoid collisions.
+        let fwmark = format!("{}", 0x5746_0000u32 | u32::from(config.listen_port));
+        run_cmd(
+            "wg",
+            &["set", name, "fwmark", &fwmark],
+        )
+        .await
+        .context("failed to set fwmark for interface binding")?;
+
+        info!(
+            tunnel = name,
+            bind_address = addr,
+            "kernel WireGuard bound to specific interface address"
+        );
+    }
 
     // Add IPv4 address
     run_cmd("ip", &["address", "add", &config.address, "dev", name])
@@ -331,6 +397,7 @@ async fn start_userspace_wg(
     name: &str,
     config: &TunnelConfig,
     peers: &[crate::WgPeer],
+    bind_address: Option<&str>,
 ) -> Result<()> {
     // Create TUN interface
     let tun_fd = crate::userspace::create_tun_device(name)?;
@@ -378,6 +445,7 @@ async fn start_userspace_wg(
         private_key,
         listen_port,
         peer_configs,
+        bind_address.map(|s| s.to_string()),
     );
 
     Ok(())
@@ -388,21 +456,103 @@ async fn start_userspace_wg(
 // ---------------------------------------------------------------------------
 
 fn tunnel_from_row(row: TunnelRow) -> Result<VpnTunnel> {
-    let config = TunnelConfig::from_db_json(&row.config)?;
+    let tunnel_type = crate::TunnelType::from_str_lossy(&row.tunnel_type);
 
-    Ok(VpnTunnel {
-        id: row.id,
-        name: row.name,
-        tunnel_type: crate::TunnelType::WireGuard,
-        enabled: row.enabled != 0,
-        listen_port: config.listen_port,
-        public_key: config.public_key,
-        address: config.address,
-        address_v6: config.address_v6,
-        dns: config.dns,
-        mtu: config.mtu,
-        zone: config.zone,
-    })
+    match tunnel_type {
+        crate::TunnelType::IPsec => {
+            let config: crate::IpsecDbConfig = serde_json::from_str(&row.config)
+                .context("corrupt IPsec config in DB")?;
+            Ok(VpnTunnel {
+                id: row.id,
+                name: row.name,
+                tunnel_type: crate::TunnelType::IPsec,
+                enabled: row.enabled != 0,
+                listen_port: config.listen_port.unwrap_or(500),
+                public_key: String::new(),
+                address: config.pool_v4.unwrap_or_default(),
+                address_v6: config.pool_v6,
+                dns: config.dns,
+                mtu: 1400,
+                zone: config.zone,
+                // IPsec uses local_addrs for WAN binding, not bind_interface
+                bind_interface: None,
+            })
+        }
+        crate::TunnelType::WireGuard => {
+            let config = TunnelConfig::from_db_json(&row.config)?;
+            Ok(VpnTunnel {
+                id: row.id,
+                name: row.name,
+                tunnel_type: crate::TunnelType::WireGuard,
+                enabled: row.enabled != 0,
+                listen_port: config.listen_port,
+                public_key: config.public_key,
+                address: config.address,
+                address_v6: config.address_v6,
+                dns: config.dns,
+                mtu: config.mtu,
+                zone: config.zone,
+                bind_interface: config.bind_interface,
+            })
+        }
+    }
+}
+
+/// Validate an interface name: 1-15 chars, alphanumeric + dash/underscore/dot.
+fn validate_interface_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 15 {
+        bail!("invalid interface name '{}': must be 1-15 characters", name);
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        bail!(
+            "invalid interface name '{}': only alphanumeric, '.', '_', '-' allowed",
+            name
+        );
+    }
+    Ok(())
+}
+
+/// Resolve the primary IPv4 address of a network interface.
+///
+/// Uses `ip -j addr show {interface}` and parses the JSON output.
+/// Returns the first non-link-local IPv4 address found.
+async fn resolve_interface_ip(iface: &str) -> Result<String> {
+    validate_interface_name(iface)?;
+
+    let output = tokio::process::Command::new("ip")
+        .args(["-j", "addr", "show", iface])
+        .output()
+        .await
+        .with_context(|| format!("failed to query interface {iface}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("interface {iface} not found or not available: {stderr}");
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .with_context(|| format!("failed to parse ip addr output for {iface}"))?;
+
+    // Walk the JSON array looking for an IPv4 address
+    if let Some(arr) = parsed.as_array() {
+        for entry in arr {
+            if let Some(addr_info) = entry.get("addr_info").and_then(|v| v.as_array()) {
+                for ai in addr_info {
+                    if ai.get("family").and_then(|v| v.as_str()) == Some("inet") {
+                        if let Some(local) = ai.get("local").and_then(|v| v.as_str()) {
+                            return Ok(local.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    bail!("no IPv4 address found on interface {iface}")
 }
 
 /// Validate a tunnel address (e.g., "10.0.0.1/24" or "fd00::1/64").

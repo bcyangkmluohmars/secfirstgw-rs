@@ -126,12 +126,15 @@ pub fn create_tun_device(name: &str) -> Result<OwnedFd> {
 /// Spawn the boringtun packet processing loop as a background tokio task.
 ///
 /// The task runs until the TUN device is closed (tunnel stopped).
+/// If `bind_address` is set, the UDP socket binds to that specific IP
+/// instead of all interfaces.
 pub fn spawn_tunnel_task(
     name: String,
     tun_fd: OwnedFd,
     mut private_key_bytes: Vec<u8>,
     listen_port: u16,
     peer_configs: Vec<PeerConfig>,
+    bind_address: Option<String>,
 ) {
     tokio::spawn(async move {
         if let Err(e) = run_tunnel_loop(
@@ -140,6 +143,7 @@ pub fn spawn_tunnel_task(
             &private_key_bytes,
             listen_port,
             &peer_configs,
+            bind_address.as_deref(),
         )
         .await
         {
@@ -156,6 +160,7 @@ async fn run_tunnel_loop(
     private_key_bytes: &[u8],
     listen_port: u16,
     peer_configs: &[PeerConfig],
+    bind_address: Option<&str>,
 ) -> Result<()> {
     // Parse the private key
     let key_array: [u8; 32] = private_key_bytes
@@ -208,14 +213,21 @@ async fn run_tunnel_loop(
         }
     }
 
-    // Bind UDP socket for WireGuard protocol
-    let udp = match UdpSocket::bind(format!("[::]:{listen_port}")).await {
-        Ok(s) => s,
-        Err(_) => {
-            // IPv4 fallback if dual-stack bind fails
-            UdpSocket::bind(format!("0.0.0.0:{listen_port}"))
-                .await
-                .context("failed to bind UDP socket for WireGuard")?
+    // Bind UDP socket for WireGuard protocol.
+    // If bind_address is set, bind to that specific IP; otherwise bind to all interfaces.
+    let udp = if let Some(addr) = bind_address {
+        UdpSocket::bind(format!("{addr}:{listen_port}"))
+            .await
+            .with_context(|| format!("failed to bind UDP socket to {addr}:{listen_port}"))?
+    } else {
+        match UdpSocket::bind(format!("[::]:{listen_port}")).await {
+            Ok(s) => s,
+            Err(_) => {
+                // IPv4 fallback if dual-stack bind fails
+                UdpSocket::bind(format!("0.0.0.0:{listen_port}"))
+                    .await
+                    .context("failed to bind UDP socket for WireGuard")?
+            }
         }
     };
 

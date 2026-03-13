@@ -31,6 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nftables \
     iproute2 \
     wireguard-tools \
+    strongswan \
+    strongswan-swanctl \
+    libcharon-extra-plugins \
     iputils-ping \
     procps \
     && rm -rf /var/lib/apt/lists/*

@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 sfgw-db = { path = "../sfgw-db" }
 sfgw-fw = { path = "../sfgw-fw" }
+sfgw-net = { path = "../sfgw-net" }
 sfgw-vpn = { path = "../sfgw-vpn" }
 sfgw-dns = { path = "../sfgw-dns" }
 sfgw-ids = { path = "../sfgw-ids" }

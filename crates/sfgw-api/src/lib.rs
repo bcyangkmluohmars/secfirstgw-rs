@@ -103,6 +103,11 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
         .route("/api/v1/dns/dhcp/leases", get(dns_get_dhcp_leases))
         .route("/api/v1/dns/dhcp/static", get(dns_get_static_leases).put(dns_save_static_leases))
         .route("/api/v1/dns/overrides", get(dns_get_overrides).put(dns_save_overrides))
+        // WAN
+        .route("/api/v1/wan", get(wan_list))
+        .route("/api/v1/wan/{interface}", get(wan_get).put(wan_set).delete(wan_delete))
+        .route("/api/v1/wan/{interface}/status", get(wan_status))
+        .route("/api/v1/wan/{interface}/reconnect", post(wan_reconnect))
         // IDS
         .route("/api/v1/ids/events", get(ids_list_events))
         .route("/api/v1/ids/events/stats", get(ids_event_stats))
@@ -899,11 +904,45 @@ async fn vpn_list_tunnels(
 async fn vpn_create_tunnel(
     _auth: AuthUser,
     Extension(db): Extension<sfgw_db::Db>,
-    Json(body): Json<sfgw_vpn::CreateTunnelRequest>,
+    Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    match sfgw_vpn::tunnel::create_tunnel(&db, &body).await {
-        Ok(tunnel) => (StatusCode::CREATED, Json(json!({ "tunnel": tunnel }))),
-        Err(e) => err_response(StatusCode::BAD_REQUEST, e),
+    // Determine tunnel type from the request body
+    let tunnel_type = body
+        .get("tunnel_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("wireguard");
+
+    match sfgw_vpn::TunnelType::from_str_lossy(tunnel_type) {
+        sfgw_vpn::TunnelType::IPsec => {
+            let request: sfgw_vpn::CreateIpsecTunnelRequest = match serde_json::from_value(body) {
+                Ok(r) => r,
+                Err(e) => {
+                    return err_response(
+                        StatusCode::BAD_REQUEST,
+                        anyhow::anyhow!("invalid IPsec tunnel request: {e}"),
+                    );
+                }
+            };
+            match sfgw_vpn::ipsec::create_ipsec_tunnel(&db, &request).await {
+                Ok(tunnel) => (StatusCode::CREATED, Json(json!({ "tunnel": tunnel }))),
+                Err(e) => err_response(StatusCode::BAD_REQUEST, e),
+            }
+        }
+        sfgw_vpn::TunnelType::WireGuard => {
+            let request: sfgw_vpn::CreateTunnelRequest = match serde_json::from_value(body) {
+                Ok(r) => r,
+                Err(e) => {
+                    return err_response(
+                        StatusCode::BAD_REQUEST,
+                        anyhow::anyhow!("invalid WireGuard tunnel request: {e}"),
+                    );
+                }
+            };
+            match sfgw_vpn::tunnel::create_tunnel(&db, &request).await {
+                Ok(tunnel) => (StatusCode::CREATED, Json(json!({ "tunnel": tunnel }))),
+                Err(e) => err_response(StatusCode::BAD_REQUEST, e),
+            }
+        }
     }
 }
 
@@ -962,9 +1001,19 @@ async fn vpn_get_status(
 ) -> impl IntoResponse {
     match sfgw_vpn::tunnel::get_tunnel_by_id(&db, id).await {
         Ok(Some(tunnel)) => {
-            match sfgw_vpn::tunnel::get_status(&tunnel.name).await {
-                Ok(status) => (StatusCode::OK, Json(json!({ "status": status }))),
-                Err(e) => internal_err(e),
+            match tunnel.tunnel_type {
+                sfgw_vpn::TunnelType::IPsec => {
+                    match sfgw_vpn::ipsec::get_ipsec_status(&tunnel.name).await {
+                        Ok(status) => (StatusCode::OK, Json(json!({ "status": status }))),
+                        Err(e) => internal_err(e),
+                    }
+                }
+                sfgw_vpn::TunnelType::WireGuard => {
+                    match sfgw_vpn::tunnel::get_status(&tunnel.name).await {
+                        Ok(status) => (StatusCode::OK, Json(json!({ "status": status }))),
+                        Err(e) => internal_err(e),
+                    }
+                }
             }
         }
         Ok(None) => (
@@ -1316,5 +1365,88 @@ async fn devices_push_config(
     match sfgw_adopt::push_config(&db, &mac, config).await {
         Ok(seq) => (StatusCode::OK, Json(json!({ "status": "queued", "sequence_number": seq }))),
         Err(e) => err_response(StatusCode::NOT_FOUND, e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WAN configuration handlers
+// ---------------------------------------------------------------------------
+
+async fn wan_list(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_net::wan::list_wan_configs(&db).await {
+        Ok(configs) => (StatusCode::OK, Json(json!({ "wan_configs": configs }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn wan_get(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(interface): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_net::wan::get_wan_config(&db, &interface).await {
+        Ok(Some(config)) => (StatusCode::OK, Json(json!({ "wan_config": config }))),
+        Ok(None) => err_response(StatusCode::NOT_FOUND, anyhow::anyhow!("WAN config not found")),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn wan_set(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(interface): Path<String>,
+    Json(mut config): Json<sfgw_net::wan::WanPortConfig>,
+) -> impl IntoResponse {
+    // Ensure the path parameter matches the body
+    config.interface = interface;
+
+    if let Err(e) = sfgw_net::wan::validate_wan_config(&config) {
+        return err_response(StatusCode::UNPROCESSABLE_ENTITY, e);
+    }
+
+    match sfgw_net::wan::set_wan_config(&db, &config).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "saved", "wan_config": config }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn wan_delete(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(interface): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_net::wan::remove_wan_config(&db, &interface).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "removed" }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn wan_status(
+    _auth: AuthUser,
+    Path(interface): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_net::wan::detect_wan_status(&interface).await {
+        Ok(status) => (StatusCode::OK, Json(json!({ "wan_status": status }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn wan_reconnect(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(interface): Path<String>,
+) -> impl IntoResponse {
+    let config = match sfgw_net::wan::get_wan_config(&db, &interface).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return err_response(StatusCode::NOT_FOUND, anyhow::anyhow!("WAN config not found")),
+        Err(e) => return internal_err(e),
+    };
+
+    match sfgw_net::wan::apply_wan_config(&config).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "reconnecting" }))),
+        Err(e) => internal_err(e),
     }
 }

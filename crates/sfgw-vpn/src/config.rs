@@ -167,6 +167,7 @@ pub fn parse_config(input: &str) -> Result<TunnelConfig> {
         dns,
         mtu,
         zone: "vpn".to_string(),
+        bind_interface: None,
     })
 }
 

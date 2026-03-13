@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #![deny(unsafe_code)]
 
+pub mod wan;
+
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -465,38 +467,12 @@ fn guess_role(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
 
     /// Helper: create an in-memory database with the sfgw schema.
     async fn test_db() -> sfgw_db::Db {
-        let conn = rusqlite::Connection::open_in_memory()
-            .expect("failed to open in-memory db");
-        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
-        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
-        conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS meta (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS interfaces (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                name      TEXT NOT NULL UNIQUE,
-                mac       TEXT NOT NULL DEFAULT '',
-                ips       TEXT NOT NULL DEFAULT '[]',
-                mtu       INTEGER NOT NULL DEFAULT 1500,
-                is_up     INTEGER NOT NULL DEFAULT 0,
-                role      TEXT NOT NULL DEFAULT 'lan',
-                vlan_id   INTEGER,
-                enabled   INTEGER NOT NULL DEFAULT 1,
-                config    TEXT NOT NULL DEFAULT '{}'
-            );
-            INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2');
-            ",
-        )
-        .expect("failed to init test schema");
-        Arc::new(Mutex::new(conn))
+        sfgw_db::open_in_memory()
+            .await
+            .expect("failed to open in-memory db")
     }
 
     #[test]

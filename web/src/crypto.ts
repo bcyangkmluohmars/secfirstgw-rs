@@ -4,34 +4,42 @@
  * E2EE layer for all API communication.
  *
  * Single unified flow via /auth/session:
- * 1. Generate X25519 keypair, send public key (+ optional token) to /auth/session
- * 2. Server responds with its public key, negotiate_id, auth status
- * 3. Client derives shared secret → HKDF → AES-256-GCM key
+ * 1. Generate X25519 + ML-KEM-1024 keypairs, send public keys to /auth/session
+ * 2. Server responds with its X25519 public key, KEM ciphertext, negotiate_id, auth status
+ * 3. Client derives hybrid shared secret: HKDF-SHA256(x25519_ss || ml_kem_ss) → AES-256-GCM key
  * 4. If authenticated, server also returns envelope key encrypted with negotiate key
  * 5. Client decrypts envelope key, uses it for all subsequent API E2EE
  *
  * On login: negotiate via /auth/session (no token), then encrypt creds for /auth/login
  * On reload: negotiate via /auth/session (with token) → immediate resume with envelope key
  *
- * HYBRID KEY EXCHANGE LIMITATION:
- * The server supports hybrid X25519 + ML-KEM-1024 key exchange (FIPS 203).
- * However, the Web Crypto API does NOT yet support ML-KEM / Kyber.
- * Until a WASM ML-KEM library is integrated into the frontend, the client
- * sends only the X25519 public key (kem_public_key is omitted).  The server
- * gracefully falls back to X25519-only when kem_public_key is absent.
- *
- * TODO: Integrate a WASM ML-KEM-1024 library (e.g. pqcrypto-wasm or
- * crystals-kyber-wasm) to enable full hybrid key exchange from the browser.
- * When done:
- *   - Generate ML-KEM-1024 keypair alongside X25519
- *   - Send kem_public_key in the session request
- *   - Decapsulate the returned kem_ciphertext to get shared_secret_2
- *   - Combine: HKDF-SHA256(x25519_ss || ml_kem_ss, info="sfgw-e2ee-v1")
+ * Hybrid key exchange: X25519 (classical) + ML-KEM-1024 (FIPS 203, post-quantum).
+ * If the ML-KEM library fails to load, falls back to X25519-only gracefully.
  */
 
 import { api, getToken, type SessionResponse } from './api';
+import type { MlKemInterface } from 'mlkem';
 
 const HKDF_INFO = new TextEncoder().encode('sfgw-e2ee-v1');
+
+// ML-KEM-1024 support — loaded lazily, falls back to X25519-only if unavailable
+let mlKemInstance: MlKemInterface | null = null;
+let mlKemLoadAttempted = false;
+
+async function getMlKem(): Promise<MlKemInterface | null> {
+  if (mlKemLoadAttempted) return mlKemInstance;
+  mlKemLoadAttempted = true;
+  try {
+    const { createMlKem1024 } = await import('mlkem');
+    mlKemInstance = await createMlKem1024();
+  } catch {
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line no-console
+      console.warn('ML-KEM-1024 not available, falling back to X25519-only');
+    }
+  }
+  return mlKemInstance;
+}
 
 // --- In-memory E2EE state (never persisted — lost on reload, re-negotiated) ---
 let envelopeKey: CryptoKey | null = null;
@@ -70,24 +78,35 @@ export interface NegotiateResult {
 }
 
 /**
- * Perform X25519 ECDH key exchange via /auth/session.
+ * Perform hybrid X25519 + ML-KEM-1024 key exchange via /auth/session.
+ * Falls back to X25519-only if ML-KEM is unavailable.
  * Optionally includes a token for session resume.
  */
 async function negotiateSession(token?: string | null): Promise<NegotiateResult> {
-  const keyPair = await crypto.subtle.generateKey(
+  // 1. Generate X25519 keypair
+  const x25519KeyPair = await crypto.subtle.generateKey(
     { name: 'X25519' } as EcKeyGenParams,
     false,
     ['deriveBits'],
   );
+  const clientPubRaw = await crypto.subtle.exportKey('raw', x25519KeyPair.publicKey);
 
-  const clientPubRaw = await crypto.subtle.exportKey('raw', keyPair.publicKey);
-  const clientPubB64 = toBase64(clientPubRaw);
+  // 2. Generate ML-KEM-1024 keypair (if available)
+  const mlkem = await getMlKem();
+  let kemEncapsKey: Uint8Array | null = null;
+  let kemDecapsKey: Uint8Array | null = null;
+  if (mlkem) {
+    [kemEncapsKey, kemDecapsKey] = mlkem.generateKeyPair();
+  }
 
+  // 3. Send both keys to server
   const sessionRes = await api.session({
-    client_public_key: clientPubB64,
+    client_public_key: toBase64(clientPubRaw),
+    ...(kemEncapsKey ? { kem_public_key: toBase64(kemEncapsKey.buffer as ArrayBuffer) } : {}),
     ...(token ? { token } : {}),
   });
 
+  // 4. X25519 ECDH shared secret
   const serverPubBytes = fromBase64(sessionRes.server_public_key);
   const serverPub = await crypto.subtle.importKey(
     'raw',
@@ -96,14 +115,28 @@ async function negotiateSession(token?: string | null): Promise<NegotiateResult>
     false,
     [],
   );
-
-  const sharedBits = await crypto.subtle.deriveBits(
+  const x25519SharedBits = await crypto.subtle.deriveBits(
     { name: 'X25519', public: serverPub } as EcdhKeyDeriveParams,
-    keyPair.privateKey,
+    x25519KeyPair.privateKey,
     256,
   );
 
-  const hkdfKey = await crypto.subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveKey']);
+  // 5. Combine shared secrets: x25519_ss || ml_kem_ss (hybrid) or x25519_ss only (fallback)
+  let combinedIkm: Uint8Array;
+  if (sessionRes.kem_ciphertext && mlkem && kemDecapsKey) {
+    const kemCt = fromBase64(sessionRes.kem_ciphertext);
+    const kemSharedSecret = mlkem.decap(kemCt, kemDecapsKey);
+    combinedIkm = new Uint8Array(32 + kemSharedSecret.length);
+    combinedIkm.set(new Uint8Array(x25519SharedBits), 0);
+    combinedIkm.set(kemSharedSecret, 32);
+    // Zeroize the KEM decapsulation key
+    kemDecapsKey.fill(0);
+  } else {
+    combinedIkm = new Uint8Array(x25519SharedBits);
+  }
+
+  // 6. HKDF-SHA256 to derive AES-256-GCM negotiate key
+  const hkdfKey = await crypto.subtle.importKey('raw', combinedIkm.buffer as ArrayBuffer, 'HKDF', false, ['deriveKey']);
   const negotiateKey = await crypto.subtle.deriveKey(
     { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: HKDF_INFO },
     hkdfKey,
@@ -111,6 +144,9 @@ async function negotiateSession(token?: string | null): Promise<NegotiateResult>
     false,
     ['encrypt', 'decrypt'],
   );
+
+  // Zeroize combined IKM
+  combinedIkm.fill(0);
 
   return {
     negotiateId: sessionRes.negotiate_id,

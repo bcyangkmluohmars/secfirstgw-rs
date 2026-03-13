@@ -240,6 +240,10 @@ pub struct PortForward {
     pub comment: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// WAN interface to bind this port forward to.
+    /// `None` = apply on all WAN ports, `Some` = specific WAN interface only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wan_interface: Option<String>,
 }
 
 fn default_true() -> bool {

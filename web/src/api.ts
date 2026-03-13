@@ -130,6 +130,7 @@ export interface Device {
 export interface SessionResponse {
   negotiate_id: string;
   server_public_key: string;
+  kem_ciphertext?: string;
   authenticated: boolean;
   user?: { id: number; username: string; role: string };
   envelope?: { iv: string; data: string };
@@ -276,7 +277,7 @@ export const api = {
   logout: () => request<void>('/api/v1/auth/logout', { method: 'POST' }),
 
   // Public (no E2EE middleware — handled manually)
-  session: (body: { client_public_key: string; token?: string }) =>
+  session: (body: { client_public_key: string; kem_public_key?: string; token?: string }) =>
     request<SessionResponse>('/api/v1/auth/session', { method: 'POST', body, skipE2EE: true }),
   login: (body: Record<string, string>) =>
     request<LoginResponse>('/api/v1/auth/login', { method: 'POST', body, skipE2EE: true }),

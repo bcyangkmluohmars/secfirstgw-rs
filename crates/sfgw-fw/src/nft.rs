@@ -431,6 +431,9 @@ fn emit_zone_defines(out: &mut String, zones: &[ZonePolicy]) {
 
 /// Emit a validated port forward rule. `prefix` is an optional string prepended
 /// to the prerouting rule (e.g. "iifname @wan_ifaces " for zone-aware mode).
+///
+/// If the port forward has a `wan_interface` set, that takes precedence over
+/// the zone-level prefix, binding the rule to a specific WAN interface.
 fn emit_port_forward(out: &mut String, fwd: &PortForward, prefix: Option<&str>) -> Result<()> {
     let proto = fwd.protocol.to_lowercase();
     validate_protocol(&proto)?;
@@ -439,12 +442,24 @@ fn emit_port_forward(out: &mut String, fwd: &PortForward, prefix: Option<&str>) 
         .internal_ip
         .parse()
         .with_context(|| format!("invalid internal_ip in port forward: {}", fwd.internal_ip))?;
+
+    // Determine the interface match prefix:
+    // - wan_interface on the rule takes precedence (specific WAN binding)
+    // - Otherwise fall back to the zone-level prefix (e.g. "@wan_ifaces")
+    // - Otherwise no prefix (legacy non-zone mode)
+    let effective_prefix: String = if let Some(ref iface) = fwd.wan_interface {
+        validate_interface_name(iface)
+            .with_context(|| format!("invalid wan_interface in port forward: {iface}"))?;
+        format!("iifname \"{iface}\" ")
+    } else {
+        prefix.unwrap_or("").to_string()
+    };
+
     // external_port and internal_port are u16, inherently safe.
     let comment = sanitize_comment(fwd.comment.as_deref().unwrap_or("port forward"));
-    let pfx = prefix.unwrap_or("");
     writeln!(
         out,
-        "    add rule inet {TABLE} prerouting {pfx}{proto} dport {} dnat to {}:{} comment \"{comment}\"",
+        "    add rule inet {TABLE} prerouting {effective_prefix}{proto} dport {} dnat to {}:{} comment \"{comment}\"",
         fwd.external_port, fwd.internal_ip, fwd.internal_port,
     )
     .unwrap();
@@ -1066,6 +1081,7 @@ mod tests {
             internal_port: 443,
             comment: Some("HTTPS forward".to_string()),
             enabled: true,
+            wan_interface: None,
         }];
         let config =
             generate_ruleset_with_forwards(&[], &FirewallPolicy::default(), &fwd);
@@ -1235,6 +1251,7 @@ mod tests {
             internal_port: 443,
             comment: Some("HTTPS forward".to_string()),
             enabled: true,
+            wan_interface: None,
         }];
         let config =
             generate_zone_ruleset(&test_zones(), &[], &FirewallPolicy::default(), &fwd);
@@ -1443,6 +1460,7 @@ mod tests {
             internal_port: 443,
             comment: None,
             enabled: true,
+            wan_interface: None,
         }];
         let config =
             generate_ruleset_with_forwards(&[], &FirewallPolicy::default(), &fwd);
@@ -1458,6 +1476,7 @@ mod tests {
             internal_port: 443,
             comment: Some("legit\"; flush ruleset; #".to_string()),
             enabled: true,
+            wan_interface: None,
         }];
         let config =
             generate_ruleset_with_forwards(&[], &FirewallPolicy::default(), &fwd);
@@ -1468,5 +1487,133 @@ mod tests {
         assert!(!config.contains("; #"));
         // The sanitized comment should only contain safe chars.
         assert!(config.contains("comment \"legit flush ruleset "));
+    }
+
+    // ── WAN interface binding tests ─────────────────────────────────
+
+    #[test]
+    fn port_forward_with_wan_interface_generates_iifname() {
+        let fwd = vec![PortForward {
+            protocol: "tcp".to_string(),
+            external_port: 443,
+            internal_ip: "192.168.1.100".to_string(),
+            internal_port: 443,
+            comment: Some("HTTPS on eth0 only".to_string()),
+            enabled: true,
+            wan_interface: Some("eth0".to_string()),
+        }];
+        let config =
+            generate_ruleset_with_forwards(&[], &FirewallPolicy::default(), &fwd);
+        assert!(
+            config.contains("iifname \"eth0\" tcp dport 443 dnat to 192.168.1.100:443"),
+            "should bind port forward to specific WAN interface"
+        );
+    }
+
+    #[test]
+    fn port_forward_without_wan_interface_no_iifname_in_legacy() {
+        let fwd = vec![PortForward {
+            protocol: "tcp".to_string(),
+            external_port: 443,
+            internal_ip: "192.168.1.100".to_string(),
+            internal_port: 443,
+            comment: None,
+            enabled: true,
+            wan_interface: None,
+        }];
+        let config =
+            generate_ruleset_with_forwards(&[], &FirewallPolicy::default(), &fwd);
+        // Legacy mode: the DNAT rule itself should not have an iifname prefix
+        assert!(config.contains("tcp dport 443 dnat to 192.168.1.100:443"));
+        // The DNAT line specifically should not be interface-scoped
+        let dnat_line = config.lines().find(|l| l.contains("dnat to 192.168.1.100:443")).unwrap();
+        assert!(!dnat_line.contains("iifname"), "legacy DNAT rule should not have iifname");
+    }
+
+    #[test]
+    fn port_forward_wan_interface_overrides_zone_prefix() {
+        let fwd = vec![PortForward {
+            protocol: "tcp".to_string(),
+            external_port: 8443,
+            internal_ip: "192.168.1.100".to_string(),
+            internal_port: 443,
+            comment: Some("specific WAN".to_string()),
+            enabled: true,
+            wan_interface: Some("ppp0".to_string()),
+        }];
+        let config =
+            generate_zone_ruleset(&test_zones(), &[], &FirewallPolicy::default(), &fwd);
+        // Should use the specific interface, not @wan_ifaces
+        assert!(
+            config.contains("iifname \"ppp0\" tcp dport 8443 dnat to 192.168.1.100:443"),
+            "wan_interface should override zone-level @wan_ifaces prefix"
+        );
+        assert!(
+            !config.contains("@wan_ifaces tcp dport 8443"),
+            "should not use @wan_ifaces when wan_interface is set"
+        );
+    }
+
+    #[test]
+    fn port_forward_rejects_invalid_wan_interface() {
+        let fwd = vec![PortForward {
+            protocol: "tcp".to_string(),
+            external_port: 443,
+            internal_ip: "192.168.1.100".to_string(),
+            internal_port: 443,
+            comment: None,
+            enabled: true,
+            wan_interface: Some("eth0; drop".to_string()),
+        }];
+        let config =
+            generate_ruleset_with_forwards(&[], &FirewallPolicy::default(), &fwd);
+        // The malicious interface name should be rejected; no DNAT rule emitted
+        assert!(
+            !config.contains("dnat to 192.168.1.100:443"),
+            "DNAT rule with invalid interface should not be emitted"
+        );
+        // The injection payload should not appear in the ruleset
+        assert!(
+            !config.contains("eth0; drop"),
+            "malicious interface name should not appear in ruleset"
+        );
+    }
+
+    #[test]
+    fn port_forward_wan_interface_serde_roundtrip() {
+        let fwd = PortForward {
+            protocol: "tcp".to_string(),
+            external_port: 443,
+            internal_ip: "192.168.1.100".to_string(),
+            internal_port: 443,
+            comment: None,
+            enabled: true,
+            wan_interface: Some("eth0".to_string()),
+        };
+        let json = serde_json::to_string(&fwd).unwrap();
+        assert!(json.contains("\"wan_interface\":\"eth0\""));
+
+        let parsed: PortForward = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.wan_interface.as_deref(), Some("eth0"));
+    }
+
+    #[test]
+    fn port_forward_wan_interface_none_omitted_in_json() {
+        let fwd = PortForward {
+            protocol: "tcp".to_string(),
+            external_port: 443,
+            internal_ip: "192.168.1.100".to_string(),
+            internal_port: 443,
+            comment: None,
+            enabled: true,
+            wan_interface: None,
+        };
+        let json = serde_json::to_string(&fwd).unwrap();
+        assert!(!json.contains("wan_interface"), "None wan_interface should be omitted from JSON");
+
+        // Deserializing without the field should default to None
+        let minimal = r#"{"protocol":"tcp","external_port":443,"internal_ip":"192.168.1.100","internal_port":443,"enabled":true}"#;
+        let parsed: PortForward = serde_json::from_str(minimal).unwrap();
+        assert!(parsed.wan_interface.is_none());
     }
 }

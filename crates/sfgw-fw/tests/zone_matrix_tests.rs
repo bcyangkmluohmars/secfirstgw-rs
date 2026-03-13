@@ -661,6 +661,7 @@ fn port_forwarding_generates_dnat_on_wan_zone() {
         internal_port: 443,
         comment: Some("HTTPS forward to webserver".to_string()),
         enabled: true,
+        wan_interface: None,
     }];
 
     let config = generate_zone_ruleset(
@@ -692,6 +693,7 @@ fn disabled_port_forward_not_in_ruleset() {
         internal_port: 22,
         comment: Some("SSH forward (disabled)".to_string()),
         enabled: false,
+        wan_interface: None,
     }];
 
     let config = generate_zone_ruleset(
@@ -1136,6 +1138,7 @@ fn multiple_port_forwards_all_appear_scoped_to_wan() {
             internal_port: 80,
             comment: Some("HTTP forward".to_string()),
             enabled: true,
+            wan_interface: None,
         },
         PortForward {
             protocol: "tcp".to_string(),
@@ -1144,6 +1147,7 @@ fn multiple_port_forwards_all_appear_scoped_to_wan() {
             internal_port: 443,
             comment: Some("HTTPS forward".to_string()),
             enabled: true,
+            wan_interface: None,
         },
         PortForward {
             protocol: "udp".to_string(),
@@ -1152,6 +1156,7 @@ fn multiple_port_forwards_all_appear_scoped_to_wan() {
             internal_port: 51820,
             comment: Some("WireGuard forward".to_string()),
             enabled: true,
+            wan_interface: None,
         },
     ];
 
@@ -1190,6 +1195,7 @@ fn legacy_ruleset_with_port_forwards_generates_dnat() {
         internal_port: 22,
         comment: Some("SSH forward".to_string()),
         enabled: true,
+        wan_interface: None,
     }];
     let config = generate_ruleset_with_forwards(&[], &FirewallPolicy::default(), &forwards);
     assert!(

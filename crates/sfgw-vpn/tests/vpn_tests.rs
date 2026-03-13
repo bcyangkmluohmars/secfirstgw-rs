@@ -76,6 +76,7 @@ async fn test_create_tunnel() {
         dns: Some("1.1.1.1".to_string()),
         mtu: Some(1420),
         zone: "vpn".to_string(),
+        bind_interface: None,
     };
 
     let tunnel = tunnel::create_tunnel(&db, &req).await.unwrap();
@@ -101,6 +102,7 @@ async fn test_create_tunnel_duplicate_name() {
         dns: None,
         mtu: None,
         zone: "vpn".to_string(),
+        bind_interface: None,
     };
 
     tunnel::create_tunnel(&db, &req).await.unwrap();
@@ -119,6 +121,7 @@ async fn test_create_tunnel_invalid_name() {
         dns: None,
         mtu: None,
         zone: "vpn".to_string(),
+        bind_interface: None,
     };
 
     let err = tunnel::create_tunnel(&db, &req).await;
@@ -138,6 +141,7 @@ async fn test_list_tunnels() {
             dns: None,
             mtu: None,
             zone: "vpn".to_string(),
+        bind_interface: None,
         };
         tunnel::create_tunnel(&db, &req).await.unwrap();
     }
@@ -160,6 +164,7 @@ async fn test_get_tunnel_by_id() {
         dns: None,
         mtu: None,
         zone: "vpn".to_string(),
+        bind_interface: None,
     };
 
     let created = tunnel::create_tunnel(&db, &req).await.unwrap();
@@ -189,6 +194,7 @@ async fn test_delete_tunnel() {
         dns: None,
         mtu: None,
         zone: "vpn".to_string(),
+        bind_interface: None,
     };
 
     let created = tunnel::create_tunnel(&db, &req).await.unwrap();
@@ -211,6 +217,7 @@ async fn create_test_tunnel(db: &sfgw_db::Db) -> VpnTunnel {
         dns: Some("1.1.1.1".to_string()),
         mtu: Some(1420),
         zone: "vpn".to_string(),
+        bind_interface: None,
     };
     tunnel::create_tunnel(db, &req).await.unwrap()
 }
@@ -613,6 +620,7 @@ async fn test_tunnel_zone_assignment() {
         dns: None,
         mtu: None,
         zone: "guest".to_string(), // Custom zone
+        bind_interface: None,
     };
 
     let tunnel = tunnel::create_tunnel(&db, &req).await.unwrap();
@@ -638,9 +646,334 @@ async fn test_create_tunnel_ipv6_only() {
         dns: Some("2606:4700:4700::1111".to_string()),
         mtu: Some(1400),
         zone: "vpn".to_string(),
+        bind_interface: None,
     };
 
     let tunnel = tunnel::create_tunnel(&db, &req).await.unwrap();
     assert!(tunnel.address_v6.is_some());
     assert_eq!(tunnel.dns.as_deref(), Some("2606:4700:4700::1111"));
+}
+
+// ===========================================================================
+// IPsec/IKEv2 tests
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// IPsec tunnel creation (roadwarrior)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_create_ipsec_tunnel_roadwarrior() {
+    let db = test_db().await;
+    let req = CreateIpsecTunnelRequest {
+        name: "ipsec-rw".to_string(),
+        mode: IpsecMode::RoadWarrior,
+        auth_method: IpsecAuthMethod::Certificate,
+        local_id: Some("gw.secfirstgw.local".to_string()),
+        listen_port: None,
+        local_addrs: None,
+        pool_v4: Some("10.10.0.0/24".to_string()),
+        pool_v6: Some("fd10::0/112".to_string()),
+        local_ts: None,
+        remote_ts: None,
+        dns: Some("10.10.0.1".to_string()),
+        zone: "vpn".to_string(),
+    };
+
+    let tunnel = ipsec::create_ipsec_tunnel(&db, &req).await.unwrap();
+    assert_eq!(tunnel.name, "ipsec-rw");
+    assert_eq!(tunnel.tunnel_type, TunnelType::IPsec);
+    assert!(!tunnel.enabled);
+    assert_eq!(tunnel.zone, "vpn");
+}
+
+// ---------------------------------------------------------------------------
+// IPsec tunnel creation (site-to-site)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_create_ipsec_tunnel_s2s() {
+    let db = test_db().await;
+    let req = CreateIpsecTunnelRequest {
+        name: "ipsec-s2s".to_string(),
+        mode: IpsecMode::SiteToSite,
+        auth_method: IpsecAuthMethod::Psk,
+        local_id: Some("site-a.example.com".to_string()),
+        listen_port: None,
+        local_addrs: Some("203.0.113.1".to_string()),
+        pool_v4: None,
+        pool_v6: None,
+        local_ts: Some(vec!["192.168.1.0/24".to_string()]),
+        remote_ts: Some(vec!["192.168.2.0/24".to_string()]),
+        dns: None,
+        zone: "vpn".to_string(),
+    };
+
+    let tunnel = ipsec::create_ipsec_tunnel(&db, &req).await.unwrap();
+    assert_eq!(tunnel.name, "ipsec-s2s");
+    assert_eq!(tunnel.tunnel_type, TunnelType::IPsec);
+}
+
+// ---------------------------------------------------------------------------
+// IPsec duplicate name rejection
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_create_ipsec_tunnel_duplicate_name() {
+    let db = test_db().await;
+    let req = CreateIpsecTunnelRequest {
+        name: "ipsec-dup".to_string(),
+        mode: IpsecMode::RoadWarrior,
+        auth_method: IpsecAuthMethod::Certificate,
+        local_id: None,
+        listen_port: None,
+        local_addrs: None,
+        pool_v4: Some("10.20.0.0/24".to_string()),
+        pool_v6: None,
+        local_ts: None,
+        remote_ts: None,
+        dns: None,
+        zone: "vpn".to_string(),
+    };
+
+    ipsec::create_ipsec_tunnel(&db, &req).await.unwrap();
+    let err = ipsec::create_ipsec_tunnel(&db, &req).await;
+    assert!(err.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// IPsec roadwarrior requires pool
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_create_ipsec_rw_no_pool_fails() {
+    let db = test_db().await;
+    let req = CreateIpsecTunnelRequest {
+        name: "ipsec-nopool".to_string(),
+        mode: IpsecMode::RoadWarrior,
+        auth_method: IpsecAuthMethod::Certificate,
+        local_id: None,
+        listen_port: None,
+        local_addrs: None,
+        pool_v4: None,
+        pool_v6: None,
+        local_ts: None,
+        remote_ts: None,
+        dns: None,
+        zone: "vpn".to_string(),
+    };
+
+    let err = ipsec::create_ipsec_tunnel(&db, &req).await;
+    assert!(err.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// IPsec invalid name rejection
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_create_ipsec_tunnel_invalid_name() {
+    let db = test_db().await;
+    let req = CreateIpsecTunnelRequest {
+        name: "bad;name".to_string(),
+        mode: IpsecMode::RoadWarrior,
+        auth_method: IpsecAuthMethod::Certificate,
+        local_id: None,
+        listen_port: None,
+        local_addrs: None,
+        pool_v4: Some("10.20.0.0/24".to_string()),
+        pool_v6: None,
+        local_ts: None,
+        remote_ts: None,
+        dns: None,
+        zone: "vpn".to_string(),
+    };
+
+    let err = ipsec::create_ipsec_tunnel(&db, &req).await;
+    assert!(err.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// IPsec list mixed with WireGuard tunnels
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_list_mixed_tunnel_types() {
+    let db = test_db().await;
+
+    // Create a WireGuard tunnel
+    let wg_req = CreateTunnelRequest {
+        name: "wg0".to_string(),
+        listen_port: 51820,
+        address: "10.0.0.1/24".to_string(),
+        address_v6: None,
+        dns: None,
+        mtu: None,
+        zone: "vpn".to_string(),
+        bind_interface: None,
+    };
+    tunnel::create_tunnel(&db, &wg_req).await.unwrap();
+
+    // Create an IPsec tunnel
+    let ipsec_req = CreateIpsecTunnelRequest {
+        name: "ipsec-rw".to_string(),
+        mode: IpsecMode::RoadWarrior,
+        auth_method: IpsecAuthMethod::Certificate,
+        local_id: None,
+        listen_port: None,
+        local_addrs: None,
+        pool_v4: Some("10.10.0.0/24".to_string()),
+        pool_v6: None,
+        local_ts: None,
+        remote_ts: None,
+        dns: None,
+        zone: "vpn".to_string(),
+    };
+    ipsec::create_ipsec_tunnel(&db, &ipsec_req).await.unwrap();
+
+    let tunnels = tunnel::list_tunnels(&db).await.unwrap();
+    assert_eq!(tunnels.len(), 2);
+    assert_eq!(tunnels[0].tunnel_type, TunnelType::WireGuard);
+    assert_eq!(tunnels[1].tunnel_type, TunnelType::IPsec);
+}
+
+// ---------------------------------------------------------------------------
+// IPsec delete tunnel
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_delete_ipsec_tunnel() {
+    let db = test_db().await;
+    let req = CreateIpsecTunnelRequest {
+        name: "ipsec-del".to_string(),
+        mode: IpsecMode::SiteToSite,
+        auth_method: IpsecAuthMethod::Psk,
+        local_id: Some("del.example.com".to_string()),
+        listen_port: None,
+        local_addrs: None,
+        pool_v4: None,
+        pool_v6: None,
+        local_ts: Some(vec!["192.168.1.0/24".to_string()]),
+        remote_ts: Some(vec!["192.168.2.0/24".to_string()]),
+        dns: None,
+        zone: "vpn".to_string(),
+    };
+
+    let tunnel = ipsec::create_ipsec_tunnel(&db, &req).await.unwrap();
+    tunnel::delete_tunnel(&db, tunnel.id).await.unwrap();
+
+    let result = tunnel::get_tunnel_by_id(&db, tunnel.id).await.unwrap();
+    assert!(result.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// swanctl.conf generation tests (integration-level)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_swanctl_config_roadwarrior_generation() {
+    let config = IpsecDbConfig {
+        mode: "roadwarrior".to_string(),
+        auth_method: "certificate".to_string(),
+        local_id: "gw.secfirstgw.local".to_string(),
+        listen_port: None,
+        local_addrs: None,
+        pool_v4: Some("10.10.0.0/24".to_string()),
+        pool_v6: Some("fd10::0/112".to_string()),
+        local_ts: Vec::new(),
+        remote_ts: Vec::new(),
+        dns: Some("10.10.0.1".to_string()),
+        zone: "vpn".to_string(),
+    };
+
+    let result = ipsec::generate_swanctl_config("rw-integ", &config).unwrap();
+
+    // Verify structure
+    assert!(result.contains("connections {"));
+    assert!(result.contains("sfgw-rw-integ {"));
+    assert!(result.contains("version = 2"));
+    assert!(result.contains("pools {"));
+    assert!(result.contains("pool-rw-integ-v4 {"));
+    assert!(result.contains("pool-rw-integ-v6 {"));
+    assert!(result.contains("remote_ts = dynamic"));
+
+    // Verify no weak ciphers
+    assert!(!result.contains("3des"));
+    assert!(!result.contains("sha1"));
+    assert!(!result.contains("modp1024"));
+}
+
+#[test]
+fn test_swanctl_config_s2s_generation() {
+    let config = IpsecDbConfig {
+        mode: "site-to-site".to_string(),
+        auth_method: "psk".to_string(),
+        local_id: "site-a.example.com".to_string(),
+        listen_port: None,
+        local_addrs: Some("203.0.113.1".to_string()),
+        pool_v4: None,
+        pool_v6: None,
+        local_ts: vec!["192.168.1.0/24".to_string()],
+        remote_ts: vec!["192.168.2.0/24".to_string()],
+        dns: None,
+        zone: "vpn".to_string(),
+    };
+
+    let result = ipsec::generate_swanctl_config("s2s-integ", &config).unwrap();
+
+    assert!(result.contains("local_addrs = 203.0.113.1"));
+    assert!(result.contains("local_ts = 192.168.1.0/24"));
+    assert!(result.contains("remote_ts = 192.168.2.0/24"));
+    assert!(result.contains("secrets {"));
+    assert!(!result.contains("pools {"));
+}
+
+// ---------------------------------------------------------------------------
+// TunnelType serde tests (integration)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_tunnel_type_serde_ipsec() {
+    let tt = TunnelType::IPsec;
+    let json = serde_json::to_string(&tt).unwrap();
+    assert_eq!(json, "\"ipsec\"");
+
+    let back: TunnelType = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, TunnelType::IPsec);
+}
+
+#[test]
+fn test_tunnel_type_serde_wireguard() {
+    let tt = TunnelType::WireGuard;
+    let json = serde_json::to_string(&tt).unwrap();
+    assert_eq!(json, "\"wireguard\"");
+
+    let back: TunnelType = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, TunnelType::WireGuard);
+}
+
+// ---------------------------------------------------------------------------
+// IpsecAuthMethod + IpsecMode Display/parsing tests (integration)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_ipsec_auth_method_roundtrip() {
+    for method in [
+        IpsecAuthMethod::Certificate,
+        IpsecAuthMethod::Psk,
+        IpsecAuthMethod::EapMschapv2,
+    ] {
+        let s = method.to_string();
+        let parsed = IpsecAuthMethod::parse(&s).unwrap();
+        assert_eq!(method, parsed);
+    }
+}
+
+#[test]
+fn test_ipsec_mode_roundtrip() {
+    for mode in [IpsecMode::RoadWarrior, IpsecMode::SiteToSite] {
+        let s = mode.to_string();
+        let parsed = IpsecMode::parse(&s).unwrap();
+        assert_eq!(mode, parsed);
+    }
 }

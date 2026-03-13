@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #![deny(unsafe_code)]
 
-//! sfgw-vpn — WireGuard VPN tunnel management for secfirstgw.
+//! sfgw-vpn — VPN tunnel management for secfirstgw.
 //!
-//! Provides multi-tunnel WireGuard support using boringtun userspace:
-//! - Curve25519 key generation and management
+//! Provides multi-tunnel VPN support:
+//! - **WireGuard** via boringtun userspace: Curve25519 key generation,
+//!   peer management, wg-quick config generation, QR provisioning
+//! - **IPsec/IKEv2** via strongSwan: swanctl config generation,
+//!   certificate and PSK auth, roadwarrior and site-to-site modes
 //! - Tunnel lifecycle (create, start, stop, delete)
-//! - Peer management with server-generated keypairs (add, remove, list)
-//! - Config file generation (wg-quick format) for client provisioning
 //! - Split/full tunnel routing per peer
 //! - Dual-stack IPv4 + IPv6 support
 //!
@@ -18,12 +19,15 @@
 //!   with an ephemeral AES-256-GCM key, mlock'd, excluded from core dumps
 //! - Preshared keys provide additional quantum-resistance
 //! - All peers get unique server-generated X25519 keypairs
+//! - IPsec uses modern cipher suites only (no 3DES, no SHA-1, no DH<16)
+//! - PSK material stored in `SecureBox` — never hardcoded
 
 use serde::{Deserialize, Serialize};
 use sfgw_crypto::secure_mem::SecureBox;
 
 pub mod config;
 pub mod db;
+pub mod ipsec;
 pub mod keys;
 pub mod peer;
 pub mod tunnel;
@@ -60,6 +64,15 @@ pub enum VpnError {
     #[error("tunnel is already running")]
     TunnelAlreadyRunning,
 
+    #[error("invalid IPsec configuration: {0}")]
+    InvalidIpsecConfig(String),
+
+    #[error("strongSwan error: {0}")]
+    StrongSwan(String),
+
+    #[error("swanctl config injection attempt: {0}")]
+    ConfigInjection(String),
+
     #[error(transparent)]
     Db(#[from] anyhow::Error),
 }
@@ -73,14 +86,162 @@ pub enum VpnError {
 #[serde(rename_all = "lowercase")]
 pub enum TunnelType {
     WireGuard,
+    /// IPsec/IKEv2 via strongSwan.
+    #[serde(rename = "ipsec")]
+    IPsec,
 }
 
 impl std::fmt::Display for TunnelType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TunnelType::WireGuard => write!(f, "wireguard"),
+            TunnelType::IPsec => write!(f, "ipsec"),
         }
     }
+}
+
+impl TunnelType {
+    /// Parse from a database/string representation.
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "ipsec" => Self::IPsec,
+            _ => Self::WireGuard,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IPsec-specific data model
+// ---------------------------------------------------------------------------
+
+/// IPsec authentication method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IpsecAuthMethod {
+    /// X.509 certificate-based (preferred, uses sfgw-adopt CA).
+    Certificate,
+    /// Pre-shared key (fallback for legacy clients).
+    Psk,
+    /// EAP-MSCHAPv2 (for Windows/macOS/iOS native clients).
+    #[serde(rename = "eap-mschapv2")]
+    EapMschapv2,
+}
+
+impl std::fmt::Display for IpsecAuthMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IpsecAuthMethod::Certificate => write!(f, "certificate"),
+            IpsecAuthMethod::Psk => write!(f, "psk"),
+            IpsecAuthMethod::EapMschapv2 => write!(f, "eap-mschapv2"),
+        }
+    }
+}
+
+impl IpsecAuthMethod {
+    /// Parse from a string representation.
+    pub fn parse(s: &str) -> Result<Self, VpnError> {
+        match s.to_lowercase().as_str() {
+            "certificate" | "cert" => Ok(Self::Certificate),
+            "psk" => Ok(Self::Psk),
+            "eap-mschapv2" | "eap_mschapv2" | "eapmschapv2" => Ok(Self::EapMschapv2),
+            other => Err(VpnError::InvalidIpsecConfig(
+                format!("unknown auth method: {other}"),
+            )),
+        }
+    }
+}
+
+/// IPsec connection mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IpsecMode {
+    /// Remote access / roadwarrior (server assigns virtual IP).
+    RoadWarrior,
+    /// Site-to-site tunnel (fixed subnets on both ends).
+    SiteToSite,
+}
+
+impl std::fmt::Display for IpsecMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IpsecMode::RoadWarrior => write!(f, "roadwarrior"),
+            IpsecMode::SiteToSite => write!(f, "site-to-site"),
+        }
+    }
+}
+
+impl IpsecMode {
+    /// Parse from a string representation.
+    pub fn parse(s: &str) -> Result<Self, VpnError> {
+        match s.to_lowercase().replace('_', "-").as_str() {
+            "roadwarrior" | "road-warrior" => Ok(Self::RoadWarrior),
+            "site-to-site" | "sitetosite" | "s2s" => Ok(Self::SiteToSite),
+            other => Err(VpnError::InvalidIpsecConfig(
+                format!("unknown IPsec mode: {other}"),
+            )),
+        }
+    }
+}
+
+/// Request body for creating a new IPsec tunnel.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateIpsecTunnelRequest {
+    pub name: String,
+    pub mode: IpsecMode,
+    pub auth_method: IpsecAuthMethod,
+    /// IKE identity, e.g. "gateway.secfirstgw.local".
+    #[serde(default)]
+    pub local_id: Option<String>,
+    /// IKE port override (default 500/4500 for NAT-T).
+    #[serde(default)]
+    pub listen_port: Option<u16>,
+    /// Local bind address, default %any.
+    #[serde(default)]
+    pub local_addrs: Option<String>,
+    /// Virtual IP pool for roadwarrior, e.g. "10.10.0.0/24".
+    #[serde(default)]
+    pub pool_v4: Option<String>,
+    /// Virtual IPv6 pool for roadwarrior, e.g. "fd10::0/112".
+    #[serde(default)]
+    pub pool_v6: Option<String>,
+    /// Local traffic selectors for site-to-site.
+    #[serde(default)]
+    pub local_ts: Option<Vec<String>>,
+    /// Remote traffic selectors for site-to-site.
+    #[serde(default)]
+    pub remote_ts: Option<Vec<String>>,
+    /// DNS servers to push to clients.
+    #[serde(default)]
+    pub dns: Option<String>,
+    /// Firewall zone for this tunnel's traffic.
+    #[serde(default = "default_zone")]
+    pub zone: String,
+}
+
+/// IPsec DB config — serialized to JSON in the `config` column.
+///
+/// Public for integration test access; not intended for external API consumers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpsecDbConfig {
+    pub mode: String,
+    pub auth_method: String,
+    pub local_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub listen_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_addrs: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_v4: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_v6: Option<String>,
+    #[serde(default)]
+    pub local_ts: Vec<String>,
+    #[serde(default)]
+    pub remote_ts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns: Option<String>,
+    #[serde(default = "default_zone")]
+    pub zone: String,
 }
 
 /// Per-peer routing mode: full tunnel or split tunnel.
@@ -131,6 +292,9 @@ pub struct VpnTunnel {
     pub mtu: u16,
     /// Firewall zone for this tunnel's traffic.
     pub zone: String,
+    /// WAN interface to bind this tunnel to (None = all interfaces).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_interface: Option<String>,
 }
 
 /// A VPN peer as presented to callers (no private key).
@@ -189,6 +353,9 @@ pub struct CreateTunnelRequest {
     /// Firewall zone for VPN traffic. Defaults to "vpn".
     #[serde(default = "default_zone")]
     pub zone: String,
+    /// WAN interface to bind to (None = all interfaces).
+    #[serde(default)]
+    pub bind_interface: Option<String>,
 }
 
 fn default_zone() -> String {
@@ -242,6 +409,8 @@ pub struct TunnelConfig {
     pub dns: Option<String>,
     pub mtu: u16,
     pub zone: String,
+    /// WAN interface to bind to (None = all interfaces).
+    pub bind_interface: Option<String>,
 }
 
 /// Serializable tunnel config for database storage.
@@ -260,6 +429,9 @@ pub(crate) struct DbTunnelConfig {
     pub mtu: u16,
     #[serde(default = "default_zone")]
     pub zone: String,
+    /// WAN interface to bind to (None = all interfaces).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_interface: Option<String>,
 }
 
 impl TunnelConfig {
@@ -275,6 +447,7 @@ impl TunnelConfig {
             dns: self.dns.clone(),
             mtu: self.mtu,
             zone: self.zone.clone(),
+            bind_interface: self.bind_interface.clone(),
         };
 
         let json = serde_json::to_string(&db_config)
@@ -305,6 +478,7 @@ impl TunnelConfig {
             dns: db_config.dns,
             mtu: db_config.mtu,
             zone: db_config.zone,
+            bind_interface: db_config.bind_interface,
         })
     }
 }
@@ -340,11 +514,15 @@ pub struct PeerStatus {
 pub async fn start(db: &sfgw_db::Db) -> Result<(), VpnError> {
     let tunnels = tunnel::list_tunnels(db).await?;
     let enabled_count = tunnels.iter().filter(|t| t.enabled).count();
+    let wg_count = tunnels.iter().filter(|t| t.tunnel_type == TunnelType::WireGuard).count();
+    let ipsec_count = tunnels.iter().filter(|t| t.tunnel_type == TunnelType::IPsec).count();
 
     tracing::info!(
         total = tunnels.len(),
         enabled = enabled_count,
-        "VPN service ready (WireGuard userspace via boringtun)"
+        wireguard = wg_count,
+        ipsec = ipsec_count,
+        "VPN service ready (WireGuard + IPsec/IKEv2)"
     );
 
     Ok(())
