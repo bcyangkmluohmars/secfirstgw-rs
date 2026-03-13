@@ -702,9 +702,14 @@ async fn status_handler(
             .and_then(|s| s.trim().parse::<u32>().ok())
             .map(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
             .unwrap_or(false);
+        // DNS config is stored as JSON in the meta KV table
         let conn = db.lock().await;
         let has_config: bool = conn
-            .query_row("SELECT COUNT(*) FROM dns_config", [], |r| r.get::<_, i64>(0))
+            .query_row(
+                "SELECT COUNT(*) FROM meta WHERE key = 'dns_config'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
             .unwrap_or(0) > 0;
         if pid_alive {
             "running"
