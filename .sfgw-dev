@@ -1,0 +1,3 @@
+This file marks a development checkout.
+The install script (scripts/clean-and-install.sh) refuses to run when this file is present.
+For development, use: docker compose up --build
