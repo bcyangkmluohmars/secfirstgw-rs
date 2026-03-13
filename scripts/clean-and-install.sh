@@ -113,6 +113,40 @@ preflight() {
     log "  Platform:     ${CYAN}${PLATFORM}${NC}"
     log "  Kernel:       ${CYAN}$(uname -r)${NC}"
 
+    # Safety: refuse to run on desktop/laptop/workstation systems
+    if [ "${PLATFORM}" = "generic" ] && [ "${SFGW_FORCE:-}" != "1" ]; then
+        # Check for desktop indicators
+        if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ] || \
+           [ -d "/usr/share/xsessions" ] || [ -d "/usr/share/wayland-sessions" ] || \
+           command -v gdm >/dev/null 2>&1 || command -v sddm >/dev/null 2>&1 || \
+           command -v lightdm >/dev/null 2>&1; then
+            err "This looks like a desktop/workstation — refusing to install." \
+                "\n  This script is for dedicated gateway hardware (UDM Pro, bare-metal routers, VMs)." \
+                "\n  It will modify firewall rules, DNS, and system services." \
+                "\n  For development, use: docker compose up --build" \
+                "\n\n  To override (you know what you're doing): SFGW_FORCE=1 $0"
+        fi
+
+        # Still warn on generic platforms even without a desktop
+        warn "Generic platform detected (not Ubiquiti hardware)."
+        echo ""
+        echo -e "  ${YELLOW}This will install secfirstgw as a system service and:${NC}"
+        echo -e "  ${YELLOW}  - Bind to port 443${NC}"
+        echo -e "  ${YELLOW}  - Enable IP forwarding${NC}"
+        echo -e "  ${YELLOW}  - Install firewall rules (nftables)${NC}"
+        echo -e "  ${YELLOW}  - Take over DNS/DHCP (dnsmasq)${NC}"
+        echo ""
+        read -rp "  Continue? [y/N] " confirm
+        if [ "${confirm}" != "y" ] && [ "${confirm}" != "Y" ]; then
+            log "Aborted. For development, use: docker compose up --build"
+            exit 0
+        fi
+    fi
+
+    if [ "${PLATFORM}" = "docker" ]; then
+        err "Running inside Docker — use docker compose instead."
+    fi
+
     if [ "${PLATFORM}" = "ubiquiti" ]; then
         log "  Ubiquiti hardware detected — will preserve kernel modules"
         # Check if UniFi is running
