@@ -83,7 +83,11 @@ fn make_rule(
 #[test]
 fn default_deny_input_drop_forward_drop_output_accept() {
     let policy = FirewallPolicy::default();
-    assert_eq!(policy.default_input, Action::Drop, "input must default to Drop");
+    assert_eq!(
+        policy.default_input,
+        Action::Drop,
+        "input must default to Drop"
+    );
     assert_eq!(
         policy.default_forward,
         Action::Drop,
@@ -102,15 +106,13 @@ fn default_deny_input_drop_forward_drop_output_accept() {
         "input chain must have policy drop in generated config"
     );
     assert!(
-        config.contains(
-            "chain forward {\n        type filter hook forward priority 0; policy drop;"
-        ),
+        config
+            .contains("chain forward {\n        type filter hook forward priority 0; policy drop;"),
         "forward chain must have policy drop in generated config"
     );
     assert!(
-        config.contains(
-            "chain output {\n        type filter hook output priority 0; policy accept;"
-        ),
+        config
+            .contains("chain output {\n        type filter hook output priority 0; policy accept;"),
         "output chain must have policy accept in generated config"
     );
 }
@@ -714,16 +716,18 @@ fn disabled_port_forward_not_in_ruleset() {
 #[test]
 fn user_rules_appear_in_zone_ruleset() {
     let rules = vec![
-        make_rule(1, "input", "tcp", Some("9090"), Action::Accept, "prometheus"),
+        make_rule(
+            1,
+            "input",
+            "tcp",
+            Some("9090"),
+            Action::Accept,
+            "prometheus",
+        ),
         make_rule(2, "forward", "udp", Some("5060"), Action::Drop, "block SIP"),
     ];
 
-    let config = generate_zone_ruleset(
-        &standard_zones(),
-        &rules,
-        &FirewallPolicy::default(),
-        &[],
-    );
+    let config = generate_zone_ruleset(&standard_zones(), &rules, &FirewallPolicy::default(), &[]);
 
     assert!(
         config.contains("tcp dport 9090 accept"),
@@ -760,12 +764,7 @@ fn vlan_rules_generate_correct_nft_syntax() {
         enabled: true,
     }];
 
-    let config = generate_zone_ruleset(
-        &standard_zones(),
-        &rules,
-        &FirewallPolicy::default(),
-        &[],
-    );
+    let config = generate_zone_ruleset(&standard_zones(), &rules, &FirewallPolicy::default(), &[]);
 
     assert!(
         config.contains("vlan id 200 accept"),
@@ -794,12 +793,7 @@ fn rate_limited_rules_generate_correct_nft_syntax() {
         enabled: true,
     }];
 
-    let config = generate_zone_ruleset(
-        &standard_zones(),
-        &rules,
-        &FirewallPolicy::default(),
-        &[],
-    );
+    let config = generate_zone_ruleset(&standard_zones(), &rules, &FirewallPolicy::default(), &[]);
 
     assert!(
         config.contains("limit rate 50/second"),
@@ -1178,8 +1172,14 @@ fn multiple_port_forwards_all_appear_scoped_to_wan() {
 fn legacy_ruleset_still_enforces_default_deny() {
     let policy = FirewallPolicy::default();
     let config = generate_ruleset(&[], &policy);
-    assert!(config.contains("policy drop"), "legacy ruleset must default deny");
-    assert!(config.contains("masquerade"), "legacy ruleset must have NAT");
+    assert!(
+        config.contains("policy drop"),
+        "legacy ruleset must default deny"
+    );
+    assert!(
+        config.contains("masquerade"),
+        "legacy ruleset must have NAT"
+    );
     assert!(
         config.contains("ct state established,related accept"),
         "legacy ruleset must allow established/related"
@@ -1229,34 +1229,20 @@ fn combined_vlan_and_rate_limit_rule() {
         enabled: true,
     }];
 
-    let config = generate_zone_ruleset(
-        &standard_zones(),
-        &rules,
-        &FirewallPolicy::default(),
-        &[],
-    );
+    let config = generate_zone_ruleset(&standard_zones(), &rules, &FirewallPolicy::default(), &[]);
 
     // Must contain all components in the correct order.
     let rule_line = config
         .lines()
         .find(|l| l.contains("vlan id 100"))
         .expect("must have VLAN 100 rule");
-    assert!(
-        rule_line.contains("vlan id 100"),
-        "must have VLAN match"
-    );
-    assert!(
-        rule_line.contains("tcp dport 443"),
-        "must have port match"
-    );
+    assert!(rule_line.contains("vlan id 100"), "must have VLAN match");
+    assert!(rule_line.contains("tcp dport 443"), "must have port match");
     assert!(
         rule_line.contains("limit rate 200/second"),
         "must have rate limit"
     );
-    assert!(
-        rule_line.contains("accept"),
-        "must have accept action"
-    );
+    assert!(rule_line.contains("accept"), "must have accept action");
 }
 
 // ── Source/destination interface rules ────────────────────────────────
@@ -1280,12 +1266,7 @@ fn source_interface_rule_generates_iifname() {
         enabled: true,
     }];
 
-    let config = generate_zone_ruleset(
-        &standard_zones(),
-        &rules,
-        &FirewallPolicy::default(),
-        &[],
-    );
+    let config = generate_zone_ruleset(&standard_zones(), &rules, &FirewallPolicy::default(), &[]);
     assert!(
         config.contains("iifname \"br-lan\""),
         "iif: prefix must generate iifname match"
@@ -1311,12 +1292,7 @@ fn destination_interface_rule_generates_oifname() {
         enabled: true,
     }];
 
-    let config = generate_zone_ruleset(
-        &standard_zones(),
-        &rules,
-        &FirewallPolicy::default(),
-        &[],
-    );
+    let config = generate_zone_ruleset(&standard_zones(), &rules, &FirewallPolicy::default(), &[]);
     assert!(
         config.contains("oifname \"eth0\""),
         "oif: prefix must generate oifname match"
@@ -1438,6 +1414,12 @@ fn load_balance_per_interface_tables_use_sequential_ids() {
 
     let cmds = generate_wan_routing_commands(&group);
     // First two commands are per-interface table setup.
-    assert!(cmds[0].contains(&"100".to_string()), "first table must be 100");
-    assert!(cmds[1].contains(&"101".to_string()), "second table must be 101");
+    assert!(
+        cmds[0].contains(&"100".to_string()),
+        "first table must be 100"
+    );
+    assert!(
+        cmds[1].contains(&"101".to_string()),
+        "second table must be 101"
+    );
 }

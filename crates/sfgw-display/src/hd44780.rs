@@ -65,9 +65,7 @@ impl Hd44780Display {
             .read(true)
             .write(true)
             .open(&self.device_path)
-            .with_context(|| {
-                format!("opening I2C device {}", self.device_path.display())
-            })?;
+            .with_context(|| format!("opening I2C device {}", self.device_path.display()))?;
 
         let fd = file.as_raw_fd();
         // SAFETY: We are calling the Linux I2C_SLAVE ioctl on a valid, open file
@@ -75,7 +73,7 @@ impl Hd44780Display {
         // I2C slave address for subsequent read/write operations. The fd remains
         // valid for the lifetime of `file`, and the address is a validated u16
         // that fits in the i2c 7-bit address space.
-        let ret = unsafe { libc::ioctl(fd, I2C_SLAVE as u64, i32::from(self.address)) };
+        let ret = unsafe { libc::ioctl(fd, I2C_SLAVE, i32::from(self.address)) };
         if ret < 0 {
             return Err(DisplayError::Internal(anyhow::anyhow!(
                 "ioctl I2C_SLAVE failed for address 0x{:02X}",
@@ -88,11 +86,7 @@ impl Hd44780Display {
 
     /// Return the backlight mask based on current state.
     fn backlight_bits(&self) -> u8 {
-        if self.backlight {
-            BACKLIGHT_BIT
-        } else {
-            0
-        }
+        if self.backlight { BACKLIGHT_BIT } else { 0 }
     }
 
     /// Pulse the enable pin to latch a nibble into the HD44780.
@@ -276,6 +270,14 @@ pub fn init(device_path: &Path, address: Option<u16>) -> Result<Hd44780Display, 
 }
 
 /// Format an uptime duration for the 20-char LCD line.
+///
+/// ```
+/// use sfgw_display::hd44780::format_uptime;
+///
+/// assert_eq!(format_uptime(0), "Up: 0d 00:00:00");
+/// assert_eq!(format_uptime(90061), "Up: 1d 01:01:01");
+/// assert_eq!(format_uptime(86400), "Up: 1d 00:00:00");
+/// ```
 pub fn format_uptime(secs: u64) -> String {
     let days = secs / 86400;
     let hours = (secs % 86400) / 3600;
@@ -285,6 +287,13 @@ pub fn format_uptime(secs: u64) -> String {
 }
 
 /// Format a load average for the 20-char LCD line.
+///
+/// ```
+/// use sfgw_display::hd44780::format_load;
+///
+/// assert_eq!(format_load(0.42), "Load: 0.42");
+/// assert_eq!(format_load(12.345), "Load: 12.35");
+/// ```
 pub fn format_load(load: f64) -> String {
     format!("Load: {load:.2}")
 }

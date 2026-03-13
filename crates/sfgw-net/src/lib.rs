@@ -32,6 +32,25 @@ pub enum NetError {
 type Result<T> = std::result::Result<T, NetError>;
 
 /// Information about a discovered network interface.
+///
+/// ```
+/// use sfgw_net::InterfaceInfo;
+///
+/// let iface = InterfaceInfo {
+///     name: "eth0".to_string(),
+///     mac: "aa:bb:cc:dd:ee:ff".to_string(),
+///     ips: vec!["192.168.1.1".to_string()],
+///     mtu: 1500,
+///     is_up: true,
+///     role: "wan".to_string(),
+/// };
+///
+/// // Roundtrip via JSON
+/// let json = serde_json::to_string(&iface).unwrap();
+/// let back: InterfaceInfo = serde_json::from_str(&json).unwrap();
+/// assert_eq!(back.name, "eth0");
+/// assert_eq!(back.role, "wan");
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterfaceInfo {
     pub name: String,
@@ -55,8 +74,7 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
 
     let conn = db.lock().await;
     for iface in &interfaces {
-        let ips_json =
-            serde_json::to_string(&iface.ips).context("failed to serialize IPs")?;
+        let ips_json = serde_json::to_string(&iface.ips).context("failed to serialize IPs")?;
 
         conn.execute(
             "INSERT INTO interfaces (name, mac, ips, mtu, is_up, role)
@@ -89,7 +107,10 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
         );
     }
 
-    tracing::info!(count = interfaces.len(), "network interface detection complete");
+    tracing::info!(
+        count = interfaces.len(),
+        "network interface detection complete"
+    );
     Ok(())
 }
 
@@ -115,8 +136,7 @@ pub async fn list_interfaces(db: &sfgw_db::Db) -> Result<Vec<InterfaceInfo>> {
     let mut interfaces = Vec::new();
     for row in rows {
         let (name, mac, ips_json, mtu, is_up, role) = row?;
-        let ips: Vec<String> =
-            serde_json::from_str(&ips_json).unwrap_or_default();
+        let ips: Vec<String> = serde_json::from_str(&ips_json).unwrap_or_default();
         interfaces.push(InterfaceInfo {
             name,
             mac,
@@ -163,27 +183,26 @@ fn detect_interfaces_for_platform(platform: &sfgw_hal::Platform) -> Result<Vec<I
 fn detect_interfaces() -> Result<Vec<InterfaceInfo>> {
     let sysfs = Path::new(SYSFS_NET);
     if !sysfs.exists() {
-        return Err(NetError::Internal(anyhow::anyhow!("{SYSFS_NET} does not exist; cannot detect interfaces")));
+        return Err(NetError::Internal(anyhow::anyhow!(
+            "{SYSFS_NET} does not exist; cannot detect interfaces"
+        )));
     }
 
     let mut interfaces = Vec::new();
 
-    let entries = fs::read_dir(sysfs)
-        .with_context(|| format!("failed to read {SYSFS_NET}"))?;
+    let entries = fs::read_dir(sysfs).with_context(|| format!("failed to read {SYSFS_NET}"))?;
 
     for entry in entries {
         let entry = entry?;
         let iface_name = entry.file_name().to_string_lossy().to_string();
         let iface_dir = entry.path();
 
-        let mac = read_sysfs_trimmed(&iface_dir.join("address"))
-            .unwrap_or_default();
+        let mac = read_sysfs_trimmed(&iface_dir.join("address")).unwrap_or_default();
         let mtu = read_sysfs_trimmed(&iface_dir.join("mtu"))
             .unwrap_or_default()
             .parse::<u32>()
             .unwrap_or(1500);
-        let operstate = read_sysfs_trimmed(&iface_dir.join("operstate"))
-            .unwrap_or_default();
+        let operstate = read_sysfs_trimmed(&iface_dir.join("operstate")).unwrap_or_default();
         let is_up = operstate == "up";
 
         let ips = read_ip_addresses(&iface_name);
@@ -238,11 +257,12 @@ fn read_ip_addresses(iface_name: &str) -> Vec<String> {
         for line in content.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             // Format: addr_hex index prefix_len scope flags iface_name
-            if parts.len() >= 6 && parts[5] == iface_name {
-                if let Some(addr) = hex_to_ipv6(parts[0]) {
-                    let prefix_len = parts[2];
-                    addrs.push(format!("{addr}/{prefix_len}"));
-                }
+            if parts.len() >= 6
+                && parts[5] == iface_name
+                && let Some(addr) = hex_to_ipv6(parts[0])
+            {
+                let prefix_len = parts[2];
+                addrs.push(format!("{addr}/{prefix_len}"));
             }
         }
     }
@@ -357,11 +377,7 @@ fn read_ipv4_from_fib_trie(iface_name: &str) -> Option<Vec<String>> {
         addrs.push("127.0.0.1".to_string());
     }
 
-    if addrs.is_empty() {
-        None
-    } else {
-        Some(addrs)
-    }
+    if addrs.is_empty() { None } else { Some(addrs) }
 }
 
 /// Check if an IP falls within any of the given (dest, mask) pairs.
@@ -388,10 +404,7 @@ fn ip_in_any_subnet(ip: &str, subnets: &[(String, String)]) -> bool {
 }
 
 fn ipv4_to_u32(ip: &str) -> Option<u32> {
-    let parts: Vec<u8> = ip
-        .split('.')
-        .filter_map(|p| p.parse().ok())
-        .collect();
+    let parts: Vec<u8> = ip.split('.').filter_map(|p| p.parse().ok()).collect();
     if parts.len() == 4 {
         Some(
             (u32::from(parts[0]) << 24)
@@ -457,14 +470,24 @@ fn guess_role(name: &str) -> String {
     } else if name.starts_with("eth0") || name.starts_with("ens") || name.starts_with("enp") {
         // First physical interface is typically WAN
         "wan".to_string()
-    } else if name.starts_with("eth") || name.starts_with("en") {
-        "lan".to_string()
     } else {
+        // eth1+, en*, and anything else defaults to LAN
         "lan".to_string()
     }
 }
 
 /// I/O statistics for a single network interface.
+///
+/// ```
+/// use sfgw_net::IfaceIoStats;
+///
+/// let stats = IfaceIoStats {
+///     name: "eth0".to_string(),
+///     rx_bytes: 1_000_000,
+///     tx_bytes: 500_000,
+/// };
+/// assert_eq!(stats.rx_bytes, 1_000_000);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IfaceIoStats {
     pub name: String,
@@ -484,6 +507,14 @@ pub struct NetIoStats {
 ///
 /// Returns per-interface rx/tx bytes (excluding loopback and zero-traffic
 /// interfaces) plus a total sum across all active interfaces.
+///
+/// ```
+/// let stats = sfgw_net::read_net_io();
+/// // On any Linux system, this returns a valid struct
+/// assert!(stats.total_rx_bytes >= 0);
+/// // Loopback is always excluded
+/// assert!(stats.interfaces.iter().all(|i| i.name != "lo"));
+/// ```
 pub fn read_net_io() -> NetIoStats {
     let content = fs::read_to_string("/proc/net/dev").unwrap_or_default();
     let mut total_rx: u64 = 0;
@@ -493,19 +524,27 @@ pub fn read_net_io() -> NetIoStats {
     // Skip header lines (first 2 lines)
     for line in content.lines().skip(2) {
         let line = line.trim();
-        let Some((name, rest)) = line.split_once(':') else { continue };
+        let Some((name, rest)) = line.split_once(':') else {
+            continue;
+        };
         let name = name.trim();
         // Skip loopback
-        if name == "lo" { continue }
+        if name == "lo" {
+            continue;
+        }
 
         let fields: Vec<&str> = rest.split_whitespace().collect();
-        if fields.len() < 10 { continue }
+        if fields.len() < 10 {
+            continue;
+        }
 
         let rx_bytes: u64 = fields[0].parse().unwrap_or(0);
         let tx_bytes: u64 = fields[8].parse().unwrap_or(0);
 
         // Skip interfaces with zero traffic (not connected)
-        if rx_bytes == 0 && tx_bytes == 0 { continue }
+        if rx_bytes == 0 && tx_bytes == 0 {
+            continue;
+        }
 
         total_rx += rx_bytes;
         total_tx += tx_bytes;
@@ -564,8 +603,7 @@ mod tests {
             role: "loopback".to_string(),
         };
         let json = serde_json::to_string(&iface).expect("serialize failed");
-        let deserialized: InterfaceInfo =
-            serde_json::from_str(&json).expect("deserialize failed");
+        let deserialized: InterfaceInfo = serde_json::from_str(&json).expect("deserialize failed");
         assert_eq!(deserialized.name, "lo");
         assert_eq!(deserialized.ips.len(), 2);
     }
@@ -649,7 +687,10 @@ mod tests {
         let result = hex_to_ipv6("00000000000000000000000000000001");
         assert!(result.is_some());
         let addr = result.unwrap();
-        assert!(addr.contains("1"), "expected ::1 representation, got: {addr}");
+        assert!(
+            addr.contains("1"),
+            "expected ::1 representation, got: {addr}"
+        );
     }
 
     #[test]
@@ -686,9 +727,7 @@ mod tests {
 
     #[test]
     fn test_ip_in_any_subnet() {
-        let subnets = vec![
-            ("192.168.1.0".to_string(), "255.255.255.0".to_string()),
-        ];
+        let subnets = vec![("192.168.1.0".to_string(), "255.255.255.0".to_string())];
         assert!(ip_in_any_subnet("192.168.1.100", &subnets));
         assert!(!ip_in_any_subnet("10.0.0.1", &subnets));
     }

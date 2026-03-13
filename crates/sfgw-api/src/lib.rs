@@ -17,7 +17,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -91,7 +91,10 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
         .route("/api/v1/status", get(status_handler))
         .route("/api/v1/system", get(system_handler))
         .route("/api/v1/interfaces", get(interfaces_handler))
-        .route("/api/v1/interfaces/{name}", put(interface_update).delete(interface_delete))
+        .route(
+            "/api/v1/interfaces/{name}",
+            put(interface_update).delete(interface_delete),
+        )
         .route("/api/v1/interfaces/{name}/toggle", post(interface_toggle))
         .route("/api/v1/interfaces/vlan", post(interface_create_vlan))
         .route("/api/v1/auth/me", get(me_handler))
@@ -101,29 +104,65 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
         .route("/api/v1/users/{id}", put(users_update).delete(users_delete))
         .route("/api/v1/users/{id}/password", post(users_change_password))
         // Firewall
-        .route("/api/v1/firewall/rules", get(fw_list_rules).post(fw_insert_rule))
-        .route("/api/v1/firewall/rules/{id}", put(fw_update_rule).delete(fw_delete_rule))
+        .route(
+            "/api/v1/firewall/rules",
+            get(fw_list_rules).post(fw_insert_rule),
+        )
+        .route(
+            "/api/v1/firewall/rules/{id}",
+            put(fw_update_rule).delete(fw_delete_rule),
+        )
         .route("/api/v1/firewall/rules/{id}/toggle", post(fw_toggle_rule))
         .route("/api/v1/firewall/apply", post(fw_apply_rules))
         // VPN tunnels
-        .route("/api/v1/vpn/tunnels", get(vpn_list_tunnels).post(vpn_create_tunnel))
-        .route("/api/v1/vpn/tunnels/{id}", get(vpn_get_tunnel).delete(vpn_delete_tunnel))
+        .route(
+            "/api/v1/vpn/tunnels",
+            get(vpn_list_tunnels).post(vpn_create_tunnel),
+        )
+        .route(
+            "/api/v1/vpn/tunnels/{id}",
+            get(vpn_get_tunnel).delete(vpn_delete_tunnel),
+        )
         .route("/api/v1/vpn/tunnels/{id}/start", post(vpn_start_tunnel))
         .route("/api/v1/vpn/tunnels/{id}/stop", post(vpn_stop_tunnel))
         .route("/api/v1/vpn/tunnels/{id}/status", get(vpn_get_status))
         // VPN peers
-        .route("/api/v1/vpn/tunnels/{id}/peers", get(vpn_list_peers).post(vpn_add_peer))
-        .route("/api/v1/vpn/tunnels/{id}/peers/{peer_id}", delete(vpn_remove_peer))
-        .route("/api/v1/vpn/tunnels/{id}/peers/{peer_id}/config", get(vpn_peer_config))
+        .route(
+            "/api/v1/vpn/tunnels/{id}/peers",
+            get(vpn_list_peers).post(vpn_add_peer),
+        )
+        .route(
+            "/api/v1/vpn/tunnels/{id}/peers/{peer_id}",
+            delete(vpn_remove_peer),
+        )
+        .route(
+            "/api/v1/vpn/tunnels/{id}/peers/{peer_id}/config",
+            get(vpn_peer_config),
+        )
         // DNS/DHCP
-        .route("/api/v1/dns/config", get(dns_get_config).put(dns_save_config))
-        .route("/api/v1/dns/dhcp/ranges", get(dns_get_dhcp_ranges).put(dns_save_dhcp_ranges))
+        .route(
+            "/api/v1/dns/config",
+            get(dns_get_config).put(dns_save_config),
+        )
+        .route(
+            "/api/v1/dns/dhcp/ranges",
+            get(dns_get_dhcp_ranges).put(dns_save_dhcp_ranges),
+        )
         .route("/api/v1/dns/dhcp/leases", get(dns_get_dhcp_leases))
-        .route("/api/v1/dns/dhcp/static", get(dns_get_static_leases).put(dns_save_static_leases))
-        .route("/api/v1/dns/overrides", get(dns_get_overrides).put(dns_save_overrides))
+        .route(
+            "/api/v1/dns/dhcp/static",
+            get(dns_get_static_leases).put(dns_save_static_leases),
+        )
+        .route(
+            "/api/v1/dns/overrides",
+            get(dns_get_overrides).put(dns_save_overrides),
+        )
         // WAN
         .route("/api/v1/wan", get(wan_list))
-        .route("/api/v1/wan/{interface}", get(wan_get).put(wan_set).delete(wan_delete))
+        .route(
+            "/api/v1/wan/{interface}",
+            get(wan_get).put(wan_set).delete(wan_delete),
+        )
         .route("/api/v1/wan/{interface}/status", get(wan_status))
         .route("/api/v1/wan/{interface}/reconnect", post(wan_reconnect))
         // IDS
@@ -134,7 +173,10 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
         .route("/api/v1/devices/pending", get(devices_list_pending))
         .route("/api/v1/devices/{mac}/approve", post(devices_approve))
         .route("/api/v1/devices/{mac}/reject", post(devices_reject))
-        .route("/api/v1/devices/{mac}/config", get(devices_get_config).put(devices_push_config))
+        .route(
+            "/api/v1/devices/{mac}/config",
+            get(devices_get_config).put(devices_push_config),
+        )
         .layer(axum::middleware::from_fn(e2ee::e2ee_layer))
         .layer(axum::middleware::from_fn_with_state(
             general_limiter.clone(),
@@ -170,8 +212,7 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
     };
 
     // ----- TLS 1.3 configuration -----
-    let tls_config = tls::load_or_create_tls_config()
-        .context("failed to configure TLS")?;
+    let tls_config = tls::load_or_create_tls_config().context("failed to configure TLS")?;
     let rustls_config = tls::into_axum_rustls_config(tls_config).await?;
 
     tracing::info!("API server listening on {listen_addr} (TLS 1.3)");
@@ -240,12 +281,7 @@ async fn session_handler(
         None => None,
     };
 
-    let neg_result = match e2ee::negotiate(
-        &negotiate_store,
-        &client_pub,
-        kem_pub.as_deref(),
-    )
-    .await
+    let neg_result = match e2ee::negotiate(&negotiate_store, &client_pub, kem_pub.as_deref()).await
     {
         Ok(r) => r,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))),
@@ -271,33 +307,30 @@ async fn session_handler(
 
         if let Ok(Some(user_id)) =
             auth::validate_session(&db, token, &client_ip, &fingerprint).await
+            && let Ok(Some(user)) = auth::get_user_by_id(&db, user_id).await
         {
-            if let Ok(Some(user)) = auth::get_user_by_id(&db, user_id).await {
-                // Generate new envelope key for this session
-                if let Ok(env_key) = e2ee::generate_envelope_key() {
-                    // Store envelope key in memory only — never persisted to DB
-                    {
-                        let mut store = envelope_key_store.lock().await;
-                        store.insert(token.to_string(), env_key.to_vec());
-                    }
+            // Generate new envelope key for this session
+            if let Ok(env_key) = e2ee::generate_envelope_key() {
+                // Store envelope key in memory only — never persisted to DB
+                {
+                    let mut store = envelope_key_store.lock().await;
+                    store.insert(token.to_string(), env_key.to_vec());
+                }
 
-                    // Get the negotiate AES key to encrypt the envelope key
-                    if let Ok(neg_key) =
-                        e2ee::take_negotiate_key(&negotiate_store, &negotiate_id).await
-                    {
-                        if let Ok(sealed) = e2ee::Envelope::seal(&neg_key, &env_key) {
-                            response["authenticated"] = json!(true);
-                            response["user"] = json!({
-                                "id": user.id,
-                                "username": user.username,
-                                "role": user.role,
-                            });
-                            response["envelope"] = json!({
-                                "iv": sealed.iv,
-                                "data": sealed.data,
-                            });
-                        }
-                    }
+                // Get the negotiate AES key to encrypt the envelope key
+                if let Ok(neg_key) = e2ee::take_negotiate_key(&negotiate_store, &negotiate_id).await
+                    && let Ok(sealed) = e2ee::Envelope::seal(&neg_key, &env_key)
+                {
+                    response["authenticated"] = json!(true);
+                    response["user"] = json!({
+                        "id": user.id,
+                        "username": user.username,
+                        "role": user.role,
+                    });
+                    response["envelope"] = json!({
+                        "iv": sealed.iv,
+                        "data": sealed.data,
+                    });
                 }
             }
         }
@@ -340,66 +373,71 @@ async fn login_handler(
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
     // Extract credentials (E2EE or plain)
-    let (username, password, negotiate_key) = if let (Some(nid), Some(ct), Some(iv)) =
-        (&body.negotiate_id, &body.ciphertext, &body.iv)
-    {
-        let neg_key = match e2ee::take_negotiate_key(&negotiate_store, nid).await {
-            Ok(k) => k,
-            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))),
-        };
+    let (username, password, negotiate_key) =
+        if let (Some(nid), Some(ct), Some(iv)) = (&body.negotiate_id, &body.ciphertext, &body.iv) {
+            let neg_key = match e2ee::take_negotiate_key(&negotiate_store, nid).await {
+                Ok(k) => k,
+                Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))),
+            };
 
-        let ct_bytes = match B64.decode(ct) {
-            Ok(b) => b,
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": "invalid base64 in ciphertext" })),
-                );
-            }
-        };
-        let iv_bytes = match B64.decode(iv) {
-            Ok(b) => b,
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": "invalid base64 in iv" })),
-                );
-            }
-        };
+            let ct_bytes = match B64.decode(ct) {
+                Ok(b) => b,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": "invalid base64 in ciphertext" })),
+                    );
+                }
+            };
+            let iv_bytes = match B64.decode(iv) {
+                Ok(b) => b,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": "invalid base64 in iv" })),
+                    );
+                }
+            };
 
-        let plaintext = match e2ee::decrypt(&neg_key, &ct_bytes, &iv_bytes) {
-            Ok(pt) => pt,
-            Err(e) => {
-                tracing::warn!("E2EE login decrypt failed: {e}");
-                return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "decryption failed" })));
-            }
-        };
+            let plaintext = match e2ee::decrypt(&neg_key, &ct_bytes, &iv_bytes) {
+                Ok(pt) => pt,
+                Err(e) => {
+                    tracing::warn!("E2EE login decrypt failed: {e}");
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({ "error": "decryption failed" })),
+                    );
+                }
+            };
 
-        let creds: E2eeCredentials = match serde_json::from_slice(&plaintext) {
-            Ok(c) => c,
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": "invalid decrypted payload" })),
-                );
-            }
-        };
+            let creds: E2eeCredentials = match serde_json::from_slice(&plaintext) {
+                Ok(c) => c,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": "invalid decrypted payload" })),
+                    );
+                }
+            };
 
-        (creds.username, creds.password, Some(neg_key))
-    } else if let (Some(u), Some(p)) = (body.username, body.password) {
-        (u, p, None)
-    } else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "provide credentials (E2EE or plain)" })),
-        );
-    };
+            (creds.username, creds.password, Some(neg_key))
+        } else if let (Some(u), Some(p)) = (body.username, body.password) {
+            (u, p, None)
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "provide credentials (E2EE or plain)" })),
+            );
+        };
 
     // Verify user
     let (user, password_hash) = match auth::get_user_by_username(&db, &username).await {
         Ok(Some(pair)) => pair,
         Ok(None) => {
-            return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "invalid credentials" })));
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "invalid credentials" })),
+            );
         }
         Err(e) => {
             tracing::error!("login db error: {e}");
@@ -413,7 +451,10 @@ async fn login_handler(
     match auth::verify_password(&password, &password_hash) {
         Ok(true) => {}
         Ok(false) => {
-            return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "invalid credentials" })));
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "invalid credentials" })),
+            );
         }
         Err(e) => {
             tracing::error!("password verify error: {e}");
@@ -473,9 +514,7 @@ struct SetupRequest {
     password: String,
 }
 
-async fn setup_status_handler(
-    Extension(db): Extension<sfgw_db::Db>,
-) -> impl IntoResponse {
+async fn setup_status_handler(Extension(db): Extension<sfgw_db::Db>) -> impl IntoResponse {
     let conn = db.lock().await;
     let count: i64 = match conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0)) {
         Ok(c) => c,
@@ -515,7 +554,9 @@ async fn setup_handler(
     {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "password must contain at least one uppercase letter, one lowercase letter, and one digit" })),
+            Json(
+                json!({ "error": "password must contain at least one uppercase letter, one lowercase letter, and one digit" }),
+            ),
         );
     }
 
@@ -547,7 +588,10 @@ async fn setup_handler(
     };
 
     if count > 0 {
-        return (StatusCode::CONFLICT, Json(json!({ "error": "setup already completed" })));
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "setup already completed" })),
+        );
     }
 
     match conn.execute(
@@ -656,7 +700,10 @@ fn read_kernel_version() -> String {
 
 fn read_cpu_count() -> usize {
     let content = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
-    let count = content.lines().filter(|l| l.starts_with("processor")).count();
+    let count = content
+        .lines()
+        .filter(|l| l.starts_with("processor"))
+        .count();
     if count == 0 { 1 } else { count }
 }
 
@@ -664,15 +711,11 @@ fn read_arch() -> &'static str {
     std::env::consts::ARCH
 }
 
-
 // ---------------------------------------------------------------------------
 // Protected handlers
 // ---------------------------------------------------------------------------
 
-async fn status_handler(
-    _auth: AuthUser,
-    Extension(db): Extension<sfgw_db::Db>,
-) -> Json<Value> {
+async fn status_handler(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) -> Json<Value> {
     let uptime = read_uptime_secs() as u64;
     let (load1, load5, load15) = read_loadavg();
     let mem = read_meminfo();
@@ -684,7 +727,11 @@ async fn status_handler(
             .query_row("SELECT COUNT(*) FROM firewall_rules", [], |r| r.get(0))
             .unwrap_or(0);
         let enabled_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM firewall_rules WHERE enabled = 1", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM firewall_rules WHERE enabled = 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         if rule_count == 0 {
             "not_configured"
@@ -711,7 +758,8 @@ async fn status_handler(
                 [],
                 |r| r.get::<_, i64>(0),
             )
-            .unwrap_or(0) > 0;
+            .unwrap_or(0)
+            > 0;
         if pid_alive {
             "running"
         } else if has_config {
@@ -727,7 +775,11 @@ async fn status_handler(
             .query_row("SELECT COUNT(*) FROM vpn_tunnels", [], |r| r.get(0))
             .unwrap_or(0);
         let enabled: i64 = conn
-            .query_row("SELECT COUNT(*) FROM vpn_tunnels WHERE enabled = 1", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM vpn_tunnels WHERE enabled = 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         if total == 0 {
             "not_configured"
@@ -778,10 +830,7 @@ async fn status_handler(
     }))
 }
 
-async fn system_handler(
-    _auth: AuthUser,
-    Extension(db): Extension<sfgw_db::Db>,
-) -> Json<Value> {
+async fn system_handler(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) -> Json<Value> {
     let version = {
         let conn = db.lock().await;
         conn.query_row(
@@ -867,17 +916,27 @@ fn detect_port_type(name: &str) -> (Value, Value, Value) {
     let speed_val = speed.as_i64().unwrap_or(0);
     let port_type = match driver_str {
         // Common 1G copper drivers
-        "e1000" | "e1000e" | "igb" | "igc" | "r8169" | "tg3" | "bnxt_en" | "atlantic"
-            => json!(format!("RJ45 {}", format_speed(speed_val))),
+        "e1000" | "e1000e" | "igb" | "igc" | "r8169" | "tg3" | "bnxt_en" | "atlantic" => {
+            json!(format!("RJ45 {}", format_speed(speed_val)))
+        }
         // 10G/25G SFP+ drivers
-        "ixgbe" | "i40e" | "ice" | "bnx2x"
-            => if speed_val >= 25000 { json!("SFP28") }
-               else { json!(format!("SFP+ {}", format_speed(speed_val))) },
+        "ixgbe" | "i40e" | "ice" | "bnx2x" => {
+            if speed_val >= 25000 {
+                json!("SFP28")
+            } else {
+                json!(format!("SFP+ {}", format_speed(speed_val)))
+            }
+        }
         // Mellanox
-        "mlx4_en" | "mlx5_core"
-            => if speed_val >= 100000 { json!("QSFP28") }
-               else if speed_val >= 40000 { json!("QSFP+") }
-               else { json!(format!("SFP+ {}", format_speed(speed_val))) },
+        "mlx4_en" | "mlx5_core" => {
+            if speed_val >= 100000 {
+                json!("QSFP28")
+            } else if speed_val >= 40000 {
+                json!("QSFP+")
+            } else {
+                json!(format!("SFP+ {}", format_speed(speed_val)))
+            }
+        }
         // Intel X520/X710 etc
         "igb_uio" | "vfio-pci" => json!("SR-IOV VF"),
         // Virtual
@@ -890,12 +949,19 @@ fn detect_port_type(name: &str) -> (Value, Value, Value) {
         "veth" => json!("veth"),
         _ => {
             // Check if it's a VLAN (name contains dot)
-            if name.contains('.') { json!("VLAN") }
-            else if name.starts_with("br") { json!("Bridge") }
-            else if name.starts_with("bond") { json!("Bond") }
-            else if name == "lo" { json!("Loopback") }
-            else if name.starts_with("docker") || name.starts_with("veth") { json!("Container") }
-            else { json!("Ethernet") }
+            if name.contains('.') {
+                json!("VLAN")
+            } else if name.starts_with("br") {
+                json!("Bridge")
+            } else if name.starts_with("bond") {
+                json!("Bond")
+            } else if name == "lo" {
+                json!("Loopback")
+            } else if name.starts_with("docker") || name.starts_with("veth") {
+                json!("Container")
+            } else {
+                json!("Ethernet")
+            }
         }
     };
 
@@ -926,7 +992,9 @@ async fn interface_update(
         if !valid_roles.contains(&role) {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({ "error": format!("invalid role: {role}. Must be one of: {}", valid_roles.join(", ")) })),
+                Json(
+                    json!({ "error": format!("invalid role: {role}. Must be one of: {}", valid_roles.join(", ")) }),
+                ),
             );
         }
     }
@@ -980,7 +1048,10 @@ async fn interface_update(
 
     let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     match conn.execute(&sql, param_refs.as_slice()) {
-        Ok(0) => (StatusCode::NOT_FOUND, Json(json!({ "error": "interface not found" }))),
+        Ok(0) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "interface not found" })),
+        ),
         Ok(_) => {
             tracing::info!(interface = %name, "interface updated");
             (StatusCode::OK, Json(json!({ "ok": true })))
@@ -1010,7 +1081,10 @@ async fn interface_toggle(
         "UPDATE interfaces SET enabled = ? WHERE name = ?",
         rusqlite::params![enabled as i32, name],
     ) {
-        Ok(0) => (StatusCode::NOT_FOUND, Json(json!({ "error": "interface not found" }))),
+        Ok(0) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "interface not found" })),
+        ),
         Ok(_) => {
             tracing::info!(interface = %name, enabled, "interface toggled");
             (StatusCode::OK, Json(json!({ "ok": true })))
@@ -1144,7 +1218,10 @@ async fn interface_delete(
     }
 
     match conn.execute("DELETE FROM interfaces WHERE name = ?", [&name]) {
-        Ok(0) => (StatusCode::NOT_FOUND, Json(json!({ "error": "interface not found" }))),
+        Ok(0) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "interface not found" })),
+        ),
         Ok(_) => {
             tracing::info!(interface = %name, "VLAN sub-interface deleted");
             (StatusCode::OK, Json(json!({ "ok": true })))
@@ -1277,7 +1354,10 @@ async fn fw_toggle_rule(
     Json(body): Json<ToggleBody>,
 ) -> impl IntoResponse {
     match sfgw_fw::toggle_rule(&db, id, body.enabled).await {
-        Ok(()) => (StatusCode::OK, Json(json!({ "status": "toggled", "enabled": body.enabled }))),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "status": "toggled", "enabled": body.enabled })),
+        ),
         Err(e) => err_response(StatusCode::NOT_FOUND, e),
     }
 }
@@ -1405,22 +1485,20 @@ async fn vpn_get_status(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     match sfgw_vpn::tunnel::get_tunnel_by_id(&db, id).await {
-        Ok(Some(tunnel)) => {
-            match tunnel.tunnel_type {
-                sfgw_vpn::TunnelType::IPsec => {
-                    match sfgw_vpn::ipsec::get_ipsec_status(&tunnel.name).await {
-                        Ok(status) => (StatusCode::OK, Json(json!({ "status": status }))),
-                        Err(e) => internal_err(e),
-                    }
-                }
-                sfgw_vpn::TunnelType::WireGuard => {
-                    match sfgw_vpn::tunnel::get_status(&tunnel.name).await {
-                        Ok(status) => (StatusCode::OK, Json(json!({ "status": status }))),
-                        Err(e) => internal_err(e),
-                    }
+        Ok(Some(tunnel)) => match tunnel.tunnel_type {
+            sfgw_vpn::TunnelType::IPsec => {
+                match sfgw_vpn::ipsec::get_ipsec_status(&tunnel.name).await {
+                    Ok(status) => (StatusCode::OK, Json(json!({ "status": status }))),
+                    Err(e) => internal_err(e),
                 }
             }
-        }
+            sfgw_vpn::TunnelType::WireGuard => {
+                match sfgw_vpn::tunnel::get_status(&tunnel.name).await {
+                    Ok(status) => (StatusCode::OK, Json(json!({ "status": status }))),
+                    Err(e) => internal_err(e),
+                }
+            }
+        },
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "tunnel not found" })),
@@ -1476,10 +1554,7 @@ async fn vpn_peer_config(
     Query(params): Query<PeerConfigQuery>,
 ) -> impl IntoResponse {
     match sfgw_vpn::peer::generate_client_config(&db, id, peer_id, &params.endpoint).await {
-        Ok(config) => (
-            StatusCode::OK,
-            Json(json!({ "config": config })),
-        ),
+        Ok(config) => (StatusCode::OK, Json(json!({ "config": config }))),
         Err(e) => err_response(StatusCode::NOT_FOUND, e),
     }
 }
@@ -1530,9 +1605,7 @@ async fn dns_save_dhcp_ranges(
     }
 }
 
-async fn dns_get_dhcp_leases(
-    _auth: AuthUser,
-) -> impl IntoResponse {
+async fn dns_get_dhcp_leases(_auth: AuthUser) -> impl IntoResponse {
     match sfgw_dns::read_leases(None).await {
         Ok(leases) => (StatusCode::OK, Json(json!({ "leases": leases }))),
         Err(e) => internal_err(e),
@@ -1660,26 +1733,24 @@ async fn ids_event_stats(
         let mut by_severity = json!({});
         if let Ok(mut stmt) =
             conn.prepare("SELECT severity, COUNT(*) FROM ids_events GROUP BY severity")
-        {
-            if let Ok(rows) = stmt.query_map([], |row| {
+            && let Ok(rows) = stmt.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            }) {
-                for row in rows.flatten() {
-                    by_severity[row.0] = json!(row.1);
-                }
+            })
+        {
+            for row in rows.flatten() {
+                by_severity[row.0] = json!(row.1);
             }
         }
 
         let mut by_detector = json!({});
         if let Ok(mut stmt) =
             conn.prepare("SELECT detector, COUNT(*) FROM ids_events GROUP BY detector")
-        {
-            if let Ok(rows) = stmt.query_map([], |row| {
+            && let Ok(rows) = stmt.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            }) {
-                for row in rows.flatten() {
-                    by_detector[row.0] = json!(row.1);
-                }
+            })
+        {
+            for row in rows.flatten() {
+                by_detector[row.0] = json!(row.1);
             }
         }
 
@@ -1697,10 +1768,7 @@ async fn ids_event_stats(
 // Device handlers
 // ===========================================================================
 
-async fn devices_list(
-    _auth: AuthUser,
-    Extension(db): Extension<sfgw_db::Db>,
-) -> impl IntoResponse {
+async fn devices_list(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) -> impl IntoResponse {
     match sfgw_adopt::list_devices(&db).await {
         Ok(devices) => (StatusCode::OK, Json(json!({ "devices": devices }))),
         Err(e) => internal_err(e),
@@ -1768,7 +1836,10 @@ async fn devices_push_config(
     Json(config): Json<Value>,
 ) -> impl IntoResponse {
     match sfgw_adopt::push_config(&db, &mac, config).await {
-        Ok(seq) => (StatusCode::OK, Json(json!({ "status": "queued", "sequence_number": seq }))),
+        Ok(seq) => (
+            StatusCode::OK,
+            Json(json!({ "status": "queued", "sequence_number": seq })),
+        ),
         Err(e) => err_response(StatusCode::NOT_FOUND, e),
     }
 }
@@ -1777,10 +1848,7 @@ async fn devices_push_config(
 // WAN configuration handlers
 // ---------------------------------------------------------------------------
 
-async fn wan_list(
-    _auth: AuthUser,
-    Extension(db): Extension<sfgw_db::Db>,
-) -> impl IntoResponse {
+async fn wan_list(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) -> impl IntoResponse {
     match sfgw_net::wan::list_wan_configs(&db).await {
         Ok(configs) => (StatusCode::OK, Json(json!({ "wan_configs": configs }))),
         Err(e) => internal_err(e),
@@ -1794,7 +1862,10 @@ async fn wan_get(
 ) -> impl IntoResponse {
     match sfgw_net::wan::get_wan_config(&db, &interface).await {
         Ok(Some(config)) => (StatusCode::OK, Json(json!({ "wan_config": config }))),
-        Ok(None) => err_response(StatusCode::NOT_FOUND, anyhow::anyhow!("WAN config not found")),
+        Ok(None) => err_response(
+            StatusCode::NOT_FOUND,
+            anyhow::anyhow!("WAN config not found"),
+        ),
         Err(e) => internal_err(e),
     }
 }
@@ -1813,7 +1884,10 @@ async fn wan_set(
     }
 
     match sfgw_net::wan::set_wan_config(&db, &config).await {
-        Ok(()) => (StatusCode::OK, Json(json!({ "status": "saved", "wan_config": config }))),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "status": "saved", "wan_config": config })),
+        ),
         Err(e) => internal_err(e),
     }
 }
@@ -1829,10 +1903,7 @@ async fn wan_delete(
     }
 }
 
-async fn wan_status(
-    _auth: AuthUser,
-    Path(interface): Path<String>,
-) -> impl IntoResponse {
+async fn wan_status(_auth: AuthUser, Path(interface): Path<String>) -> impl IntoResponse {
     match sfgw_net::wan::detect_wan_status(&interface).await {
         Ok(status) => (StatusCode::OK, Json(json!({ "wan_status": status }))),
         Err(e) => internal_err(e),
@@ -1846,7 +1917,12 @@ async fn wan_reconnect(
 ) -> impl IntoResponse {
     let config = match sfgw_net::wan::get_wan_config(&db, &interface).await {
         Ok(Some(c)) => c,
-        Ok(None) => return err_response(StatusCode::NOT_FOUND, anyhow::anyhow!("WAN config not found")),
+        Ok(None) => {
+            return err_response(
+                StatusCode::NOT_FOUND,
+                anyhow::anyhow!("WAN config not found"),
+            );
+        }
         Err(e) => return internal_err(e),
     };
 
@@ -1862,18 +1938,16 @@ async fn wan_reconnect(
 
 const VALID_ROLES: &[&str] = &["admin", "readonly"];
 
-async fn users_list(
-    auth: AuthUser,
-    Extension(db): Extension<sfgw_db::Db>,
-) -> impl IntoResponse {
+async fn users_list(auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) -> impl IntoResponse {
     if auth.user.role != "admin" {
         return err_response(StatusCode::FORBIDDEN, anyhow::anyhow!("admin only"));
     }
     let conn = db.lock().await;
-    let mut stmt = match conn.prepare("SELECT id, username, role, created_at FROM users ORDER BY id") {
-        Ok(s) => s,
-        Err(e) => return internal_err(e),
-    };
+    let mut stmt =
+        match conn.prepare("SELECT id, username, role, created_at FROM users ORDER BY id") {
+            Ok(s) => s,
+            Err(e) => return internal_err(e),
+        };
     let rows = match stmt.query_map([], |row| {
         Ok(json!({
             "id": row.get::<_, i64>(0)?,
@@ -1901,11 +1975,21 @@ async fn users_create(
 
     let username = match body.get("username").and_then(|v| v.as_str()) {
         Some(u) if !u.is_empty() && u.len() <= 64 => u,
-        _ => return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("username required (1-64 chars)")),
+        _ => {
+            return err_response(
+                StatusCode::BAD_REQUEST,
+                anyhow::anyhow!("username required (1-64 chars)"),
+            );
+        }
     };
     let password = match body.get("password").and_then(|v| v.as_str()) {
         Some(p) if p.len() >= 8 => p,
-        _ => return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("password required (min 8 chars)")),
+        _ => {
+            return err_response(
+                StatusCode::BAD_REQUEST,
+                anyhow::anyhow!("password required (min 8 chars)"),
+            );
+        }
     };
     let role = body.get("role").and_then(|v| v.as_str()).unwrap_or("admin");
     if !VALID_ROLES.contains(&role) {
@@ -1918,10 +2002,16 @@ async fn users_create(
     };
 
     match auth::create_user(&db, username, &password_hash, role).await {
-        Ok(id) => (StatusCode::CREATED, Json(json!({ "id": id, "username": username, "role": role }))),
+        Ok(id) => (
+            StatusCode::CREATED,
+            Json(json!({ "id": id, "username": username, "role": role })),
+        ),
         Err(e) => {
             if e.to_string().contains("UNIQUE") {
-                err_response(StatusCode::CONFLICT, anyhow::anyhow!("username already exists"))
+                err_response(
+                    StatusCode::CONFLICT,
+                    anyhow::anyhow!("username already exists"),
+                )
             } else {
                 internal_err(e)
             }
@@ -1952,10 +2042,15 @@ async fn users_update(
         // Prevent demoting last admin
         if role != "admin" && id == auth.user.id {
             let admin_count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM users WHERE role = 'admin'", [], |r| r.get(0))
+                .query_row("SELECT COUNT(*) FROM users WHERE role = 'admin'", [], |r| {
+                    r.get(0)
+                })
                 .unwrap_or(0);
             if admin_count <= 1 {
-                return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("cannot demote the last admin"));
+                return err_response(
+                    StatusCode::BAD_REQUEST,
+                    anyhow::anyhow!("cannot demote the last admin"),
+                );
             }
         }
         sets.push(format!("role = ?{}", params.len() + 1));
@@ -1964,18 +2059,28 @@ async fn users_update(
 
     if let Some(username) = body.get("username").and_then(|v| v.as_str()) {
         if username.is_empty() || username.len() > 64 {
-            return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("username must be 1-64 chars"));
+            return err_response(
+                StatusCode::BAD_REQUEST,
+                anyhow::anyhow!("username must be 1-64 chars"),
+            );
         }
         sets.push(format!("username = ?{}", params.len() + 1));
         params.push(Box::new(username.to_string()));
     }
 
     if sets.is_empty() {
-        return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("nothing to update"));
+        return err_response(
+            StatusCode::BAD_REQUEST,
+            anyhow::anyhow!("nothing to update"),
+        );
     }
 
     params.push(Box::new(id));
-    let sql = format!("UPDATE users SET {} WHERE id = ?{}", sets.join(", "), params.len());
+    let sql = format!(
+        "UPDATE users SET {} WHERE id = ?{}",
+        sets.join(", "),
+        params.len()
+    );
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
     match conn.execute(&sql, param_refs.as_slice()) {
@@ -1983,7 +2088,10 @@ async fn users_update(
         Ok(_) => (StatusCode::OK, Json(json!({ "ok": true }))),
         Err(e) => {
             if e.to_string().contains("UNIQUE") {
-                err_response(StatusCode::CONFLICT, anyhow::anyhow!("username already exists"))
+                err_response(
+                    StatusCode::CONFLICT,
+                    anyhow::anyhow!("username already exists"),
+                )
             } else {
                 internal_err(e)
             }
@@ -2002,7 +2110,10 @@ async fn users_delete(
 
     // Cannot delete yourself
     if id == auth.user.id {
-        return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("cannot delete your own account"));
+        return err_response(
+            StatusCode::BAD_REQUEST,
+            anyhow::anyhow!("cannot delete your own account"),
+        );
     }
 
     let conn = db.lock().await;
@@ -2022,15 +2133,23 @@ async fn users_delete(
 
     if target_role == "admin" {
         let admin_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM users WHERE role = 'admin'", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM users WHERE role = 'admin'", [], |r| {
+                r.get(0)
+            })
             .unwrap_or(0);
         if admin_count <= 1 {
-            return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("cannot delete the last admin"));
+            return err_response(
+                StatusCode::BAD_REQUEST,
+                anyhow::anyhow!("cannot delete the last admin"),
+            );
         }
     }
 
     // Delete sessions for this user first
-    let _ = conn.execute("DELETE FROM sessions WHERE user_id = ?1", rusqlite::params![id]);
+    let _ = conn.execute(
+        "DELETE FROM sessions WHERE user_id = ?1",
+        rusqlite::params![id],
+    );
 
     match conn.execute("DELETE FROM users WHERE id = ?1", rusqlite::params![id]) {
         Ok(0) => err_response(StatusCode::NOT_FOUND, anyhow::anyhow!("user not found")),
@@ -2052,7 +2171,12 @@ async fn users_change_password(
 
     let new_password = match body.get("password").and_then(|v| v.as_str()) {
         Some(p) if p.len() >= 8 => p,
-        _ => return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("password required (min 8 chars)")),
+        _ => {
+            return err_response(
+                StatusCode::BAD_REQUEST,
+                anyhow::anyhow!("password required (min 8 chars)"),
+            );
+        }
     };
 
     let password_hash = match auth::hash_password(new_password) {
@@ -2063,7 +2187,10 @@ async fn users_change_password(
     let conn = db.lock().await;
 
     // Invalidate all existing sessions for this user (force re-login)
-    let _ = conn.execute("DELETE FROM sessions WHERE user_id = ?1", rusqlite::params![id]);
+    let _ = conn.execute(
+        "DELETE FROM sessions WHERE user_id = ?1",
+        rusqlite::params![id],
+    );
 
     match conn.execute(
         "UPDATE users SET password_hash = ?1 WHERE id = ?2",

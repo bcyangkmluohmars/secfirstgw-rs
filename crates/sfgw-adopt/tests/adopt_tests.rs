@@ -8,14 +8,14 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use sfgw_adopt::ca::GatewayCA;
 use sfgw_adopt::inform::{
-    decrypt_payload, encrypt_response, load_latest_firmware, register_firmware, InformPayload,
-    InformResponse,
+    InformPayload, InformResponse, decrypt_payload, encrypt_response, load_latest_firmware,
+    register_firmware,
 };
 use sfgw_adopt::protocol::{approve_device, discover_device, parse_state, reject_device};
-use sfgw_adopt::signing::{sign_config, sign_firmware_manifest, verify_signature, SignedPayload};
+use sfgw_adopt::signing::{SignedPayload, sign_config, sign_firmware_manifest, verify_signature};
 use sfgw_adopt::{AdoptionRequest, AdoptionState, DeviceInfo};
 
 // ---------------------------------------------------------------------------
@@ -23,8 +23,7 @@ use sfgw_adopt::{AdoptionRequest, AdoptionState, DeviceInfo};
 // ---------------------------------------------------------------------------
 
 async fn fresh_db() -> sfgw_db::Db {
-    let conn =
-        rusqlite::Connection::open_in_memory().expect("failed to open in-memory database");
+    let conn = rusqlite::Connection::open_in_memory().expect("failed to open in-memory database");
     conn.execute_batch(
         "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
          CREATE TABLE devices (
@@ -86,7 +85,10 @@ fn gen_ml_kem_keypair() -> (Vec<u8>, String) {
     (dk_bytes.to_vec(), B64.encode(ek_bytes))
 }
 
-fn make_adoption_request(mac: &str, with_pq: bool) -> (AdoptionRequest, x25519_dalek::StaticSecret) {
+fn make_adoption_request(
+    mac: &str,
+    with_pq: bool,
+) -> (AdoptionRequest, x25519_dalek::StaticSecret) {
     let (_secret, pub_b64) = gen_x25519_keypair();
     let kem_pub = if with_pq {
         let (_dk, ek_b64) = gen_ml_kem_keypair();
@@ -150,7 +152,10 @@ async fn ca_init_generates_keypair_on_first_boot() {
             |r| r.get(0),
         )
         .expect("CA verifying key must be stored in meta table");
-    assert!(!ca_vk.is_empty(), "stored CA verifying key must not be empty");
+    assert!(
+        !ca_vk.is_empty(),
+        "stored CA verifying key must not be empty"
+    );
 }
 
 #[tokio::test]
@@ -217,12 +222,10 @@ async fn sign_config_verify_roundtrip() {
 
     let payload = b"test config payload for signing roundtrip";
     let signed = sign_config(payload, &ca).expect("sign_config");
-    let recovered = verify_signature(&signed, ca.public_key(), Some(ca.ed25519_public_key())).expect("verify_signature");
+    let recovered = verify_signature(&signed, ca.public_key(), Some(ca.ed25519_public_key()))
+        .expect("verify_signature");
 
-    assert_eq!(
-        recovered, payload,
-        "verified payload must match original"
-    );
+    assert_eq!(recovered, payload, "verified payload must match original");
 }
 
 #[tokio::test]
@@ -288,12 +291,19 @@ async fn sign_firmware_manifest_produces_valid_manifest() {
     assert_eq!(manifest.url, "https://fw.example.com/firmware-2.0.0.bin");
 
     // The embedded signed payload must verify against the CA public key.
-    let recovered_bytes =
-        verify_signature(&manifest.signed, ca.public_key(), Some(ca.ed25519_public_key())).expect("manifest signature verify");
+    let recovered_bytes = verify_signature(
+        &manifest.signed,
+        ca.public_key(),
+        Some(ca.ed25519_public_key()),
+    )
+    .expect("manifest signature verify");
     let recovered: serde_json::Value =
         serde_json::from_slice(&recovered_bytes).expect("manifest JSON parse");
     assert_eq!(recovered["version"], "2.0.0");
-    assert_eq!(recovered["url"], "https://fw.example.com/firmware-2.0.0.bin");
+    assert_eq!(
+        recovered["url"],
+        "https://fw.example.com/firmware-2.0.0.bin"
+    );
 }
 
 // ===========================================================================
@@ -340,7 +350,10 @@ async fn discover_device_is_idempotent() {
             |r| r.get(0),
         )
         .expect("count query");
-    assert_eq!(count, 1, "idempotent discover must not create duplicate rows");
+    assert_eq!(
+        count, 1,
+        "idempotent discover must not create duplicate rows"
+    );
 }
 
 #[tokio::test]
@@ -358,21 +371,22 @@ async fn approve_device_transitions_pending_to_adopted() {
 
     // Verify response fields.
     assert!(
-        response.gateway_ca_cert.contains("-----BEGIN SFGW CA CERTIFICATE-----"),
+        response
+            .gateway_ca_cert
+            .contains("-----BEGIN SFGW CA CERTIFICATE-----"),
         "response must include gateway CA cert"
     );
     assert!(
-        response.device_cert.contains("-----BEGIN SFGW DEVICE CERTIFICATE-----"),
+        response
+            .device_cert
+            .contains("-----BEGIN SFGW DEVICE CERTIFICATE-----"),
         "response must include device cert"
     );
     assert!(
         !response.gateway_ecdh_public.is_empty(),
         "response must include ECDH public key"
     );
-    assert_eq!(
-        response.initial_sequence, 1,
-        "initial sequence must be 1"
-    );
+    assert_eq!(response.initial_sequence, 1, "initial sequence must be 1");
 
     // Verify DB state is now Adopted.
     let conn = db.lock().await;
@@ -385,7 +399,11 @@ async fn approve_device_transitions_pending_to_adopted() {
         .expect("device query");
     assert_eq!(adopted, 1, "adopted flag must be 1");
     let state = parse_state(&config_json);
-    assert_eq!(state, AdoptionState::Adopted, "config state must be Adopted");
+    assert_eq!(
+        state,
+        AdoptionState::Adopted,
+        "config state must be Adopted"
+    );
 }
 
 #[tokio::test]
@@ -416,11 +434,9 @@ async fn reject_device_transitions_to_rejected() {
 
     let conn = db.lock().await;
     let config_json: String = conn
-        .query_row(
-            "SELECT config FROM devices WHERE mac = ?1",
-            [mac],
-            |r| r.get(0),
-        )
+        .query_row("SELECT config FROM devices WHERE mac = ?1", [mac], |r| {
+            r.get(0)
+        })
         .expect("device query");
     let state = parse_state(&config_json);
     assert_eq!(
@@ -475,18 +491,14 @@ async fn each_adopted_device_gets_unique_key_material() {
     // Symmetric keys stored in DB config must differ.
     let conn = db.lock().await;
     let cfg_a: String = conn
-        .query_row(
-            "SELECT config FROM devices WHERE mac = ?1",
-            [mac_a],
-            |r| r.get(0),
-        )
+        .query_row("SELECT config FROM devices WHERE mac = ?1", [mac_a], |r| {
+            r.get(0)
+        })
         .expect("device A config");
     let cfg_b: String = conn
-        .query_row(
-            "SELECT config FROM devices WHERE mac = ?1",
-            [mac_b],
-            |r| r.get(0),
-        )
+        .query_row("SELECT config FROM devices WHERE mac = ?1", [mac_b], |r| {
+            r.get(0)
+        })
         .expect("device B config");
 
     let val_a: serde_json::Value = serde_json::from_str(&cfg_a).expect("parse A config");
@@ -525,11 +537,7 @@ async fn adoption_response_includes_required_fields() {
     let ecdh_bytes = B64
         .decode(&response.gateway_ecdh_public)
         .expect("ECDH public key must be valid base64");
-    assert_eq!(
-        ecdh_bytes.len(),
-        32,
-        "ECDH public key must be 32 bytes"
-    );
+    assert_eq!(ecdh_bytes.len(), 32, "ECDH public key must be 32 bytes");
 
     // Initial sequence is 1.
     assert_eq!(response.initial_sequence, 1);
@@ -548,7 +556,10 @@ async fn adoption_response_includes_required_fields() {
 #[test]
 fn parse_state_correctly_parses_all_states() {
     let cases = [
-        (r#"{"adoption_state":"Discovered"}"#, AdoptionState::Discovered),
+        (
+            r#"{"adoption_state":"Discovered"}"#,
+            AdoptionState::Discovered,
+        ),
         (r#"{"adoption_state":"Pending"}"#, AdoptionState::Pending),
         (r#"{"adoption_state":"Approved"}"#, AdoptionState::Approved),
         (r#"{"adoption_state":"Adopted"}"#, AdoptionState::Adopted),
@@ -605,7 +616,7 @@ fn encrypt_response_decrypt_roundtrip() {
     let ct_bytes = B64.decode(&encrypted_b64).expect("base64 decode");
 
     // Decrypt manually using ring.
-    use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+    use ring::aead::{self, AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
     let (nonce_bytes, encrypted) = ct_bytes.split_at(aead::NONCE_LEN);
     let nonce_arr: [u8; 12] = nonce_bytes.try_into().expect("nonce length");
     let unbound = UnboundKey::new(&AES_256_GCM, &key).expect("unbound key");
@@ -615,8 +626,7 @@ fn encrypt_response_decrypt_roundtrip() {
     let plaintext = opening_key
         .open_in_place(nonce, Aad::empty(), &mut in_out)
         .expect("AES-256-GCM decryption");
-    let recovered: InformResponse =
-        serde_json::from_slice(plaintext).expect("JSON parse");
+    let recovered: InformResponse = serde_json::from_slice(plaintext).expect("JSON parse");
 
     assert_eq!(recovered.sequence_number, 42);
     assert_eq!(recovered.inform_interval_secs, 30);
@@ -636,7 +646,7 @@ fn inform_decrypt_payload_roundtrip() {
 
     // Encrypt the payload manually (simulating what a device would send).
     let json_bytes = serde_json::to_vec(&payload).expect("JSON serialise");
-    use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+    use ring::aead::{self, AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
     use ring::rand::SecureRandom;
 
     let unbound = UnboundKey::new(&AES_256_GCM, &key).expect("unbound key");
@@ -704,10 +714,7 @@ fn inform_wrong_key_fails_decryption() {
     let encrypted_b64 = encrypt_response(&response, &key).expect("encrypt_response");
 
     let result = decrypt_payload(&encrypted_b64, &wrong_key);
-    assert!(
-        result.is_err(),
-        "decryption with wrong key must fail"
-    );
+    assert!(result.is_err(), "decryption with wrong key must fail");
 }
 
 // ===========================================================================

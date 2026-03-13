@@ -73,9 +73,7 @@ async fn auto_unlock_vm() -> Result<()> {
 
         result
     } else {
-        tracing::info!(
-            "vm mode — no LUKS key file at {VM_KEY_FILE}, skipping auto-unlock"
-        );
+        tracing::info!("vm mode — no LUKS key file at {VM_KEY_FILE}, skipping auto-unlock");
         Ok(())
     }
 }
@@ -90,7 +88,8 @@ async fn auto_unlock_bare_metal() -> Result<()> {
 
     if product_serial.is_empty() && board_serial.is_empty() {
         return Err(CryptoError::CryptoFailed(
-            "bare metal LUKS auto-unlock: both product_serial and board_serial are empty".to_string(),
+            "bare metal LUKS auto-unlock: both product_serial and board_serial are empty"
+                .to_string(),
         ));
     }
 
@@ -137,7 +136,9 @@ fn cryptsetup_open_keyfile(key_file: &str) -> Result<()> {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CryptoError::CryptoFailed(format!("cryptsetup luksOpen failed: {stderr}")));
+        Err(CryptoError::CryptoFailed(format!(
+            "cryptsetup luksOpen failed: {stderr}"
+        )))
     }
 }
 
@@ -182,7 +183,9 @@ fn cryptsetup_open_stdin(key: &[u8]) -> Result<()> {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CryptoError::CryptoFailed(format!("cryptsetup luksOpen failed: {stderr}")));
+        Err(CryptoError::CryptoFailed(format!(
+            "cryptsetup luksOpen failed: {stderr}"
+        )))
     }
 }
 
@@ -199,7 +202,9 @@ async fn read_dmi_field(field: &str) -> Result<String> {
             tracing::warn!("{path} not found — not a physical machine?");
             Ok(String::new())
         }
-        Err(e) => Err(anyhow::Error::from(e).context(format!("failed to read {path}")).into()),
+        Err(e) => Err(anyhow::Error::from(e)
+            .context(format!("failed to read {path}"))
+            .into()),
     }
 }
 

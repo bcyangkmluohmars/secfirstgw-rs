@@ -63,20 +63,20 @@ fn build_arp_frame(
     let mut frame = Vec::with_capacity(42);
 
     // Ethernet header (14 bytes)
-    frame.extend_from_slice(eth_dst);       // dst MAC
-    frame.extend_from_slice(eth_src);       // src MAC
+    frame.extend_from_slice(eth_dst); // dst MAC
+    frame.extend_from_slice(eth_src); // src MAC
     frame.extend_from_slice(&0x0806u16.to_be_bytes()); // EtherType ARP
 
     // ARP payload (28 bytes)
     frame.extend_from_slice(&0x0001u16.to_be_bytes()); // hw type: Ethernet
     frame.extend_from_slice(&0x0800u16.to_be_bytes()); // proto type: IPv4
-    frame.push(6);  // hw addr len
-    frame.push(4);  // proto addr len
-    frame.extend_from_slice(&opcode.to_be_bytes());    // opcode
-    frame.extend_from_slice(sender_mac);               // sender MAC
-    frame.extend_from_slice(&sender_ip.octets());      // sender IP
-    frame.extend_from_slice(target_mac);               // target MAC
-    frame.extend_from_slice(&target_ip.octets());      // target IP
+    frame.push(6); // hw addr len
+    frame.push(4); // proto addr len
+    frame.extend_from_slice(&opcode.to_be_bytes()); // opcode
+    frame.extend_from_slice(sender_mac); // sender MAC
+    frame.extend_from_slice(&sender_ip.octets()); // sender IP
+    frame.extend_from_slice(target_mac); // target MAC
+    frame.extend_from_slice(&target_ip.octets()); // target IP
 
     assert_eq!(frame.len(), 42);
     frame
@@ -183,7 +183,7 @@ fn build_dhcp_frame(
 
     // --- Ethernet header (14 bytes) ---
     frame.extend_from_slice(&BROADCAST_MAC); // dst (broadcast for DHCP)
-    frame.extend_from_slice(server_mac);     // src
+    frame.extend_from_slice(server_mac); // src
     frame.extend_from_slice(&0x0800u16.to_be_bytes()); // EtherType IPv4
 
     // --- IPv4 header (20 bytes) ---
@@ -195,8 +195,8 @@ fn build_dhcp_frame(
     frame.extend_from_slice(&ip_total_len.to_be_bytes());
     frame.extend_from_slice(&[0x00, 0x00]); // identification
     frame.extend_from_slice(&[0x00, 0x00]); // flags + fragment offset
-    frame.push(64);   // TTL
-    frame.push(17);   // protocol: UDP
+    frame.push(64); // TTL
+    frame.push(17); // protocol: UDP
     frame.extend_from_slice(&[0x00, 0x00]); // checksum (zeroed, not validated in parser)
     frame.extend_from_slice(&server_ip.octets()); // src IP
     frame.extend_from_slice(&Ipv4Addr::BROADCAST.octets()); // dst IP
@@ -220,15 +220,15 @@ fn build_dhcp_frame(
     let dhcp_start = frame.len();
     // op: 1=BOOTREQUEST, 2=BOOTREPLY
     frame.push(if msg_type == 1 { 1 } else { 2 });
-    frame.push(1);    // htype: Ethernet
-    frame.push(6);    // hlen: 6
-    frame.push(0);    // hops
+    frame.push(1); // htype: Ethernet
+    frame.push(6); // hlen: 6
+    frame.push(0); // hops
     frame.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]); // xid
     frame.extend_from_slice(&[0x00, 0x00]); // secs
     frame.extend_from_slice(&[0x00, 0x00]); // flags
     frame.extend_from_slice(&Ipv4Addr::UNSPECIFIED.octets()); // ciaddr
-    frame.extend_from_slice(&your_ip.octets());               // yiaddr
-    frame.extend_from_slice(&server_ip.octets());             // siaddr
+    frame.extend_from_slice(&your_ip.octets()); // yiaddr
+    frame.extend_from_slice(&server_ip.octets()); // siaddr
     frame.extend_from_slice(&Ipv4Addr::UNSPECIFIED.octets()); // giaddr
 
     // chaddr: 16 bytes (6 MAC + 10 padding)
@@ -246,10 +246,10 @@ fn build_dhcp_frame(
     assert_eq!(frame.len() - dhcp_start, 240);
 
     // DHCP options: option 53 (message type) + end
-    frame.push(53);        // option code
-    frame.push(1);         // length
-    frame.push(msg_type);  // value
-    frame.push(255);       // end option
+    frame.push(53); // option code
+    frame.push(1); // length
+    frame.push(msg_type); // value
+    frame.push(255); // end option
 
     frame
 }
@@ -305,8 +305,8 @@ fn build_dns_frame(
     frame.extend_from_slice(&ip_total_len.to_be_bytes());
     frame.extend_from_slice(&[0x00, 0x00]); // identification
     frame.extend_from_slice(&[0x00, 0x00]); // flags
-    frame.push(64);   // TTL
-    frame.push(17);   // UDP
+    frame.push(64); // TTL
+    frame.push(17); // UDP
     frame.extend_from_slice(&[0x00, 0x00]); // checksum
     frame.extend_from_slice(&src_ip.octets());
     frame.extend_from_slice(&dst_ip.octets());
@@ -373,7 +373,10 @@ fn arp_normal_request_no_event() {
         .process_arp_packet(&frame, IFACE_ETH0)
         .expect("process_arp_packet should not error");
 
-    assert!(result.is_none(), "Normal ARP request should not trigger an event");
+    assert!(
+        result.is_none(),
+        "Normal ARP request should not trigger an event"
+    );
 }
 
 /// Test 2: Normal ARP reply (after a request for that IP) produces no event.
@@ -758,13 +761,7 @@ fn vlan_unexpected_on_access_port_warning() {
     monitor.set_port_vlans(IFACE_ETH0.to_string(), vec![10]);
 
     // Frame with VLAN 20 on eth0 (not allowed)
-    let frame = build_vlan_frame(
-        &BROADCAST_MAC,
-        &CLIENT_MAC_A,
-        20,
-        0x0800,
-        &[0u8; 46],
-    );
+    let frame = build_vlan_frame(&BROADCAST_MAC, &CLIENT_MAC_A, 20, 0x0800, &[0u8; 46]);
 
     let result = monitor
         .process_frame(&frame, IFACE_ETH0)
@@ -786,26 +783,17 @@ fn vlan_mac_on_wrong_vlan_warning() {
     monitor.set_vlan_range(1, 4094);
 
     // First frame: CLIENT_MAC_A on VLAN 10 (learns it)
-    let frame1 = build_vlan_frame(
-        &BROADCAST_MAC,
-        &CLIENT_MAC_A,
-        10,
-        0x0800,
-        &[0u8; 46],
-    );
+    let frame1 = build_vlan_frame(&BROADCAST_MAC, &CLIENT_MAC_A, 10, 0x0800, &[0u8; 46]);
     let result1 = monitor
         .process_frame(&frame1, IFACE_ETH0)
         .expect("should not error");
-    assert!(result1.is_none(), "First frame should be learned without event");
+    assert!(
+        result1.is_none(),
+        "First frame should be learned without event"
+    );
 
     // Second frame: same MAC on VLAN 20 (wrong VLAN)
-    let frame2 = build_vlan_frame(
-        &BROADCAST_MAC,
-        &CLIENT_MAC_A,
-        20,
-        0x0800,
-        &[0u8; 46],
-    );
+    let frame2 = build_vlan_frame(&BROADCAST_MAC, &CLIENT_MAC_A, 20, 0x0800, &[0u8; 46]);
     let result2 = monitor
         .process_frame(&frame2, IFACE_ETH0)
         .expect("should not error");
@@ -859,9 +847,9 @@ fn dns_unauthorized_server_critical() {
     let frame = build_dns_frame(
         &ATTACKER_MAC,
         &CLIENT_MAC_A,
-        rogue_ip,   // src: rogue DNS server
-        client_ip,  // dst: client
-        true,       // is_response
+        rogue_ip,  // src: rogue DNS server
+        client_ip, // dst: client
+        true,      // is_response
         Some("example.com"),
     );
 
@@ -927,14 +915,14 @@ fn collector_same_mac_multiple_interfaces_block() {
 
     let action = result.expect("Same MAC on multiple interfaces should trigger a response");
     match action {
-        ResponseAction::BlockMac { ref mac, duration_secs } => {
+        ResponseAction::BlockMac {
+            ref mac,
+            duration_secs,
+        } => {
             assert_eq!(mac, &mac_str);
             assert_eq!(duration_secs, 600);
         }
-        other => panic!(
-            "Expected BlockMac action, got: {:?}",
-            other
-        ),
+        other => panic!("Expected BlockMac action, got: {:?}", other),
     }
 }
 
@@ -954,14 +942,14 @@ fn collector_multi_detector_warnings_isolate() {
 
     let action = result.expect("Warnings from different detectors should trigger escalation");
     match action {
-        ResponseAction::IsolatePort { ref interface, ref mac } => {
+        ResponseAction::IsolatePort {
+            ref interface,
+            ref mac,
+        } => {
             assert_eq!(interface, IFACE_ETH0);
             assert_eq!(mac, &mac_str);
         }
-        other => panic!(
-            "Expected IsolatePort action, got: {:?}",
-            other
-        ),
+        other => panic!("Expected IsolatePort action, got: {:?}", other),
     }
 }
 
@@ -985,10 +973,7 @@ fn collector_arp_dns_same_ip_ratelimit() {
             assert_eq!(ip, ip_str);
             assert_eq!(pps, 10);
         }
-        other => panic!(
-            "Expected RateLimit action, got: {:?}",
-            other
-        ),
+        other => panic!("Expected RateLimit action, got: {:?}", other),
     }
 }
 
@@ -999,7 +984,13 @@ fn collector_timeline_ordering() {
 
     let event1 = make_event("arp", Severity::Info, IFACE_ETH0, None, Some("10.0.0.1"));
     let event2 = make_event("dns", Severity::Warning, IFACE_ETH0, None, Some("10.0.0.2"));
-    let event3 = make_event("vlan", Severity::Critical, IFACE_ETH0, None, Some("10.0.0.3"));
+    let event3 = make_event(
+        "vlan",
+        Severity::Critical,
+        IFACE_ETH0,
+        None,
+        Some("10.0.0.3"),
+    );
 
     let _ = collector.ingest(event1).expect("ingest should not error");
     let _ = collector.ingest(event2).expect("ingest should not error");
@@ -1037,14 +1028,8 @@ fn collector_timeline_last_n() {
     let timeline = collector.timeline(2);
     assert_eq!(timeline.len(), 2);
     // Should be the last 2 events
-    assert_eq!(
-        timeline[0].source_ip.as_deref(),
-        Some("10.0.0.3")
-    );
-    assert_eq!(
-        timeline[1].source_ip.as_deref(),
-        Some("10.0.0.4")
-    );
+    assert_eq!(timeline[0].source_ip.as_deref(), Some("10.0.0.3"));
+    assert_eq!(timeline[1].source_ip.as_deref(), Some("10.0.0.4"));
 }
 
 /// Test 20: Single event on one interface returns no escalation.
@@ -1087,10 +1072,13 @@ fn collector_correlate_multi_interface() {
         "correlate() should return actions for multi-interface MAC"
     );
 
-    let has_block = actions.iter().any(|a| {
-        matches!(a, ResponseAction::BlockMac { mac, .. } if mac == &mac_str)
-    });
-    assert!(has_block, "correlate() should include BlockMac for the attacker MAC");
+    let has_block = actions
+        .iter()
+        .any(|a| matches!(a, ResponseAction::BlockMac { mac, .. } if mac == &mac_str));
+    assert!(
+        has_block,
+        "correlate() should include BlockMac for the attacker MAC"
+    );
 }
 
 /// Test: format_mac produces the expected colon-separated hex string.

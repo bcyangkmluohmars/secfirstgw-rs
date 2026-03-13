@@ -107,10 +107,7 @@ impl ArpMonitor {
 
         // --- Detection 1: Gratuitous ARP flood ---
         if is_gratuitous(&arp) {
-            let entry = self
-                .garp_counter
-                .entry(arp.sender_mac)
-                .or_insert((0, now));
+            let entry = self.garp_counter.entry(arp.sender_mac).or_insert((0, now));
 
             let elapsed = (now - entry.1).num_seconds().max(1) as u64;
             if elapsed > 10 {
@@ -142,10 +139,7 @@ impl ArpMonitor {
 
         // --- Detection 2: Gateway impersonation ---
         for binding in &self.bindings {
-            if binding.is_gateway
-                && arp.sender_ip == binding.ip
-                && arp.sender_mac != binding.mac
-            {
+            if binding.is_gateway && arp.sender_ip == binding.ip && arp.sender_mac != binding.mac {
                 return Ok(Some(IdsEvent {
                     timestamp: now,
                     severity: Severity::Critical,
@@ -186,46 +180,44 @@ impl ArpMonitor {
         }
 
         // --- Detection 4: Unsolicited ARP reply ---
-        if arp.opcode == ARP_OP_REPLY {
-            if !self.pending_requests.contains_key(&arp.sender_ip) {
-                return Ok(Some(IdsEvent {
-                    timestamp: now,
-                    severity: Severity::Warning,
-                    detector: "arp",
-                    source_mac: Some(format_mac(&arp.sender_mac)),
-                    source_ip: Some(arp.sender_ip.to_string()),
-                    interface: interface.to_string(),
-                    vlan: None,
-                    description: format!(
-                        "Unsolicited ARP reply: {} ({}) sent reply without prior request",
-                        format_mac(&arp.sender_mac),
-                        arp.sender_ip
-                    ),
-                }));
-            }
+        if arp.opcode == ARP_OP_REPLY && !self.pending_requests.contains_key(&arp.sender_ip) {
+            return Ok(Some(IdsEvent {
+                timestamp: now,
+                severity: Severity::Warning,
+                detector: "arp",
+                source_mac: Some(format_mac(&arp.sender_mac)),
+                source_ip: Some(arp.sender_ip.to_string()),
+                interface: interface.to_string(),
+                vlan: None,
+                description: format!(
+                    "Unsolicited ARP reply: {} ({}) sent reply without prior request",
+                    format_mac(&arp.sender_mac),
+                    arp.sender_ip
+                ),
+            }));
         }
 
         // --- Detection 5: Duplicate IP (two MACs claiming same IP) ---
-        if let Some(prev_mac) = self.ip_mac_seen.get(&arp.sender_ip) {
-            if *prev_mac != arp.sender_mac {
-                let event = IdsEvent {
-                    timestamp: now,
-                    severity: Severity::Warning,
-                    detector: "arp",
-                    source_mac: Some(format_mac(&arp.sender_mac)),
-                    source_ip: Some(arp.sender_ip.to_string()),
-                    interface: interface.to_string(),
-                    vlan: None,
-                    description: format!(
-                        "Duplicate IP: {} claimed by both {} and {}",
-                        arp.sender_ip,
-                        format_mac(prev_mac),
-                        format_mac(&arp.sender_mac)
-                    ),
-                };
-                self.ip_mac_seen.insert(arp.sender_ip, arp.sender_mac);
-                return Ok(Some(event));
-            }
+        if let Some(prev_mac) = self.ip_mac_seen.get(&arp.sender_ip)
+            && *prev_mac != arp.sender_mac
+        {
+            let event = IdsEvent {
+                timestamp: now,
+                severity: Severity::Warning,
+                detector: "arp",
+                source_mac: Some(format_mac(&arp.sender_mac)),
+                source_ip: Some(arp.sender_ip.to_string()),
+                interface: interface.to_string(),
+                vlan: None,
+                description: format!(
+                    "Duplicate IP: {} claimed by both {} and {}",
+                    arp.sender_ip,
+                    format_mac(prev_mac),
+                    format_mac(&arp.sender_mac)
+                ),
+            };
+            self.ip_mac_seen.insert(arp.sender_ip, arp.sender_mac);
+            return Ok(Some(event));
         }
         self.ip_mac_seen.insert(arp.sender_ip, arp.sender_mac);
 
@@ -387,9 +379,8 @@ pub async fn start_monitor(
 /// Load ARP bindings from the DHCP lease database.
 async fn load_bindings_from_db(db: &sfgw_db::Db) -> Result<Vec<ArpBinding>> {
     let conn = db.lock().await;
-    let mut stmt = conn.prepare(
-        "SELECT mac, ip FROM devices WHERE ip IS NOT NULL AND adopted = 1",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT mac, ip FROM devices WHERE ip IS NOT NULL AND adopted = 1")?;
     let bindings = stmt
         .query_map([], |row| {
             let mac_str: String = row.get(0)?;

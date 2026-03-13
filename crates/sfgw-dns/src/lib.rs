@@ -52,6 +52,15 @@ type Result<T> = std::result::Result<T, DnsError>;
 // ---------------------------------------------------------------------------
 
 /// Top-level DNS configuration.
+///
+/// ```
+/// use sfgw_dns::DnsConfig;
+///
+/// let cfg = DnsConfig::default();
+/// assert!(cfg.dnssec, "DNSSEC must be on by default");
+/// assert!(cfg.rebind_protection, "rebind protection must be on by default");
+/// assert_eq!(cfg.upstream_dns, vec!["1.1.1.1", "9.9.9.9"]);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsConfig {
     /// Upstream DNS servers (e.g. `["1.1.1.1", "9.9.9.9"]`).
@@ -330,7 +339,9 @@ impl DnsmasqProcess {
                 Ok(Some(pid))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => return Err(anyhow::Error::from(e).context("failed to read dnsmasq pid file").into()),
+            Err(e) => Err(anyhow::Error::from(e)
+                .context("failed to read dnsmasq pid file")
+                .into()),
         }
     }
 
@@ -341,7 +352,9 @@ impl DnsmasqProcess {
                 .with_context(|| format!("failed to send {sig} to dnsmasq (pid {pid})"))?;
             Ok(())
         } else {
-            return Err(DnsError::Internal(anyhow::anyhow!("dnsmasq is not running (no pid file)")));
+            Err(DnsError::Internal(anyhow::anyhow!(
+                "dnsmasq is not running (no pid file)"
+            )))
         }
     }
 }
@@ -379,7 +392,9 @@ pub async fn start_with_paths(
         .spawn()
         .context("failed to start dnsmasq")?;
 
-    let pid = child.id().ok_or_else(|| anyhow::anyhow!("dnsmasq process has no PID"))?;
+    let pid = child
+        .id()
+        .ok_or_else(|| anyhow::anyhow!("dnsmasq process has no PID"))?;
 
     tracing::info!(
         pid = pid,

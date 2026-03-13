@@ -7,21 +7,16 @@
 //! Falls back to kernel WireGuard tools if available.
 //! IPsec/IKEv2 tunnels are managed via strongSwan (swanctl).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use crate::db::{self, TunnelRow};
-use crate::{
-    CreateTunnelRequest, TunnelConfig, TunnelStatus, VpnTunnel,
-};
+use crate::{CreateTunnelRequest, TunnelConfig, TunnelStatus, VpnTunnel};
 
 /// Create a new WireGuard tunnel, generate keys, and persist to DB.
 ///
 /// Returns the created tunnel (with generated public key, private key redacted).
-pub async fn create_tunnel(
-    db: &sfgw_db::Db,
-    request: &CreateTunnelRequest,
-) -> Result<VpnTunnel> {
+pub async fn create_tunnel(db: &sfgw_db::Db, request: &CreateTunnelRequest) -> Result<VpnTunnel> {
     let name = &request.name;
 
     // Validate interface name (kernel limit: 15 chars, alphanumeric + limited special)
@@ -137,7 +132,10 @@ pub async fn start_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()> {
                 "kernel WireGuard unavailable ({kernel_err}), using boringtun userspace"
             );
             start_userspace_wg(&row.name, &config, &wg_peers, bind_address.as_deref()).await?;
-            info!(tunnel = row.name, "started WireGuard tunnel (boringtun userspace)");
+            info!(
+                tunnel = row.name,
+                "started WireGuard tunnel (boringtun userspace)"
+            );
         }
     }
 
@@ -162,10 +160,16 @@ pub async fn stop_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()> {
 
     // Bring down and delete the interface (warn if commands fail unexpectedly)
     if let Err(e) = run_cmd("ip", &["link", "set", "down", "dev", &row.name]).await {
-        warn!(tunnel = row.name.as_str(), "failed to bring interface down: {e}");
+        warn!(
+            tunnel = row.name.as_str(),
+            "failed to bring interface down: {e}"
+        );
     }
     if let Err(e) = run_cmd("ip", &["link", "delete", "dev", &row.name]).await {
-        warn!(tunnel = row.name.as_str(), "failed to delete interface: {e}");
+        warn!(
+            tunnel = row.name.as_str(),
+            "failed to delete interface: {e}"
+        );
     }
 
     db::set_tunnel_enabled(db, row.id, false).await?;
@@ -190,10 +194,13 @@ pub async fn delete_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()> {
 
     // WireGuard path
     // Best-effort stop
-    if row.enabled != 0 {
-        if let Err(e) = stop_tunnel(db, tunnel_id).await {
-            warn!(tunnel = row.name.as_str(), "failed to stop tunnel during delete: {e}");
-        }
+    if row.enabled != 0
+        && let Err(e) = stop_tunnel(db, tunnel_id).await
+    {
+        warn!(
+            tunnel = row.name.as_str(),
+            "failed to stop tunnel during delete: {e}"
+        );
     }
 
     // Peers are cascade-deleted by FK constraint
@@ -227,31 +234,31 @@ pub async fn get_status(name: &str) -> Result<TunnelStatus> {
     let (mut total_rx, mut total_tx) = (0u64, 0u64);
     let mut peers = Vec::new();
 
-    if let Ok(output) = output {
-        if output.status.success() {
-            let dump = String::from_utf8_lossy(&output.stdout);
-            for line in dump.lines().skip(1) {
-                let fields: Vec<&str> = line.split('\t').collect();
-                if fields.len() >= 7 {
-                    let rx: u64 = fields[6].parse().unwrap_or(0);
-                    let tx: u64 = fields[5].parse().unwrap_or(0);
-                    let last_handshake: u64 = fields[4].parse().unwrap_or(0);
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        let dump = String::from_utf8_lossy(&output.stdout);
+        for line in dump.lines().skip(1) {
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.len() >= 7 {
+                let rx: u64 = fields[6].parse().unwrap_or(0);
+                let tx: u64 = fields[5].parse().unwrap_or(0);
+                let last_handshake: u64 = fields[4].parse().unwrap_or(0);
 
-                    total_rx += rx;
-                    total_tx += tx;
+                total_rx += rx;
+                total_tx += tx;
 
-                    peers.push(crate::PeerStatus {
-                        public_key: fields[0].to_string(),
-                        endpoint: if fields[2] == "(none)" {
-                            None
-                        } else {
-                            Some(fields[2].to_string())
-                        },
-                        last_handshake_secs: last_handshake,
-                        rx_bytes: rx,
-                        tx_bytes: tx,
-                    });
-                }
+                peers.push(crate::PeerStatus {
+                    public_key: fields[0].to_string(),
+                    endpoint: if fields[2] == "(none)" {
+                        None
+                    } else {
+                        Some(fields[2].to_string())
+                    },
+                    last_handshake_secs: last_handshake,
+                    rx_bytes: rx,
+                    tx_bytes: tx,
+                });
             }
         }
     }
@@ -342,12 +349,9 @@ async fn start_kernel_wg(
         // Use fwmark to tag packets from this WG interface for policy routing.
         // The mark value is derived from the listen port to avoid collisions.
         let fwmark = format!("{}", 0x5746_0000u32 | u32::from(config.listen_port));
-        run_cmd(
-            "wg",
-            &["set", name, "fwmark", &fwmark],
-        )
-        .await
-        .context("failed to set fwmark for interface binding")?;
+        run_cmd("wg", &["set", name, "fwmark", &fwmark])
+            .await
+            .context("failed to set fwmark for interface binding")?;
 
         info!(
             tunnel = name,
@@ -460,8 +464,8 @@ fn tunnel_from_row(row: TunnelRow) -> Result<VpnTunnel> {
 
     match tunnel_type {
         crate::TunnelType::IPsec => {
-            let config: crate::IpsecDbConfig = serde_json::from_str(&row.config)
-                .context("corrupt IPsec config in DB")?;
+            let config: crate::IpsecDbConfig =
+                serde_json::from_str(&row.config).context("corrupt IPsec config in DB")?;
             Ok(VpnTunnel {
                 id: row.id,
                 name: row.name,
@@ -542,10 +546,10 @@ async fn resolve_interface_ip(iface: &str) -> Result<String> {
         for entry in arr {
             if let Some(addr_info) = entry.get("addr_info").and_then(|v| v.as_array()) {
                 for ai in addr_info {
-                    if ai.get("family").and_then(|v| v.as_str()) == Some("inet") {
-                        if let Some(local) = ai.get("local").and_then(|v| v.as_str()) {
-                            return Ok(local.to_string());
-                        }
+                    if ai.get("family").and_then(|v| v.as_str()) == Some("inet")
+                        && let Some(local) = ai.get("local").and_then(|v| v.as_str())
+                    {
+                        return Ok(local.to_string());
                     }
                 }
             }
@@ -592,12 +596,7 @@ async fn set_private_key(iface: &str, private_key_b64: &str) -> Result<()> {
 
     let result = run_cmd(
         "wg",
-        &[
-            "set",
-            iface,
-            "private-key",
-            &key_path.to_string_lossy(),
-        ],
+        &["set", iface, "private-key", &key_path.to_string_lossy()],
     )
     .await;
 
@@ -655,7 +654,9 @@ async fn apply_peer_to_kernel(iface: &str, peer: &crate::WgPeer) -> Result<()> {
         }
     } else {
         let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        run_cmd("wg", &str_args).await.context("failed to configure peer")?;
+        run_cmd("wg", &str_args)
+            .await
+            .context("failed to configure peer")?;
     }
 
     tracing::debug!(iface, peer = peer.public_key, "peer configured");

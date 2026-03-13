@@ -110,10 +110,9 @@ pub async fn negotiate(
     let server_public_bytes = server_public.as_ref().to_vec();
 
     let peer_public = UnparsedPublicKey::new(&X25519, client_public_key);
-    let x25519_shared = agreement::agree_ephemeral(server_private, &peer_public, |secret| {
-        secret.to_vec()
-    })
-    .map_err(|_| "ECDH key agreement failed")?;
+    let x25519_shared =
+        agreement::agree_ephemeral(server_private, &peer_public, |secret| secret.to_vec())
+            .map_err(|_| "ECDH key agreement failed")?;
 
     // --- ML-KEM-1024 (optional, hybrid) ---
     let (combined_ikm, kem_ciphertext) = if let Some(kem_pk_bytes) = client_kem_public_key {
@@ -187,16 +186,14 @@ pub async fn take_negotiate_key(
 pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<(Vec<u8>, [u8; 12]), &'static str> {
     let rng = SystemRandom::new();
     let mut iv = [0u8; 12];
-    rng.fill(&mut iv)
-        .map_err(|_| "failed to generate IV")?;
+    rng.fill(&mut iv).map_err(|_| "failed to generate IV")?;
 
-    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, key)
-        .map_err(|_| "failed to create AES key")?;
+    let unbound =
+        aead::UnboundKey::new(&aead::AES_256_GCM, key).map_err(|_| "failed to create AES key")?;
     let sealing_key = aead::LessSafeKey::new(unbound);
 
     let mut in_out = plaintext.to_vec();
-    let nonce = aead::Nonce::try_assume_unique_for_key(&iv)
-        .map_err(|_| "invalid nonce")?;
+    let nonce = aead::Nonce::try_assume_unique_for_key(&iv).map_err(|_| "invalid nonce")?;
     sealing_key
         .seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut in_out)
         .map_err(|_| "encryption failed")?;
@@ -205,22 +202,17 @@ pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<(Vec<u8>, [u8; 12]), 
 }
 
 /// Decrypt ciphertext with AES-256-GCM. Returns plaintext.
-pub fn decrypt(
-    key: &[u8; 32],
-    ciphertext: &[u8],
-    iv: &[u8],
-) -> Result<Vec<u8>, &'static str> {
+pub fn decrypt(key: &[u8; 32], ciphertext: &[u8], iv: &[u8]) -> Result<Vec<u8>, &'static str> {
     if iv.len() != 12 {
         return Err("IV must be 12 bytes");
     }
 
-    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, key)
-        .map_err(|_| "failed to create AES key")?;
+    let unbound =
+        aead::UnboundKey::new(&aead::AES_256_GCM, key).map_err(|_| "failed to create AES key")?;
     let opening_key = aead::LessSafeKey::new(unbound);
 
     let mut in_out = ciphertext.to_vec();
-    let nonce = aead::Nonce::try_assume_unique_for_key(iv)
-        .map_err(|_| "invalid nonce")?;
+    let nonce = aead::Nonce::try_assume_unique_for_key(iv).map_err(|_| "invalid nonce")?;
     let plaintext = opening_key
         .open_in_place(nonce, aead::Aad::empty(), &mut in_out)
         .map_err(|_| "decryption failed")?;
@@ -232,7 +224,8 @@ pub fn decrypt(
 pub fn generate_envelope_key() -> Result<[u8; 32], &'static str> {
     let rng = SystemRandom::new();
     let mut key = [0u8; 32];
-    rng.fill(&mut key).map_err(|_| "failed to generate random key")?;
+    rng.fill(&mut key)
+        .map_err(|_| "failed to generate random key")?;
     Ok(key)
 }
 
@@ -243,7 +236,7 @@ pub fn generate_envelope_key() -> Result<[u8; 32], &'static str> {
 #[derive(Serialize, Deserialize)]
 pub struct Envelope {
     pub iv: String,   // base64
-    pub data: String,  // base64
+    pub data: String, // base64
 }
 
 impl Envelope {
@@ -256,7 +249,9 @@ impl Envelope {
     }
 
     pub fn open(&self, key: &[u8; 32]) -> Result<Vec<u8>, &'static str> {
-        let ct = B64.decode(&self.data).map_err(|_| "invalid base64 in data")?;
+        let ct = B64
+            .decode(&self.data)
+            .map_err(|_| "invalid base64 in data")?;
         let iv = B64.decode(&self.iv).map_err(|_| "invalid base64 in iv")?;
         decrypt(key, &ct, &iv)
     }
@@ -293,7 +288,10 @@ pub async fn e2ee_layer(request: Request<Body>, next: Next) -> Response<Body> {
     {
         Some(t) if !t.is_empty() => t,
         _ => {
-            return (StatusCode::BAD_REQUEST, "E2EE requires Authorization header")
+            return (
+                StatusCode::BAD_REQUEST,
+                "E2EE requires Authorization header",
+            )
                 .into_response();
         }
     };
@@ -302,7 +300,10 @@ pub async fn e2ee_layer(request: Request<Body>, next: Next) -> Response<Body> {
     let env_store = match request.extensions().get::<EnvelopeKeyStore>().cloned() {
         Some(s) => s,
         None => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "envelope key store not available")
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "envelope key store not available",
+            )
                 .into_response();
         }
     };
@@ -321,7 +322,10 @@ pub async fn e2ee_layer(request: Request<Body>, next: Next) -> Response<Body> {
             }
             None => {
                 // Key not in memory (server restarted or session has no E2EE) — client must re-negotiate
-                return (StatusCode::UNAUTHORIZED, "E2EE session expired, please re-negotiate")
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    "E2EE session expired, please re-negotiate",
+                )
                     .into_response();
             }
         }
@@ -342,8 +346,7 @@ pub async fn e2ee_layer(request: Request<Body>, next: Next) -> Response<Body> {
         let envelope: Envelope = match serde_json::from_slice(&body_bytes) {
             Ok(e) => e,
             Err(_) => {
-                return (StatusCode::BAD_REQUEST, "E2EE body must be {iv, data}")
-                    .into_response();
+                return (StatusCode::BAD_REQUEST, "E2EE body must be {iv, data}").into_response();
             }
         };
         match envelope.open(&envelope_key) {
@@ -365,7 +368,9 @@ pub async fn e2ee_layer(request: Request<Body>, next: Next) -> Response<Body> {
     let (resp_parts, resp_body) = response.into_parts();
     let resp_bytes = match resp_body.collect().await {
         Ok(collected) => collected.to_bytes(),
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "failed to read response").into_response(),
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "failed to read response").into_response();
+        }
     };
 
     if resp_bytes.is_empty() {
@@ -389,9 +394,11 @@ pub async fn e2ee_layer(request: Request<Body>, next: Next) -> Response<Body> {
             );
             response
         }
-        Err(_) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, "failed to encrypt response").into_response()
-        }
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to encrypt response",
+        )
+            .into_response(),
     }
 }
 

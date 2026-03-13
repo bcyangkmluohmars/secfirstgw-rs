@@ -6,8 +6,8 @@
 //! run in a background tokio task, removing failed WANs and
 //! re-adding them on recovery.
 
-use crate::{WanGroup, WanMember, WanMode};
 use crate::nft::validate_interface_name;
+use crate::{WanGroup, WanMember, WanMode};
 use anyhow::{Context, Result};
 use std::net::IpAddr;
 use tokio::process::Command;
@@ -39,14 +39,13 @@ const RT_TABLE_BASE: u32 = 100;
 /// - **LoadBalance**: ECMP default route with weights.
 pub async fn apply_wan_routing(groups: &[WanGroup]) -> Result<()> {
     for group in groups {
-        let enabled: Vec<&WanMember> = group
-            .interfaces
-            .iter()
-            .filter(|m| m.enabled)
-            .collect();
+        let enabled: Vec<&WanMember> = group.interfaces.iter().filter(|m| m.enabled).collect();
 
         if enabled.is_empty() {
-            tracing::warn!("WAN group '{}' has no enabled members, skipping", group.name);
+            tracing::warn!(
+                "WAN group '{}' has no enabled members, skipping",
+                group.name
+            );
             continue;
         }
 
@@ -82,10 +81,12 @@ pub async fn apply_wan_routing(groups: &[WanGroup]) -> Result<()> {
 /// Returns `true` if the target is reachable, `false` otherwise.
 pub async fn check_wan_health(member: &WanMember) -> Result<bool> {
     validate_interface_name(&member.interface)?;
-    let _target: IpAddr = member
-        .check_target
-        .parse()
-        .with_context(|| format!("invalid check_target for health check: {}", member.check_target))?;
+    let _target: IpAddr = member.check_target.parse().with_context(|| {
+        format!(
+            "invalid check_target for health check: {}",
+            member.check_target
+        )
+    })?;
 
     let output = Command::new("ping")
         .args([
@@ -130,11 +131,7 @@ pub async fn wan_health_monitor(db: sfgw_db::Db) -> Result<()> {
         };
 
         for group in &groups {
-            let enabled: Vec<&WanMember> = group
-                .interfaces
-                .iter()
-                .filter(|m| m.enabled)
-                .collect();
+            let enabled: Vec<&WanMember> = group.interfaces.iter().filter(|m| m.enabled).collect();
 
             let mut state_changed = false;
 
@@ -166,20 +163,12 @@ pub async fn wan_health_monitor(db: sfgw_db::Db) -> Result<()> {
                 // Re-apply routing with only healthy members.
                 let healthy_members: Vec<&WanMember> = enabled
                     .iter()
-                    .filter(|m| {
-                        health_state
-                            .get(&m.interface)
-                            .copied()
-                            .unwrap_or(true)
-                    })
+                    .filter(|m| health_state.get(&m.interface).copied().unwrap_or(true))
                     .copied()
                     .collect();
 
                 if healthy_members.is_empty() {
-                    tracing::error!(
-                        "all WAN members in group '{}' are down!",
-                        group.name
-                    );
+                    tracing::error!("all WAN members in group '{}' are down!", group.name);
                     continue;
                 }
 
@@ -208,10 +197,15 @@ async fn setup_interface_table(member: &WanMember, table_id: u32) -> Result<()> 
 
     // Add default route in the per-interface table.
     if let Err(e) = run_ip(&[
-        "route", "replace", "default",
-        "via", &member.gateway,
-        "dev", &member.interface,
-        "table", &table_str,
+        "route",
+        "replace",
+        "default",
+        "via",
+        &member.gateway,
+        "dev",
+        &member.interface,
+        "table",
+        &table_str,
     ])
     .await
     {
@@ -248,9 +242,13 @@ async fn apply_failover_route(members: &[&WanMember]) -> Result<()> {
 
     // Replace default route with the primary WAN.
     run_ip(&[
-        "route", "replace", "default",
-        "via", &primary.gateway,
-        "dev", &primary.interface,
+        "route",
+        "replace",
+        "default",
+        "via",
+        &primary.gateway,
+        "dev",
+        &primary.interface,
     ])
     .await
     .context("failed to set failover default route")?;
@@ -518,8 +516,14 @@ mod tests {
         assert_eq!(nexthop_count, 2, "should have 2 nexthops");
 
         // Check weights.
-        assert!(default_cmd.contains(&"70".to_string()), "should have weight 70");
-        assert!(default_cmd.contains(&"30".to_string()), "should have weight 30");
+        assert!(
+            default_cmd.contains(&"70".to_string()),
+            "should have weight 70"
+        );
+        assert!(
+            default_cmd.contains(&"30".to_string()),
+            "should have weight 30"
+        );
     }
 
     #[test]

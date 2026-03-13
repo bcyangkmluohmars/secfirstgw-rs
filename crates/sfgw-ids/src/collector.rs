@@ -14,8 +14,8 @@
 
 use std::collections::HashMap;
 
-use chrono::Utc;
 use anyhow::Result;
+use chrono::Utc;
 
 use super::{IdsEvent, ResponseAction, Severity};
 
@@ -58,10 +58,7 @@ impl Collector {
 
         // Index by source MAC
         if let Some(ref mac) = event.source_mac {
-            let entries = self
-                .recent_by_mac
-                .entry(mac.clone())
-                .or_insert_with(Vec::new);
+            let entries = self.recent_by_mac.entry(mac.clone()).or_default();
             entries.push(event.clone());
             if entries.len() > MAX_EVENTS_PER_SOURCE {
                 entries.drain(..entries.len() - MAX_EVENTS_PER_SOURCE);
@@ -70,10 +67,7 @@ impl Collector {
 
         // Index by source IP
         if let Some(ref ip) = event.source_ip {
-            let entries = self
-                .recent_by_ip
-                .entry(ip.clone())
-                .or_insert_with(Vec::new);
+            let entries = self.recent_by_ip.entry(ip.clone()).or_default();
             entries.push(event.clone());
             if entries.len() > MAX_EVENTS_PER_SOURCE {
                 entries.drain(..entries.len() - MAX_EVENTS_PER_SOURCE);
@@ -84,7 +78,7 @@ impl Collector {
         let entries = self
             .recent_by_detector
             .entry(event.detector.to_string())
-            .or_insert_with(Vec::new);
+            .or_default();
         entries.push(event.clone());
         if entries.len() > MAX_EVENTS_PER_SOURCE * 10 {
             entries.drain(..entries.len() - MAX_EVENTS_PER_SOURCE * 10);
@@ -102,84 +96,80 @@ impl Collector {
         // --- Correlation: check if this event triggers escalation ---
 
         // Pattern 1: Same MAC on multiple interfaces (MAC spoofing/movement)
-        if let Some(ref mac) = event.source_mac {
-            if let Some(events) = self.recent_by_mac.get(mac.as_str()) {
-                let recent: Vec<&IdsEvent> = events
-                    .iter()
-                    .filter(|e| (now - e.timestamp).num_seconds() < self.correlation_window_secs as i64)
-                    .collect();
+        if let Some(ref mac) = event.source_mac
+            && let Some(events) = self.recent_by_mac.get(mac.as_str())
+        {
+            let recent: Vec<&IdsEvent> = events
+                .iter()
+                .filter(|e| (now - e.timestamp).num_seconds() < self.correlation_window_secs as i64)
+                .collect();
 
-                // Check if same MAC seen on different interfaces
-                let interfaces: Vec<&str> = recent
-                    .iter()
-                    .map(|e| e.interface.as_str())
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect();
+            // Check if same MAC seen on different interfaces
+            let interfaces: Vec<&str> = recent
+                .iter()
+                .map(|e| e.interface.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
 
-                if interfaces.len() > 1 {
-                    return Ok(Some(ResponseAction::BlockMac {
-                        mac: mac.clone(),
-                        duration_secs: 600,
-                    }));
-                }
+            if interfaces.len() > 1 {
+                return Ok(Some(ResponseAction::BlockMac {
+                    mac: mac.clone(),
+                    duration_secs: 600,
+                }));
             }
         }
 
         // Pattern 2: Multiple low-severity events from different detectors = escalation
-        if event.severity == Severity::Warning {
-            if let Some(ref mac) = event.source_mac {
-                if let Some(events) = self.recent_by_mac.get(mac.as_str()) {
-                    let recent_warnings: Vec<&IdsEvent> = events
-                        .iter()
-                        .filter(|e| {
-                            e.severity == Severity::Warning
-                                && (now - e.timestamp).num_seconds()
-                                    < self.correlation_window_secs as i64
-                        })
-                        .collect();
+        if event.severity == Severity::Warning
+            && let Some(ref mac) = event.source_mac
+            && let Some(events) = self.recent_by_mac.get(mac.as_str())
+        {
+            let recent_warnings: Vec<&IdsEvent> = events
+                .iter()
+                .filter(|e| {
+                    e.severity == Severity::Warning
+                        && (now - e.timestamp).num_seconds() < self.correlation_window_secs as i64
+                })
+                .collect();
 
-                    // Different detectors flagging the same MAC = coordinated attack
-                    let detectors: std::collections::HashSet<&str> = recent_warnings
-                        .iter()
-                        .map(|e| e.detector)
-                        .collect();
+            // Different detectors flagging the same MAC = coordinated attack
+            let detectors: std::collections::HashSet<&str> =
+                recent_warnings.iter().map(|e| e.detector).collect();
 
-                    if detectors.len() >= 2 {
-                        return Ok(Some(ResponseAction::IsolatePort {
-                            interface: event.interface.clone(),
-                            mac: mac.clone(),
-                        }));
-                    }
+            if detectors.len() >= 2 {
+                return Ok(Some(ResponseAction::IsolatePort {
+                    interface: event.interface.clone(),
+                    mac: mac.clone(),
+                }));
+            }
 
-                    // Many warnings from same detector = escalate
-                    if recent_warnings.len() >= 5 {
-                        return Ok(Some(ResponseAction::BlockMac {
-                            mac: mac.clone(),
-                            duration_secs: 300,
-                        }));
-                    }
-                }
+            // Many warnings from same detector = escalate
+            if recent_warnings.len() >= 5 {
+                return Ok(Some(ResponseAction::BlockMac {
+                    mac: mac.clone(),
+                    duration_secs: 300,
+                }));
             }
         }
 
         // Pattern 3: ARP spoofing + DNS anomaly from same source (coordinated)
-        if let Some(ref ip) = event.source_ip {
-            if let Some(events) = self.recent_by_ip.get(ip.as_str()) {
-                let recent: Vec<&IdsEvent> = events
-                    .iter()
-                    .filter(|e| (now - e.timestamp).num_seconds() < self.correlation_window_secs as i64)
-                    .collect();
+        if let Some(ref ip) = event.source_ip
+            && let Some(events) = self.recent_by_ip.get(ip.as_str())
+        {
+            let recent: Vec<&IdsEvent> = events
+                .iter()
+                .filter(|e| (now - e.timestamp).num_seconds() < self.correlation_window_secs as i64)
+                .collect();
 
-                let has_arp = recent.iter().any(|e| e.detector == "arp");
-                let has_dns = recent.iter().any(|e| e.detector == "dns");
+            let has_arp = recent.iter().any(|e| e.detector == "arp");
+            let has_dns = recent.iter().any(|e| e.detector == "dns");
 
-                if has_arp && has_dns {
-                    return Ok(Some(ResponseAction::RateLimit {
-                        ip: ip.clone(),
-                        pps: 10, // Very aggressive rate limit for coordinated attack
-                    }));
-                }
+            if has_arp && has_dns {
+                return Ok(Some(ResponseAction::RateLimit {
+                    ip: ip.clone(),
+                    pps: 10, // Very aggressive rate limit for coordinated attack
+                }));
             }
         }
 
@@ -223,7 +213,10 @@ impl Collector {
 
             if warning_count >= 3 && detectors.len() >= 2 {
                 actions.push(ResponseAction::IsolatePort {
-                    interface: recent.last().map(|e| e.interface.clone()).unwrap_or_default(),
+                    interface: recent
+                        .last()
+                        .map(|e| e.interface.clone())
+                        .unwrap_or_default(),
                     mac: mac.clone(),
                 });
             }

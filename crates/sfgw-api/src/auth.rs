@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use anyhow::{Context, Result, bail};
-use argon2::{
-    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
-    password_hash::SaltString,
-};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use chrono::{DateTime, Duration, Utc};
 use ring::rand::SecureRandom;
 use serde::Serialize;
@@ -49,8 +46,8 @@ pub fn hash_password(password: &str) -> Result<String> {
 /// Verify a password against an Argon2id hash.
 #[must_use = "ignoring password verification result is a security bug"]
 pub fn verify_password(password: &str, hash: &str) -> Result<bool> {
-    let parsed = PasswordHash::new(hash)
-        .map_err(|e| anyhow::anyhow!("invalid password hash: {e}"))?;
+    let parsed =
+        PasswordHash::new(hash).map_err(|e| anyhow::anyhow!("invalid password hash: {e}"))?;
     let argon2 = Argon2::default();
     Ok(argon2.verify_password(password.as_bytes(), &parsed).is_ok())
 }
@@ -175,7 +172,10 @@ pub async fn get_user_by_id(db: &sfgw_db::Db, user_id: i64) -> Result<Option<Use
 }
 
 /// Look up a user by username.
-pub async fn get_user_by_username(db: &sfgw_db::Db, username: &str) -> Result<Option<(User, String)>> {
+pub async fn get_user_by_username(
+    db: &sfgw_db::Db,
+    username: &str,
+) -> Result<Option<(User, String)>> {
     let conn = db.lock().await;
     let result = conn.query_row(
         "SELECT id, username, role, created_at, password_hash FROM users WHERE username = ?1",

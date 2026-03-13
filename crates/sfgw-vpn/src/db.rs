@@ -186,6 +186,7 @@ const PEER_COLUMNS: &str = "id, tunnel_id, name, public_key, private_key_enc, \
     persistent_keepalive, routing_mode, dns, enabled, created_at";
 
 /// Insert a new peer, returning its ID.
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_peer(
     db: &sfgw_db::Db,
     tunnel_id: i64,

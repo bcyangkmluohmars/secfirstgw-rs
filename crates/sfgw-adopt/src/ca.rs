@@ -12,7 +12,7 @@
 //! encrypted at rest in RAM.
 
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
 use fips204::ml_dsa_65;
 use fips204::traits::{KeyGen, SerDes, Signer};
@@ -383,10 +383,6 @@ fn encode_pem(tag: &str, der: &[u8]) -> String {
 }
 
 pub fn decode_pem(pem: &str) -> Result<Vec<u8>> {
-    let body: String = pem
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect();
-    B64.decode(body.trim())
-        .context("invalid PEM base64")
+    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+    B64.decode(body.trim()).context("invalid PEM base64")
 }

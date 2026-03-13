@@ -211,14 +211,36 @@ impl DnsMonitor {
         }
 
         // --- Detection: DNS tunneling via query name analysis ---
-        if !parsed.is_response {
-            if let Some(ref qname) = parsed.query_name {
-                // Check for suspiciously long labels
-                let labels: Vec<&str> = qname.split('.').collect();
-                let has_long_label = labels.iter().any(|l| l.len() > SUSPICIOUS_LABEL_LEN);
-                let total_len = qname.len();
+        if !parsed.is_response
+            && let Some(ref qname) = parsed.query_name
+        {
+            // Check for suspiciously long labels
+            let labels: Vec<&str> = qname.split('.').collect();
+            let has_long_label = labels.iter().any(|l| l.len() > SUSPICIOUS_LABEL_LEN);
+            let total_len = qname.len();
 
-                if has_long_label || total_len > SUSPICIOUS_QUERY_LEN {
+            if has_long_label || total_len > SUSPICIOUS_QUERY_LEN {
+                return Ok(Some(IdsEvent {
+                    timestamp: now,
+                    severity: Severity::Warning,
+                    detector: "dns",
+                    source_mac: None,
+                    source_ip: Some(client_ip.to_string()),
+                    interface: interface.to_string(),
+                    vlan: None,
+                    description: format!(
+                        "Possible DNS tunneling: query name length {} with long subdomain labels (query: {})",
+                        total_len,
+                        truncate_str(qname, 80)
+                    ),
+                }));
+            }
+
+            // Shannon entropy check on the subdomain portion
+            if labels.len() > 2 {
+                let subdomain = labels[..labels.len() - 2].join(".");
+                let entropy = shannon_entropy(&subdomain);
+                if entropy > ENTROPY_THRESHOLD && subdomain.len() > 20 {
                     return Ok(Some(IdsEvent {
                         timestamp: now,
                         severity: Severity::Warning,
@@ -228,33 +250,11 @@ impl DnsMonitor {
                         interface: interface.to_string(),
                         vlan: None,
                         description: format!(
-                            "Possible DNS tunneling: query name length {} with long subdomain labels (query: {})",
-                            total_len,
+                            "Possible DNS tunneling: high entropy ({:.2}) in subdomain (query: {})",
+                            entropy,
                             truncate_str(qname, 80)
                         ),
                     }));
-                }
-
-                // Shannon entropy check on the subdomain portion
-                if labels.len() > 2 {
-                    let subdomain = labels[..labels.len() - 2].join(".");
-                    let entropy = shannon_entropy(&subdomain);
-                    if entropy > ENTROPY_THRESHOLD && subdomain.len() > 20 {
-                        return Ok(Some(IdsEvent {
-                            timestamp: now,
-                            severity: Severity::Warning,
-                            detector: "dns",
-                            source_mac: None,
-                            source_ip: Some(client_ip.to_string()),
-                            interface: interface.to_string(),
-                            vlan: None,
-                            description: format!(
-                                "Possible DNS tunneling: high entropy ({:.2}) in subdomain (query: {})",
-                                entropy,
-                                truncate_str(qname, 80)
-                            ),
-                        }));
-                    }
                 }
             }
         }
@@ -379,11 +379,7 @@ fn parse_dns_name(data: &[u8]) -> Option<String> {
         i += 1 + len;
     }
 
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 /// Calculate Shannon entropy of a string.

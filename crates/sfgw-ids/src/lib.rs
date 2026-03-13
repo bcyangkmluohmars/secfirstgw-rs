@@ -30,7 +30,19 @@ pub mod dhcp;
 pub mod dns;
 pub mod vlan;
 
-/// IDS role — determines which detectors are active
+/// IDS role — determines which detectors are active.
+///
+/// ```
+/// use sfgw_ids::IdsRole;
+///
+/// // Gateway runs all monitors + correlation engine
+/// let role = IdsRole::Gateway;
+/// assert_eq!(format!("{role:?}"), "Gateway");
+///
+/// // Switch monitors ARP/DHCP/VLAN and reports to gateway
+/// let role = IdsRole::Switch;
+/// assert_ne!(role, IdsRole::Gateway);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdsRole {
     /// Gateway: full packet inspection + correlation engine
@@ -41,7 +53,15 @@ pub enum IdsRole {
     AccessPoint,
 }
 
-/// Severity of a detected event
+/// Severity of a detected event.
+///
+/// ```
+/// use sfgw_ids::Severity;
+///
+/// let sev = Severity::Critical;
+/// let json = serde_json::to_string(&sev).unwrap();
+/// assert_eq!(json, r#""Critical""#);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Severity {
     Info,
@@ -204,10 +224,7 @@ pub async fn start(db: &sfgw_db::Db, role: IdsRole) -> Result<()> {
 
 /// Process an IDS event reported by a remote node.
 /// Used by the API endpoint that receives events from switches/APs.
-pub async fn process_remote_event(
-    db: &sfgw_db::Db,
-    event: IdsEvent,
-) -> Result<ResponseAction> {
+pub async fn process_remote_event(db: &sfgw_db::Db, event: IdsEvent) -> Result<ResponseAction> {
     // Store in database via alert engine
     let mut alert_engine = alert::AlertEngine::new(db.clone());
     let actions = alert_engine.process_event(&event).await?;

@@ -12,8 +12,8 @@
 //! 6. **Adoption Complete** — device receives: gateway CA cert (pinned), its
 //!    own client cert, and the shared symmetric key derived from hybrid KE.
 
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use chrono::Utc;
 use fips203::ml_kem_1024;
 use fips203::traits::{Encaps, SerDes};
@@ -143,7 +143,10 @@ pub async fn approve_device(
         .and_then(|v| v.as_str())
         .unwrap_or("Unknown");
     if state != "Pending" {
-        bail!("device {} is not pending (state: {state})", request.device_mac);
+        bail!(
+            "device {} is not pending (state: {state})",
+            request.device_mac
+        );
     }
 
     // 2. X25519 ECDH key exchange.
@@ -174,10 +177,8 @@ pub async fn approve_device(
         let device_ek_bytes = B64
             .decode(device_kem_pk_b64)
             .context("invalid device ML-KEM encapsulation key base64")?;
-        let device_ek_arr: [u8; ml_kem_1024::EK_LEN] = device_ek_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| {
+        let device_ek_arr: [u8; ml_kem_1024::EK_LEN] =
+            device_ek_bytes.as_slice().try_into().map_err(|_| {
                 anyhow::anyhow!(
                     "device ML-KEM-1024 encapsulation key must be {} bytes, got {}",
                     ml_kem_1024::EK_LEN,
@@ -241,7 +242,8 @@ pub async fn approve_device(
     cfg["adopted_at"] = serde_json::json!(adopted_device.adopted_at);
     // Temporarily decrypt the symmetric key for base64 encoding to DB.
     {
-        let sk_plain = symmetric_key_box.open()
+        let sk_plain = symmetric_key_box
+            .open()
             .context("failed to decrypt symmetric key from SecureBox")?;
         cfg["symmetric_key"] = serde_json::json!(B64.encode(&sk_plain));
     }

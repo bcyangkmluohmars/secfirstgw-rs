@@ -212,11 +212,7 @@ async fn handle_vpn(cmd: VpnCommands) -> Result<()> {
             let tunnels = sfgw_vpn::tunnel::list_tunnels(&db).await?;
             for t in &tunnels {
                 let status = if t.enabled { "UP" } else { "DOWN" };
-                println!(
-                    "[{status}] {} port={}",
-                    t.name,
-                    t.listen_port,
-                );
+                println!("[{status}] {} port={}", t.name, t.listen_port,);
             }
         }
         VpnCommands::WgUp => {

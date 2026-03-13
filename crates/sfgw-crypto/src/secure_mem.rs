@@ -12,7 +12,7 @@
 //! and heap spraying all useless against key material.
 
 use crate::CryptoError;
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
 use zeroize::Zeroize;
 
@@ -22,6 +22,22 @@ type Result<T> = std::result::Result<T, CryptoError>;
 /// Encrypted in-memory container for sensitive data.
 /// Data is AES-256-GCM encrypted with an ephemeral key.
 /// Memory is mlock'd and excluded from core dumps.
+///
+/// ```
+/// use sfgw_crypto::secure_mem::SecureBox;
+///
+/// // Store a secret — plaintext is encrypted immediately
+/// let secret = b"my-private-key-material-here!!!!".to_vec();
+/// let sbox = SecureBox::<Vec<u8>>::new(secret).unwrap();
+/// assert_eq!(sbox.original_len(), 32);
+///
+/// // Recover the plaintext — caller must zeroize when done
+/// let mut recovered = sbox.open().unwrap();
+/// assert_eq!(recovered.as_slice(), b"my-private-key-material-here!!!!");
+///
+/// // Zeroize after use
+/// zeroize::Zeroize::zeroize(&mut recovered);
+/// ```
 pub struct SecureBox<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> {
     /// AES-256-GCM encrypted data (ciphertext + 16-byte tag appended by ring)
     ciphertext: Vec<u8>,
@@ -41,6 +57,8 @@ fn mlock_region(ptr: *const u8, len: usize) -> bool {
     if len == 0 {
         return true;
     }
+    // SAFETY: ptr and len describe a valid, allocated region (from Vec/Box).
+    // mlock prevents swapping; failure is non-fatal (returns false).
     unsafe { libc::mlock(ptr as *const libc::c_void, len) == 0 }
 }
 
@@ -51,6 +69,8 @@ fn madvise_dontdump(ptr: *mut u8, len: usize) -> bool {
     if len == 0 {
         return true;
     }
+    // SAFETY: ptr and len describe a valid, allocated region. MADV_DONTDUMP
+    // excludes it from core dumps; failure is non-fatal (returns false).
     unsafe { libc::madvise(ptr as *mut libc::c_void, len, libc::MADV_DONTDUMP) == 0 }
 }
 
@@ -58,6 +78,8 @@ fn madvise_dontdump(ptr: *mut u8, len: usize) -> bool {
 #[allow(unsafe_code)]
 fn munlock_region(ptr: *const u8, len: usize) {
     if len > 0 {
+        // SAFETY: ptr and len describe a previously mlock'd region.
+        // munlock allows the OS to swap it again after zeroization.
         unsafe {
             libc::munlock(ptr as *const libc::c_void, len);
         }
@@ -92,8 +114,9 @@ impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> SecureBox<T> {
 
         // Generate nonce
         let mut nonce = [0u8; 12];
-        rng.fill(&mut nonce)
-            .map_err(|_| CryptoError::CryptoFailed("failed to generate random nonce".to_string()))?;
+        rng.fill(&mut nonce).map_err(|_| {
+            CryptoError::CryptoFailed("failed to generate random nonce".to_string())
+        })?;
 
         // Prepare plaintext as a Vec for in-place encryption
         let plaintext_ref = data.as_ref();
@@ -106,8 +129,9 @@ impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> SecureBox<T> {
         data.zeroize();
 
         // Encrypt
-        let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes)
-            .map_err(|_| CryptoError::CryptoFailed("failed to create AES-256-GCM key".to_string()))?;
+        let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes).map_err(|_| {
+            CryptoError::CryptoFailed("failed to create AES-256-GCM key".to_string())
+        })?;
         let sealing_key = LessSafeKey::new(unbound);
         let nonce_val = Nonce::assume_unique_for_key(nonce);
 
@@ -135,8 +159,9 @@ impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> SecureBox<T> {
     /// The caller is responsible for zeroizing the returned value when done.
     #[must_use = "decrypted secret must be used and then zeroized"]
     pub fn open(&self) -> Result<T> {
-        let unbound = UnboundKey::new(&AES_256_GCM, &self.key_bytes)
-            .map_err(|_| CryptoError::CryptoFailed("failed to create AES-256-GCM key for decryption".to_string()))?;
+        let unbound = UnboundKey::new(&AES_256_GCM, &self.key_bytes).map_err(|_| {
+            CryptoError::CryptoFailed("failed to create AES-256-GCM key for decryption".to_string())
+        })?;
         let opening_key = LessSafeKey::new(unbound);
         let nonce_val = Nonce::assume_unique_for_key(self.nonce);
 
@@ -187,6 +212,18 @@ unsafe impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> Send for SecureBox<T> {}
 unsafe impl<T: Zeroize + AsRef<[u8]> + From<Vec<u8>>> Sync for SecureBox<T> {}
 
 /// Secure comparison (constant-time) to prevent timing attacks.
+///
+/// Always compares all bytes even if an early mismatch is found,
+/// preventing timing side-channels that leak prefix length.
+///
+/// ```
+/// use sfgw_crypto::secure_mem::secure_eq;
+///
+/// assert!(secure_eq(b"hello", b"hello"));
+/// assert!(!secure_eq(b"hello", b"world"));
+/// assert!(!secure_eq(b"short", b"longer")); // different lengths → false
+/// assert!(secure_eq(b"", b""));             // empty slices → true
+/// ```
 #[must_use = "ignoring the result of a security comparison is a bug"]
 pub fn secure_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -200,6 +237,15 @@ pub fn secure_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Securely generate random bytes using ring's SystemRandom (kernel CSPRNG).
+///
+/// ```
+/// use sfgw_crypto::secure_mem::secure_random;
+///
+/// let mut buf = [0u8; 32];
+/// secure_random(&mut buf).unwrap();
+/// // Cryptographically random — extremely unlikely to be all zeros
+/// assert!(buf.iter().any(|&b| b != 0));
+/// ```
 pub fn secure_random(buf: &mut [u8]) -> Result<()> {
     let rng = SystemRandom::new();
     rng.fill(buf)
@@ -246,7 +292,10 @@ mod tests {
         let sbox = SecureBox::<Vec<u8>>::new(secret).expect("new failed");
 
         // The ciphertext (which includes the tag) should NOT equal the plaintext
-        assert_ne!(&sbox.ciphertext[..sbox.original_len], b"super secret key material here!!");
+        assert_ne!(
+            &sbox.ciphertext[..sbox.original_len],
+            b"super secret key material here!!"
+        );
     }
 
     #[test]

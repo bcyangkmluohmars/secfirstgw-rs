@@ -6,10 +6,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
@@ -159,9 +159,9 @@ fn build_app_with_ip(db: sfgw_db::Db, addr: std::net::SocketAddr) -> Router {
 // that mirror the real ones for HTTP-level testing.
 // ---------------------------------------------------------------------------
 
+use axum::Json;
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
-use axum::Json;
 
 // Thin handler wrappers that replicate the behaviour of the private handlers
 // in sfgw_api::lib. These call the same public auth/e2ee functions.
@@ -209,7 +209,9 @@ async fn proxy_setup(
     {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "password must contain at least one uppercase letter, one lowercase letter, and one digit" })),
+            Json(
+                json!({ "error": "password must contain at least one uppercase letter, one lowercase letter, and one digit" }),
+            ),
         );
     }
     let hash = sfgw_api::auth::hash_password(&body.password).unwrap();
@@ -252,34 +254,33 @@ async fn proxy_login(
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
     // Extract credentials
-    let (username, password, negotiate_key) = if let (Some(nid), Some(ct), Some(iv)) =
-        (&body.negotiate_id, &body.ciphertext, &body.iv)
-    {
-        let neg_key = match sfgw_api::e2ee::take_negotiate_key(&negotiate_store, nid).await {
-            Ok(k) => k,
-            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))),
+    let (username, password, negotiate_key) =
+        if let (Some(nid), Some(ct), Some(iv)) = (&body.negotiate_id, &body.ciphertext, &body.iv) {
+            let neg_key = match sfgw_api::e2ee::take_negotiate_key(&negotiate_store, nid).await {
+                Ok(k) => k,
+                Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))),
+            };
+            let ct_bytes = B64.decode(ct).unwrap();
+            let iv_bytes = B64.decode(iv).unwrap();
+            let plaintext = match sfgw_api::e2ee::decrypt(&neg_key, &ct_bytes, &iv_bytes) {
+                Ok(pt) => pt,
+                Err(_) => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({ "error": "decryption failed" })),
+                    );
+                }
+            };
+            let creds: E2eeCredentials = serde_json::from_slice(&plaintext).unwrap();
+            (creds.username, creds.password, Some(neg_key))
+        } else if let (Some(u), Some(p)) = (body.username, body.password) {
+            (u, p, None)
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "provide credentials" })),
+            );
         };
-        let ct_bytes = B64.decode(ct).unwrap();
-        let iv_bytes = B64.decode(iv).unwrap();
-        let plaintext = match sfgw_api::e2ee::decrypt(&neg_key, &ct_bytes, &iv_bytes) {
-            Ok(pt) => pt,
-            Err(_) => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({ "error": "decryption failed" })),
-                )
-            }
-        };
-        let creds: E2eeCredentials = serde_json::from_slice(&plaintext).unwrap();
-        (creds.username, creds.password, Some(neg_key))
-    } else if let (Some(u), Some(p)) = (body.username, body.password) {
-        (u, p, None)
-    } else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "provide credentials" })),
-        );
-    };
 
     // Verify
     let (user, password_hash) = match sfgw_api::auth::get_user_by_username(&db, &username).await {
@@ -288,7 +289,7 @@ async fn proxy_login(
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "invalid credentials" })),
-            )
+            );
         }
     };
     match sfgw_api::auth::verify_password(&password, &password_hash) {
@@ -297,7 +298,7 @@ async fn proxy_login(
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "invalid credentials" })),
-            )
+            );
         }
     }
 
@@ -309,9 +310,7 @@ async fn proxy_login(
         .as_ref()
         .and_then(|_| sfgw_api::e2ee::generate_envelope_key().ok());
 
-    match sfgw_api::auth::create_session(&db, user.id, &client_ip, &fingerprint, "")
-        .await
-    {
+    match sfgw_api::auth::create_session(&db, user.id, &client_ip, &fingerprint, "").await {
         Ok((token, expires_at)) => {
             let mut response = json!({
                 "token": token,
@@ -354,15 +353,14 @@ async fn proxy_session(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "invalid base64" })),
-            )
+            );
         }
     };
 
-    let neg_result =
-        match sfgw_api::e2ee::negotiate(&negotiate_store, &client_pub, None).await {
-            Ok(r) => r,
-            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))),
-        };
+    let neg_result = match sfgw_api::e2ee::negotiate(&negotiate_store, &client_pub, None).await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))),
+    };
 
     let negotiate_id = neg_result.negotiate_id;
 
@@ -412,9 +410,7 @@ async fn proxy_session(
     (StatusCode::OK, Json(response))
 }
 
-async fn proxy_status(
-    _auth: sfgw_api::middleware::AuthUser,
-) -> impl IntoResponse {
+async fn proxy_status(_auth: sfgw_api::middleware::AuthUser) -> impl IntoResponse {
     Json(json!({ "status": "ok" }))
 }
 
@@ -422,15 +418,8 @@ async fn proxy_status(
 // Helper: send a request through the router
 // ---------------------------------------------------------------------------
 
-async fn send(
-    app: &Router,
-    req: Request<Body>,
-) -> (StatusCode, Value) {
-    let resp = app
-        .clone()
-        .oneshot(req)
-        .await
-        .expect("request failed");
+async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Value) {
+    let resp = app.clone().oneshot(req).await.expect("request failed");
     let status = resp.status();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap_or(json!(null));
@@ -463,10 +452,7 @@ fn get_with_token(uri: &str, token: Option<&str>) -> Request<Body> {
 }
 
 /// Create an admin user through the setup endpoint and return the app + db.
-async fn setup_admin(
-    username: &str,
-    password: &str,
-) -> (Router, sfgw_db::Db, NamedTempFile) {
+async fn setup_admin(username: &str, password: &str) -> (Router, sfgw_db::Db, NamedTempFile) {
     let (db, tmp) = fresh_db().await;
     let app = build_app(db.clone());
     let (status, _) = send(
@@ -536,7 +522,12 @@ async fn test_setup_rejects_when_users_exist() {
     .await;
 
     assert_eq!(status, StatusCode::CONFLICT);
-    assert!(body["error"].as_str().unwrap().contains("already completed"));
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("already completed")
+    );
 }
 
 #[tokio::test]
@@ -774,10 +765,12 @@ async fn test_setup_rejects_short_password() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"]
-        .as_str()
-        .unwrap()
-        .contains("at least 12 characters"));
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("at least 12 characters")
+    );
 }
 
 #[tokio::test]
@@ -819,9 +812,7 @@ async fn test_login_nonexistent_user() {
 // ===========================================================================
 
 /// Helper: negotiate and derive AES key from X25519 ECDH.
-async fn negotiate_and_derive_key(
-    app: &Router,
-) -> (String, [u8; 32], x25519_dalek::StaticSecret) {
+async fn negotiate_and_derive_key(app: &Router) -> (String, [u8; 32], x25519_dalek::StaticSecret) {
     let client_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
     let client_public = x25519_dalek::PublicKey::from(&client_secret);
     let client_pub_b64 = B64.encode(client_public.as_bytes());
@@ -895,7 +886,12 @@ async fn test_e2ee_login_tampered_ciphertext_rejected() {
     .await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert!(body["error"].as_str().unwrap().contains("decryption failed"));
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("decryption failed")
+    );
 }
 
 #[tokio::test]
@@ -927,7 +923,12 @@ async fn test_e2ee_login_tampered_iv_rejected() {
     .await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert!(body["error"].as_str().unwrap().contains("decryption failed"));
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("decryption failed")
+    );
 }
 
 #[tokio::test]
@@ -975,10 +976,12 @@ async fn test_e2ee_negotiate_id_replay_rejected() {
     .await;
 
     assert_eq!(status2, StatusCode::BAD_REQUEST);
-    assert!(body2["error"]
-        .as_str()
-        .unwrap()
-        .contains("not found or expired"));
+    assert!(
+        body2["error"]
+            .as_str()
+            .unwrap()
+            .contains("not found or expired")
+    );
 }
 
 #[tokio::test]
@@ -1009,7 +1012,12 @@ async fn test_e2ee_wrong_key_decryption_fails() {
     .await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert!(body["error"].as_str().unwrap().contains("decryption failed"));
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("decryption failed")
+    );
 }
 
 #[tokio::test]
@@ -1053,11 +1061,7 @@ async fn test_protected_route_401_with_expired_token() {
         ).unwrap();
     }
 
-    let (status, body) = send(
-        &app,
-        get_with_token("/api/v1/status", Some(expired_token)),
-    )
-    .await;
+    let (status, body) = send(&app, get_with_token("/api/v1/status", Some(expired_token))).await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(body["error"].as_str().is_some());

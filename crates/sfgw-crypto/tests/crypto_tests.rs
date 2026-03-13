@@ -5,7 +5,7 @@
 //! Tests cover SecureBox encrypt/decrypt, secure_eq constant-time comparison,
 //! and secure_random CSPRNG output.
 
-use sfgw_crypto::secure_mem::{secure_eq, secure_random, SecureBox};
+use sfgw_crypto::secure_mem::{SecureBox, secure_eq, secure_random};
 
 // ---------------------------------------------------------------------------
 // SecureBox: encrypt / decrypt roundtrip

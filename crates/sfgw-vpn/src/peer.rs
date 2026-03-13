@@ -6,14 +6,12 @@
 //! The private key is stored encrypted in the DB and is only revealed
 //! when generating a downloadable client config.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tracing::info;
 use zeroize::Zeroize;
 
 use crate::db::{self, PeerRow};
-use crate::{
-    CreatePeerRequest, RoutingMode, TunnelConfig, VpnPeer, WgPeer,
-};
+use crate::{CreatePeerRequest, RoutingMode, TunnelConfig, VpnPeer, WgPeer};
 
 /// Add a new peer to a tunnel. Generates a unique keypair and preshared key.
 ///
@@ -60,7 +58,12 @@ pub async fn add_peer(
     };
 
     // Build allowed IPs based on routing mode
-    let allowed_ips = build_allowed_ips(&request.routing_mode, &request.allowed_ips, &address, address_v6.as_deref());
+    let allowed_ips = build_allowed_ips(
+        &request.routing_mode,
+        &request.allowed_ips,
+        &address,
+        address_v6.as_deref(),
+    );
 
     let allowed_ips_json = serde_json::to_string(&allowed_ips)?;
     let routing_mode_str = request.routing_mode.to_string();
@@ -97,11 +100,7 @@ pub async fn add_peer(
 }
 
 /// Remove a peer from a tunnel.
-pub async fn remove_peer(
-    db_handle: &sfgw_db::Db,
-    tunnel_id: i64,
-    peer_id: i64,
-) -> Result<()> {
+pub async fn remove_peer(db_handle: &sfgw_db::Db, tunnel_id: i64, peer_id: i64) -> Result<()> {
     // Verify the peer belongs to this tunnel
     let _peer = db::get_peer(db_handle, tunnel_id, peer_id)
         .await?
@@ -149,15 +148,12 @@ pub async fn generate_client_config(
         .context("peer not found")?;
 
     let routing_mode = RoutingMode::from_str_lossy(&peer_row.routing_mode);
-    let allowed_ips: Vec<String> = serde_json::from_str(&peer_row.allowed_ips_json)
-        .unwrap_or_default();
+    let allowed_ips: Vec<String> =
+        serde_json::from_str(&peer_row.allowed_ips_json).unwrap_or_default();
 
     // Build the client's allowed IPs (what traffic goes through the VPN)
     let client_allowed_ips = match routing_mode {
-        RoutingMode::Full => vec![
-            "0.0.0.0/0".to_string(),
-            "::/0".to_string(),
-        ],
+        RoutingMode::Full => vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
         RoutingMode::Split => {
             if allowed_ips.is_empty() {
                 // Default: route the tunnel subnet
@@ -178,10 +174,7 @@ pub async fn generate_client_config(
         peer_address = format!("{}, {}", peer_address, v6);
     }
 
-    let dns = peer_row
-        .dns
-        .as_deref()
-        .or(tunnel_config.dns.as_deref());
+    let dns = peer_row.dns.as_deref().or(tunnel_config.dns.as_deref());
 
     let config = crate::config::generate_peer_config(
         &peer_row.private_key_enc,
@@ -200,8 +193,7 @@ pub async fn generate_client_config(
 
 /// Convert a PeerRow to the WgPeer format used for applying to the WireGuard interface.
 pub fn peer_row_to_wg_peer(row: &PeerRow) -> WgPeer {
-    let allowed_ips: Vec<String> = serde_json::from_str(&row.allowed_ips_json)
-        .unwrap_or_default();
+    let allowed_ips: Vec<String> = serde_json::from_str(&row.allowed_ips_json).unwrap_or_default();
 
     // Server-side allowed IPs: the peer's assigned address(es)
     let mut server_allowed_ips = vec![ensure_host_cidr(&row.address)];
@@ -230,8 +222,7 @@ pub fn peer_row_to_wg_peer(row: &PeerRow) -> WgPeer {
 
 /// Convert a DB row to a VpnPeer (no private key).
 fn peer_from_row(row: &PeerRow) -> VpnPeer {
-    let allowed_ips: Vec<String> = serde_json::from_str(&row.allowed_ips_json)
-        .unwrap_or_default();
+    let allowed_ips: Vec<String> = serde_json::from_str(&row.allowed_ips_json).unwrap_or_default();
 
     VpnPeer {
         id: row.id,
@@ -305,7 +296,11 @@ async fn auto_assign_address(
 
     // Calculate subnet range from IP and prefix
     let ip_u32 = u32::from(ip);
-    let mask = if prefix >= 32 { u32::MAX } else { u32::MAX << (32 - prefix) };
+    let mask = if prefix >= 32 {
+        u32::MAX
+    } else {
+        u32::MAX << (32 - prefix)
+    };
     let network_addr = ip_u32 & mask;
     let broadcast_addr = network_addr | !mask;
 
@@ -332,9 +327,9 @@ async fn auto_assign_address_v6(
     tunnel_id: i64,
     tunnel_address_v6: &str,
 ) -> Result<String> {
-    let (ip_str, prefix_str) = tunnel_address_v6
-        .split_once('/')
-        .ok_or_else(|| anyhow::anyhow!("tunnel IPv6 address missing prefix: {tunnel_address_v6}"))?;
+    let (ip_str, prefix_str) = tunnel_address_v6.split_once('/').ok_or_else(|| {
+        anyhow::anyhow!("tunnel IPv6 address missing prefix: {tunnel_address_v6}")
+    })?;
 
     let ip: std::net::Ipv6Addr = ip_str
         .parse()
@@ -358,7 +353,10 @@ async fn auto_assign_address_v6(
         }
     }
 
-    bail!("no available IPv6 addresses in subnet {}", tunnel_address_v6);
+    bail!(
+        "no available IPv6 addresses in subnet {}",
+        tunnel_address_v6
+    );
 }
 
 /// Build the allowed IPs list based on routing mode.
@@ -405,12 +403,7 @@ mod tests {
 
     #[test]
     fn test_build_allowed_ips_full() {
-        let ips = build_allowed_ips(
-            &RoutingMode::Full,
-            &[],
-            "10.0.0.2/32",
-            Some("fd00::2/128"),
-        );
+        let ips = build_allowed_ips(&RoutingMode::Full, &[], "10.0.0.2/32", Some("fd00::2/128"));
         assert_eq!(ips, vec!["0.0.0.0/0", "::/0"]);
     }
 
@@ -422,10 +415,7 @@ mod tests {
             "10.0.0.2/32",
             Some("fd00::2/128"),
         );
-        assert_eq!(
-            ips,
-            vec!["10.0.0.2/32", "fd00::2/128", "192.168.1.0/24"]
-        );
+        assert_eq!(ips, vec!["10.0.0.2/32", "fd00::2/128", "192.168.1.0/24"]);
     }
 
     #[test]

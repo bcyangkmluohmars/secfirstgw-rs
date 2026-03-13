@@ -98,10 +98,7 @@ pub async fn rate_limit_middleware(
             }));
             (
                 StatusCode::TOO_MANY_REQUESTS,
-                [(
-                    axum::http::header::RETRY_AFTER,
-                    retry_after.to_string(),
-                )],
+                [(axum::http::header::RETRY_AFTER, retry_after.to_string())],
                 body,
             )
                 .into_response()

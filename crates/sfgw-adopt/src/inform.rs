@@ -11,10 +11,10 @@
 //! `sequence_number <= current`.  This prevents config replay attacks and
 //! firmware downgrades.
 
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use chrono::Utc;
-use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+use ring::aead::{self, AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 use sfgw_db::Db;
@@ -205,7 +205,10 @@ pub async fn handle_inform(
 /// Uses AES-256-GCM. Returns base64-encoded `nonce || ciphertext || tag`.
 pub fn encrypt_response(response: &InformResponse, symmetric_key: &[u8]) -> Result<String> {
     if symmetric_key.len() != 32 {
-        bail!("symmetric key must be 32 bytes, got {}", symmetric_key.len());
+        bail!(
+            "symmetric key must be 32 bytes, got {}",
+            symmetric_key.len()
+        );
     }
     let json = serde_json::to_vec(response)?;
     let encrypted = aes_256_gcm_encrypt(symmetric_key, &json)?;
@@ -217,7 +220,10 @@ pub fn encrypt_response(response: &InformResponse, symmetric_key: &[u8]) -> Resu
 /// Expects base64-encoded `nonce || ciphertext || tag`.
 pub fn decrypt_payload(ciphertext_b64: &str, symmetric_key: &[u8]) -> Result<InformPayload> {
     if symmetric_key.len() != 32 {
-        bail!("symmetric key must be 32 bytes, got {}", symmetric_key.len());
+        bail!(
+            "symmetric key must be 32 bytes, got {}",
+            symmetric_key.len()
+        );
     }
     let ciphertext = B64
         .decode(ciphertext_b64)
@@ -331,9 +337,7 @@ pub async fn register_firmware(
 /// Falls back to lexicographic comparison if parsing fails.
 pub fn is_newer_version(candidate: &str, current: &str) -> bool {
     let parse = |v: &str| -> Option<Vec<u64>> {
-        v.split('.')
-            .map(|part| part.parse::<u64>().ok())
-            .collect()
+        v.split('.').map(|part| part.parse::<u64>().ok()).collect()
     };
 
     match (parse(candidate), parse(current)) {

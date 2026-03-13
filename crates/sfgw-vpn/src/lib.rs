@@ -144,9 +144,9 @@ impl IpsecAuthMethod {
             "certificate" | "cert" => Ok(Self::Certificate),
             "psk" => Ok(Self::Psk),
             "eap-mschapv2" | "eap_mschapv2" | "eapmschapv2" => Ok(Self::EapMschapv2),
-            other => Err(VpnError::InvalidIpsecConfig(
-                format!("unknown auth method: {other}"),
-            )),
+            other => Err(VpnError::InvalidIpsecConfig(format!(
+                "unknown auth method: {other}"
+            ))),
         }
     }
 }
@@ -176,9 +176,9 @@ impl IpsecMode {
         match s.to_lowercase().replace('_', "-").as_str() {
             "roadwarrior" | "road-warrior" => Ok(Self::RoadWarrior),
             "site-to-site" | "sitetosite" | "s2s" => Ok(Self::SiteToSite),
-            other => Err(VpnError::InvalidIpsecConfig(
-                format!("unknown IPsec mode: {other}"),
-            )),
+            other => Err(VpnError::InvalidIpsecConfig(format!(
+                "unknown IPsec mode: {other}"
+            ))),
         }
     }
 }
@@ -514,8 +514,14 @@ pub struct PeerStatus {
 pub async fn start(db: &sfgw_db::Db) -> Result<(), VpnError> {
     let tunnels = tunnel::list_tunnels(db).await?;
     let enabled_count = tunnels.iter().filter(|t| t.enabled).count();
-    let wg_count = tunnels.iter().filter(|t| t.tunnel_type == TunnelType::WireGuard).count();
-    let ipsec_count = tunnels.iter().filter(|t| t.tunnel_type == TunnelType::IPsec).count();
+    let wg_count = tunnels
+        .iter()
+        .filter(|t| t.tunnel_type == TunnelType::WireGuard)
+        .count();
+    let ipsec_count = tunnels
+        .iter()
+        .filter(|t| t.tunnel_type == TunnelType::IPsec)
+        .count();
 
     tracing::info!(
         total = tunnels.len(),

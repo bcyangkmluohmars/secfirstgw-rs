@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tracing::{info, warn};
 
 use crate::{
@@ -56,11 +56,7 @@ const DEFAULT_REKEY_TIME: &str = "14400";
 ///
 /// Returns the config file content as a string. The caller is responsible
 /// for writing it to the filesystem.
-#[must_use]
-pub fn generate_swanctl_config(
-    name: &str,
-    config: &IpsecDbConfig,
-) -> Result<String, VpnError> {
+pub fn generate_swanctl_config(name: &str, config: &IpsecDbConfig) -> Result<String, VpnError> {
     validate_swanctl_name(name)?;
     validate_swanctl_value(&config.local_id)?;
 
@@ -78,10 +74,10 @@ pub fn generate_swanctl_config(
 
     out.push_str("connections {\n");
     out.push_str(&format!("    sfgw-{name} {{\n"));
-    out.push_str(&format!("        version = 2\n"));
+    out.push_str("        version = 2\n");
     out.push_str(&format!("        proposals = {IKE_PROPOSALS}\n"));
     out.push_str(&format!("        rekey_time = {DEFAULT_REKEY_TIME}\n"));
-    out.push_str(&format!("        dpd_delay = 30\n"));
+    out.push_str("        dpd_delay = 30\n");
 
     // Local address binding
     let local_addrs = config.local_addrs.as_deref().unwrap_or("%any");
@@ -137,10 +133,14 @@ pub fn generate_swanctl_config(
     out.push_str("        }\n");
 
     // Children (IPsec SA / traffic selectors)
-    out.push_str(&format!("        children {{\n"));
+    out.push_str("        children {\n");
     out.push_str(&format!("            {name} {{\n"));
-    out.push_str(&format!("                esp_proposals = {ESP_PROPOSALS}\n"));
-    out.push_str(&format!("                rekey_time = {DEFAULT_REKEY_TIME}\n"));
+    out.push_str(&format!(
+        "                esp_proposals = {ESP_PROPOSALS}\n"
+    ));
+    out.push_str(&format!(
+        "                rekey_time = {DEFAULT_REKEY_TIME}\n"
+    ));
 
     // Traffic selectors
     match mode {
@@ -178,9 +178,7 @@ pub fn generate_swanctl_config(
     out.push_str("}\n");
 
     // Pools section (roadwarrior only)
-    if mode == IpsecMode::RoadWarrior
-        && (config.pool_v4.is_some() || config.pool_v6.is_some())
-    {
+    if mode == IpsecMode::RoadWarrior && (config.pool_v4.is_some() || config.pool_v6.is_some()) {
         out.push_str("\npools {\n");
         if let Some(ref pool_v4) = config.pool_v4 {
             validate_swanctl_value(pool_v4)?;
@@ -210,10 +208,7 @@ pub fn generate_swanctl_config(
         // PSK references a file rather than inlining — prevents config injection
         // and keeps secrets out of the config text.
         let psk_path = psk_file_path(name);
-        out.push_str(&format!(
-            "        file = {}\n",
-            psk_path.display()
-        ));
+        out.push_str(&format!("        file = {}\n", psk_path.display()));
         out.push_str("    }\n");
         out.push_str("}\n");
     }
@@ -256,12 +251,10 @@ pub async fn create_ipsec_tunnel(
     }
 
     // Validate no shell metacharacters in all string inputs
-    validate_swanctl_name(name)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    validate_swanctl_name(name).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if let Some(ref id) = request.local_id {
-        validate_swanctl_value(id)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        validate_swanctl_value(id).map_err(|e| anyhow::anyhow!("{e}"))?;
     }
 
     // Validate pools if roadwarrior
@@ -315,12 +308,11 @@ pub async fn create_ipsec_tunnel(
         zone: request.zone.clone(),
     };
 
-    let config_json = serde_json::to_string(&db_config)
-        .context("failed to serialize IPsec config")?;
+    let config_json =
+        serde_json::to_string(&db_config).context("failed to serialize IPsec config")?;
 
     // Validate that the config generates valid swanctl output before persisting
-    generate_swanctl_config(name, &db_config)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    generate_swanctl_config(name, &db_config).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let id = crate::db::insert_tunnel(db, name, "ipsec", &config_json).await?;
 
@@ -358,21 +350,22 @@ pub async fn start_ipsec_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()> 
         bail!("tunnel '{}' is already running", row.name);
     }
 
-    let db_config: IpsecDbConfig = serde_json::from_str(&row.config)
-        .context("corrupt IPsec config in DB")?;
+    let db_config: IpsecDbConfig =
+        serde_json::from_str(&row.config).context("corrupt IPsec config in DB")?;
 
     // Ensure config file is written
     write_swanctl_config(&row.name, &db_config).await?;
 
     // Load all swanctl configs
-    run_swanctl(&["--load-all"]).await
+    run_swanctl(&["--load-all"])
+        .await
         .context("swanctl --load-all failed")?;
 
     // For site-to-site, initiate the connection
-    let mode = IpsecMode::parse(&db_config.mode)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mode = IpsecMode::parse(&db_config.mode).map_err(|e| anyhow::anyhow!("{e}"))?;
     if mode == IpsecMode::SiteToSite {
-        run_swanctl(&["--initiate", "--child", &row.name]).await
+        run_swanctl(&["--initiate", "--child", &row.name])
+            .await
             .context("swanctl --initiate failed")?;
     }
 
@@ -404,10 +397,13 @@ pub async fn delete_ipsec_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()>
         .context("tunnel not found")?;
 
     // Best-effort stop
-    if row.enabled != 0 {
-        if let Err(e) = stop_ipsec_tunnel(db, tunnel_id).await {
-            warn!(tunnel = row.name.as_str(), "failed to stop IPsec tunnel during delete: {e}");
-        }
+    if row.enabled != 0
+        && let Err(e) = stop_ipsec_tunnel(db, tunnel_id).await
+    {
+        warn!(
+            tunnel = row.name.as_str(),
+            "failed to stop IPsec tunnel during delete: {e}"
+        );
     }
 
     // Remove swanctl config file
@@ -425,7 +421,10 @@ pub async fn delete_ipsec_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()>
 
     // Reload swanctl to pick up removal
     if let Err(e) = run_swanctl(&["--load-all"]).await {
-        warn!(tunnel = row.name.as_str(), "swanctl reload after delete: {e}");
+        warn!(
+            tunnel = row.name.as_str(),
+            "swanctl reload after delete: {e}"
+        );
     }
 
     crate::db::delete_tunnel(db, row.id).await?;
@@ -435,8 +434,7 @@ pub async fn delete_ipsec_tunnel(db: &sfgw_db::Db, tunnel_id: i64) -> Result<()>
 
 /// Get IPsec tunnel status by parsing `swanctl --list-sas`.
 pub async fn get_ipsec_status(name: &str) -> Result<IpsecStatus> {
-    validate_swanctl_name(name)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    validate_swanctl_name(name).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let ike_name = format!("sfgw-{name}");
     let output = tokio::process::Command::new("swanctl")
@@ -498,7 +496,8 @@ pub async fn install_server_cert(
     write_file_restricted(&key_path, server_key_pem.as_bytes(), 0o600).await?;
 
     // Reload credentials
-    run_swanctl(&["--load-creds"]).await
+    run_swanctl(&["--load-creds"])
+        .await
         .context("failed to reload strongSwan credentials")?;
 
     info!("installed server certificate for IPsec");
@@ -560,11 +559,13 @@ fn validate_swanctl_value(value: &str) -> Result<(), VpnError> {
         ));
     }
     // Reject characters that could break swanctl.conf syntax or enable injection
-    const FORBIDDEN: &[char] = &['{', '}', '\n', '\r', '#', '"', '\'', '`', '$', '\\', ';', '|', '&'];
+    const FORBIDDEN: &[char] = &[
+        '{', '}', '\n', '\r', '#', '"', '\'', '`', '$', '\\', ';', '|', '&',
+    ];
     if value.chars().any(|c| FORBIDDEN.contains(&c)) {
-        return Err(VpnError::ConfigInjection(format!(
-            "value contains forbidden characters"
-        )));
+        return Err(VpnError::ConfigInjection(
+            "value contains forbidden characters".to_string(),
+        ));
     }
     Ok(())
 }
@@ -599,11 +600,11 @@ fn validate_cidr(cidr: &str) -> Result<()> {
 
 /// Write the swanctl config file to disk.
 async fn write_swanctl_config(name: &str, config: &IpsecDbConfig) -> Result<()> {
-    let content = generate_swanctl_config(name, config)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let content = generate_swanctl_config(name, config).map_err(|e| anyhow::anyhow!("{e}"))?;
     let path = config_file_path(name);
 
-    write_file_restricted(&path, content.as_bytes(), 0o600).await
+    write_file_restricted(&path, content.as_bytes(), 0o600)
+        .await
         .with_context(|| format!("failed to write swanctl config: {}", path.display()))?;
 
     tracing::debug!(path = %path.display(), "wrote swanctl config");
@@ -614,18 +615,21 @@ async fn write_swanctl_config(name: &str, config: &IpsecDbConfig) -> Result<()> 
 async fn write_file_restricted(path: &Path, data: &[u8], mode: u32) -> Result<()> {
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await
+        tokio::fs::create_dir_all(parent)
+            .await
             .with_context(|| format!("failed to create directory: {}", parent.display()))?;
     }
 
-    tokio::fs::write(path, data).await
+    tokio::fs::write(path, data)
+        .await
         .with_context(|| format!("failed to write: {}", path.display()))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(mode);
-        tokio::fs::set_permissions(path, perms).await
+        tokio::fs::set_permissions(path, perms)
+            .await
             .with_context(|| format!("failed to set permissions on: {}", path.display()))?;
     }
 
@@ -692,12 +696,7 @@ fn parse_swanctl_sas(output: &str, name: &str) -> IpsecStatus {
             // Look for child SA info
             // Format: "  name: #1, reqid 1, INSTALLED, TUNNEL, ESP"
             if trimmed.contains("INSTALLED") || trimmed.contains("REKEYING") {
-                let child_name = trimmed
-                    .split(':')
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
+                let child_name = trimmed.split(':').next().unwrap_or("").trim().to_string();
                 let state = if trimmed.contains("INSTALLED") {
                     "installed"
                 } else {
@@ -898,8 +897,14 @@ mod tests {
         assert_eq!(IpsecAuthMethod::Psk.to_string(), "psk");
         assert_eq!(IpsecAuthMethod::EapMschapv2.to_string(), "eap-mschapv2");
 
-        assert_eq!(IpsecAuthMethod::parse("certificate").unwrap(), IpsecAuthMethod::Certificate);
-        assert_eq!(IpsecAuthMethod::parse("cert").unwrap(), IpsecAuthMethod::Certificate);
+        assert_eq!(
+            IpsecAuthMethod::parse("certificate").unwrap(),
+            IpsecAuthMethod::Certificate
+        );
+        assert_eq!(
+            IpsecAuthMethod::parse("cert").unwrap(),
+            IpsecAuthMethod::Certificate
+        );
         assert_eq!(IpsecAuthMethod::parse("psk").unwrap(), IpsecAuthMethod::Psk);
         assert_eq!(
             IpsecAuthMethod::parse("eap-mschapv2").unwrap(),
@@ -913,9 +918,18 @@ mod tests {
         assert_eq!(IpsecMode::RoadWarrior.to_string(), "roadwarrior");
         assert_eq!(IpsecMode::SiteToSite.to_string(), "site-to-site");
 
-        assert_eq!(IpsecMode::parse("roadwarrior").unwrap(), IpsecMode::RoadWarrior);
-        assert_eq!(IpsecMode::parse("road-warrior").unwrap(), IpsecMode::RoadWarrior);
-        assert_eq!(IpsecMode::parse("site-to-site").unwrap(), IpsecMode::SiteToSite);
+        assert_eq!(
+            IpsecMode::parse("roadwarrior").unwrap(),
+            IpsecMode::RoadWarrior
+        );
+        assert_eq!(
+            IpsecMode::parse("road-warrior").unwrap(),
+            IpsecMode::RoadWarrior
+        );
+        assert_eq!(
+            IpsecMode::parse("site-to-site").unwrap(),
+            IpsecMode::SiteToSite
+        );
         assert_eq!(IpsecMode::parse("s2s").unwrap(), IpsecMode::SiteToSite);
         assert!(IpsecMode::parse("invalid").is_err());
     }
@@ -948,7 +962,10 @@ mod tests {
     fn tunnel_type_from_str_lossy() {
         assert_eq!(TunnelType::from_str_lossy("ipsec"), TunnelType::IPsec);
         assert_eq!(TunnelType::from_str_lossy("IPSEC"), TunnelType::IPsec);
-        assert_eq!(TunnelType::from_str_lossy("wireguard"), TunnelType::WireGuard);
+        assert_eq!(
+            TunnelType::from_str_lossy("wireguard"),
+            TunnelType::WireGuard
+        );
         assert_eq!(TunnelType::from_str_lossy("unknown"), TunnelType::WireGuard);
     }
 

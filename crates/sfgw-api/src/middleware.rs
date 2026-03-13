@@ -85,27 +85,26 @@ where
 /// Extract the session token from the request.
 fn extract_token(parts: &Parts) -> Option<String> {
     // Try Authorization: Bearer <token> first
-    if let Some(auth_header) = parts.headers.get(header::AUTHORIZATION) {
-        if let Ok(value) = auth_header.to_str() {
-            if let Some(token) = value.strip_prefix("Bearer ") {
-                let token = token.trim();
-                if !token.is_empty() {
-                    return Some(token.to_string());
-                }
-            }
+    if let Some(auth_header) = parts.headers.get(header::AUTHORIZATION)
+        && let Ok(value) = auth_header.to_str()
+        && let Some(token) = value.strip_prefix("Bearer ")
+    {
+        let token = token.trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
         }
     }
 
     // Try sfgw_session cookie
-    if let Some(cookie_header) = parts.headers.get(header::COOKIE) {
-        if let Ok(cookies) = cookie_header.to_str() {
-            for cookie in cookies.split(';') {
-                let cookie = cookie.trim();
-                if let Some(value) = cookie.strip_prefix("sfgw_session=") {
-                    let value = value.trim();
-                    if !value.is_empty() {
-                        return Some(value.to_string());
-                    }
+    if let Some(cookie_header) = parts.headers.get(header::COOKIE)
+        && let Ok(cookies) = cookie_header.to_str()
+    {
+        for cookie in cookies.split(';') {
+            let cookie = cookie.trim();
+            if let Some(value) = cookie.strip_prefix("sfgw_session=") {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
                 }
             }
         }
@@ -119,7 +118,10 @@ fn extract_token(parts: &Parts) -> Option<String> {
 /// Always uses the socket peer address (ConnectInfo). Never trusts
 /// X-Forwarded-For or other proxy headers — they are attacker-controlled.
 fn extract_client_ip(parts: &Parts) -> String {
-    if let Some(addr) = parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>() {
+    if let Some(addr) = parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+    {
         return addr.0.ip().to_string();
     }
 

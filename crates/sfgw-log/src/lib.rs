@@ -39,10 +39,10 @@ pub enum LogError {
 
 /// Convenience alias for results from this crate.
 type Result<T> = std::result::Result<T, LogError>;
-use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use chrono::{NaiveDate, Utc};
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use ring::hkdf;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
@@ -124,7 +124,8 @@ impl LogManager {
         let master_key_box = ensure_master_key(db).await?;
 
         let today = Utc::now().date_naive();
-        let mut master_key_plain = master_key_box.open()
+        let mut master_key_plain = master_key_box
+            .open()
             .context("failed to decrypt master key from SecureBox")?;
         let day_key = ensure_day_key(db, &master_key_plain, today).await?;
         master_key_plain.zeroize();
@@ -203,7 +204,8 @@ impl LogManager {
         }
 
         let master_key_box = load_master_key(&self.db).await?;
-        let mut master_key_plain = master_key_box.open()
+        let mut master_key_plain = master_key_box
+            .open()
             .context("failed to decrypt master key from SecureBox")?;
         let day_key = ensure_day_key(&self.db, &master_key_plain, today).await?;
         master_key_plain.zeroize();
@@ -221,8 +223,11 @@ impl LogManager {
     pub async fn delete_day_key(&self, date: NaiveDate) -> Result<()> {
         let key_name = meta_day_key_name(date);
         let conn = self.db.lock().await;
-        conn.execute("DELETE FROM meta WHERE key = ?1", rusqlite::params![key_name])
-            .context("failed to delete day key")?;
+        conn.execute(
+            "DELETE FROM meta WHERE key = ?1",
+            rusqlite::params![key_name],
+        )
+        .context("failed to delete day key")?;
         tracing::info!("deleted day-key for {date} (forward secrecy)");
         Ok(())
     }
@@ -241,9 +246,7 @@ impl LogManager {
                 rusqlite::params![key_name],
                 |row| row.get(0),
             )
-            .with_context(|| {
-                format!("day-key for {date} not found (deleted or never created)")
-            })?;
+            .with_context(|| format!("day-key for {date} not found (deleted or never created)"))?;
         drop(conn);
 
         let mut key_bytes = B64.decode(&raw).context("invalid base64 in day key")?;
@@ -377,7 +380,7 @@ async fn ensure_day_key(
     let key_bytes = derive_day_key_bytes(master_key, date)?;
 
     // Store.
-    let encoded = B64.encode(&key_bytes);
+    let encoded = B64.encode(key_bytes);
     {
         let conn = db.lock().await;
         conn.execute(
@@ -429,7 +432,10 @@ fn encrypt(key: &LessSafeKey, plaintext: &[u8]) -> Result<([u8; 12], Vec<u8>)> {
 /// Decrypt `ciphertext_with_tag` using `key` and `nonce_bytes`.
 fn decrypt(key: &LessSafeKey, nonce_bytes: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
     if nonce_bytes.len() != 12 {
-        return Err(LogError::CryptoFailed(format!("invalid nonce length: expected 12, got {}", nonce_bytes.len())));
+        return Err(LogError::CryptoFailed(format!(
+            "invalid nonce length: expected 12, got {}",
+            nonce_bytes.len()
+        )));
     }
 
     let mut nonce_arr = [0u8; 12];
@@ -439,7 +445,11 @@ fn decrypt(key: &LessSafeKey, nonce_bytes: &[u8], ciphertext: &[u8]) -> Result<V
     let mut in_out = ciphertext.to_vec();
     let plaintext = key
         .open_in_place(nonce, Aad::empty(), &mut in_out)
-        .map_err(|_| LogError::CryptoFailed("AES-GCM decryption failed (wrong key or tampered data)".to_string()))?;
+        .map_err(|_| {
+            LogError::CryptoFailed(
+                "AES-GCM decryption failed (wrong key or tampered data)".to_string(),
+            )
+        })?;
 
     Ok(plaintext.to_vec())
 }
@@ -505,8 +515,12 @@ mod tests {
 
     #[test]
     fn decrypt_with_wrong_key_fails() {
-        let key_bytes_a = derive_day_key_bytes(&[0x01u8; 32], NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()).unwrap();
-        let key_bytes_b = derive_day_key_bytes(&[0x02u8; 32], NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()).unwrap();
+        let key_bytes_a =
+            derive_day_key_bytes(&[0x01u8; 32], NaiveDate::from_ymd_opt(2025, 1, 1).unwrap())
+                .unwrap();
+        let key_bytes_b =
+            derive_day_key_bytes(&[0x02u8; 32], NaiveDate::from_ymd_opt(2025, 1, 1).unwrap())
+                .unwrap();
 
         let key_a = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key_bytes_a).unwrap());
         let key_b = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key_bytes_b).unwrap());
@@ -520,8 +534,12 @@ mod tests {
         let db = test_db().await;
         let mgr = LogManager::init(&db).await.unwrap();
 
-        mgr.write_log("INFO", "test_mod", "hello world").await.unwrap();
-        mgr.write_log("ERROR", "test_mod", "something broke").await.unwrap();
+        mgr.write_log("INFO", "test_mod", "hello world")
+            .await
+            .unwrap();
+        mgr.write_log("ERROR", "test_mod", "something broke")
+            .await
+            .unwrap();
 
         let today = Utc::now().date_naive();
         let entries = mgr.read_logs(today).await.unwrap();
@@ -535,7 +553,9 @@ mod tests {
         let db = test_db().await;
         let mgr = LogManager::init(&db).await.unwrap();
 
-        mgr.write_log("INFO", "fs_test", "will be unreadable").await.unwrap();
+        mgr.write_log("INFO", "fs_test", "will be unreadable")
+            .await
+            .unwrap();
 
         let today = Utc::now().date_naive();
 
@@ -557,7 +577,9 @@ mod tests {
         let db = test_db().await;
         let mgr = LogManager::init(&db).await.unwrap();
 
-        mgr.write_log("INFO", "export_test", "exported entry").await.unwrap();
+        mgr.write_log("INFO", "export_test", "exported entry")
+            .await
+            .unwrap();
 
         let today = Utc::now().date_naive();
         let exported = mgr.export_logs(today).await.unwrap();

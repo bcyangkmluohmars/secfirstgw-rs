@@ -53,6 +53,12 @@ pub struct VlanMonitor {
     vlan_config: VlanConfig,
 }
 
+impl Default for VlanMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VlanMonitor {
     pub fn new() -> Self {
         Self {
@@ -74,11 +80,7 @@ impl VlanMonitor {
     }
 
     /// Check raw ethernet frame for VLAN anomalies.
-    pub fn process_frame(
-        &mut self,
-        frame: &[u8],
-        interface: &str,
-    ) -> Result<Option<IdsEvent>> {
+    pub fn process_frame(&mut self, frame: &[u8], interface: &str) -> Result<Option<IdsEvent>> {
         if frame.len() < ETH_HEADER_LEN {
             return Ok(None);
         }
@@ -169,25 +171,25 @@ impl VlanMonitor {
             }
 
             // --- Detection 4: Unexpected VLAN on access port ---
-            if let Some(allowed) = self.port_vlan_map.get(interface) {
-                if !allowed.contains(&outer_vlan) {
-                    return Ok(Some(IdsEvent {
-                        timestamp: now,
-                        severity: Severity::Warning,
-                        detector: "vlan",
-                        source_mac: Some(format_mac(&src_mac)),
-                        source_ip: None,
-                        interface: interface.to_string(),
-                        vlan: Some(outer_vlan),
-                        description: format!(
-                            "Unexpected VLAN: {} sent frame with VLAN {} on {} (allowed: {:?})",
-                            format_mac(&src_mac),
-                            outer_vlan,
-                            interface,
-                            allowed
-                        ),
-                    }));
-                }
+            if let Some(allowed) = self.port_vlan_map.get(interface)
+                && !allowed.contains(&outer_vlan)
+            {
+                return Ok(Some(IdsEvent {
+                    timestamp: now,
+                    severity: Severity::Warning,
+                    detector: "vlan",
+                    source_mac: Some(format_mac(&src_mac)),
+                    source_ip: None,
+                    interface: interface.to_string(),
+                    vlan: Some(outer_vlan),
+                    description: format!(
+                        "Unexpected VLAN: {} sent frame with VLAN {} on {} (allowed: {:?})",
+                        format_mac(&src_mac),
+                        outer_vlan,
+                        interface,
+                        allowed
+                    ),
+                }));
             }
 
             // --- Detection 5: MAC on wrong VLAN ---

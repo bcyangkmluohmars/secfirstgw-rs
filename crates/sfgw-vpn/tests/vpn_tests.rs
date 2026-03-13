@@ -141,7 +141,7 @@ async fn test_list_tunnels() {
             dns: None,
             mtu: None,
             zone: "vpn".to_string(),
-        bind_interface: None,
+            bind_interface: None,
         };
         tunnel::create_tunnel(&db, &req).await.unwrap();
     }
@@ -291,7 +291,10 @@ async fn test_add_multiple_peers_unique_keys() {
             dns: None,
         };
         let peer = peer::add_peer(&db, tunnel.id, &req).await.unwrap();
-        assert!(!public_keys.contains(&peer.public_key), "duplicate key generated");
+        assert!(
+            !public_keys.contains(&peer.public_key),
+            "duplicate key generated"
+        );
         public_keys.push(peer.public_key);
     }
 
@@ -413,14 +416,9 @@ async fn test_generate_client_config_split() {
     };
     let peer = peer::add_peer(&db, tunnel.id, &req).await.unwrap();
 
-    let config = peer::generate_client_config(
-        &db,
-        tunnel.id,
-        peer.id,
-        "vpn.example.com:51820",
-    )
-    .await
-    .unwrap();
+    let config = peer::generate_client_config(&db, tunnel.id, peer.id, "vpn.example.com:51820")
+        .await
+        .unwrap();
 
     // Verify the config contains expected fields
     assert!(config.contains("[Interface]"));
@@ -454,14 +452,9 @@ async fn test_generate_client_config_full() {
     };
     let peer = peer::add_peer(&db, tunnel.id, &req).await.unwrap();
 
-    let config = peer::generate_client_config(
-        &db,
-        tunnel.id,
-        peer.id,
-        "1.2.3.4:51820",
-    )
-    .await
-    .unwrap();
+    let config = peer::generate_client_config(&db, tunnel.id, peer.id, "1.2.3.4:51820")
+        .await
+        .unwrap();
 
     // Full tunnel: should have 0.0.0.0/0 and ::/0
     assert!(config.contains("0.0.0.0/0"));
@@ -627,7 +620,10 @@ async fn test_tunnel_zone_assignment() {
     assert_eq!(tunnel.zone, "guest");
 
     // Fetch and verify zone persists
-    let fetched = tunnel::get_tunnel_by_id(&db, tunnel.id).await.unwrap().unwrap();
+    let fetched = tunnel::get_tunnel_by_id(&db, tunnel.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.zone, "guest");
 }
 

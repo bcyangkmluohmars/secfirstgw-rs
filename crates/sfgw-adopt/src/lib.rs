@@ -46,6 +46,21 @@ type Result<T> = std::result::Result<T, AdoptError>;
 // ---------------------------------------------------------------------------
 
 /// Adoption lifecycle state.
+///
+/// Devices progress through: Discovered → Pending → Approved → Adopted.
+/// At any point before Adopted, the admin can Reject.
+///
+/// ```
+/// use sfgw_adopt::AdoptionState;
+///
+/// let state = AdoptionState::Pending;
+/// assert_eq!(state.to_string(), "Pending");
+///
+/// // Roundtrip via JSON
+/// let json = serde_json::to_string(&state).unwrap();
+/// let back: AdoptionState = serde_json::from_str(&json).unwrap();
+/// assert_eq!(back, AdoptionState::Pending);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdoptionState {
     /// Device has broadcast / connected but is not yet recorded.
@@ -143,9 +158,8 @@ pub async fn start(db: &Db) -> Result<ca::GatewayCA> {
 /// List all known devices (any state).
 pub async fn list_devices(db: &Db) -> Result<Vec<DeviceSummary>> {
     let conn = db.lock().await;
-    let mut stmt = conn.prepare(
-        "SELECT id, mac, name, model, ip, adopted, last_seen, config FROM devices",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, mac, name, model, ip, adopted, last_seen, config FROM devices")?;
     let rows = stmt.query_map([], |row| {
         let config_json: String = row.get(7)?;
         Ok((
@@ -205,11 +219,9 @@ pub async fn reject_device(db: &Db, mac: &str) -> Result<()> {
 pub async fn get_device_config(db: &Db, mac: &str) -> Result<serde_json::Value> {
     let conn = db.lock().await;
     let cfg_json: String = conn
-        .query_row(
-            "SELECT config FROM devices WHERE mac = ?1",
-            [mac],
-            |r| r.get(0),
-        )
+        .query_row("SELECT config FROM devices WHERE mac = ?1", [mac], |r| {
+            r.get(0)
+        })
         .context("device not found")?;
     Ok(serde_json::from_str(&cfg_json).context("corrupt device config JSON")?)
 }
@@ -257,7 +269,7 @@ pub async fn push_config(db: &Db, mac: &str, new_config: serde_json::Value) -> R
 
 #[cfg(test)]
 mod tests {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD as B64};
 
     /// ML-KEM-1024 keygen / encaps / decaps roundtrip.
     #[test]
@@ -278,8 +290,8 @@ mod tests {
 
         // Serialise ciphertext (simulates network transit).
         let ct_bytes = ct.into_bytes();
-        let ct2 = ml_kem_1024::CipherText::try_from_bytes(ct_bytes)
-            .expect("deserialise ciphertext");
+        let ct2 =
+            ml_kem_1024::CipherText::try_from_bytes(ct_bytes).expect("deserialise ciphertext");
 
         // Decapsulate
         let ss_dec = dk.try_decaps(&ct2).expect("decapsulation");
@@ -306,8 +318,7 @@ mod tests {
 
         // Deserialise and verify.
         let vk_bytes = vk.into_bytes();
-        let vk2 = ml_dsa_65::PublicKey::try_from_bytes(vk_bytes)
-            .expect("deserialise public key");
+        let vk2 = ml_dsa_65::PublicKey::try_from_bytes(vk_bytes).expect("deserialise public key");
 
         let valid = vk2.verify(message, &sig_bytes, context);
         assert!(valid, "ML-DSA-65 signature must verify");
@@ -381,15 +392,12 @@ mod tests {
         };
 
         let key = [0xABu8; 32];
-        let encrypted = crate::inform::encrypt_response(&response, &key)
-            .expect("encryption");
+        let encrypted = crate::inform::encrypt_response(&response, &key).expect("encryption");
 
         // Decrypt the base64 ciphertext back.
         let ct_bytes = B64.decode(&encrypted).expect("base64 decode");
-        let plaintext = crate::inform::aes_256_gcm_decrypt(&key, &ct_bytes)
-            .expect("decryption");
-        let recovered: InformResponse =
-            serde_json::from_slice(&plaintext).expect("JSON parse");
+        let plaintext = crate::inform::aes_256_gcm_decrypt(&key, &ct_bytes).expect("decryption");
+        let recovered: InformResponse = serde_json::from_slice(&plaintext).expect("JSON parse");
 
         assert_eq!(recovered.sequence_number, 42);
         assert_eq!(recovered.inform_interval_secs, 30);
@@ -408,8 +416,7 @@ mod tests {
         };
 
         let key = [0xCDu8; 32];
-        let encrypted = crate::inform::encrypt_response(&response, &key)
-            .expect("encryption");
+        let encrypted = crate::inform::encrypt_response(&response, &key).expect("encryption");
 
         let mut ct_bytes = B64.decode(&encrypted).expect("base64 decode");
         // Flip a byte in the ciphertext (after the 12-byte nonce).

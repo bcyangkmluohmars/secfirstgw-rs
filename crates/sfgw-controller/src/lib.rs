@@ -211,10 +211,10 @@ fn check_service_via_proc(name: &str) -> Option<ServiceStatus> {
             continue;
         }
         let comm_path = entry.path().join("comm");
-        if let Ok(comm) = std::fs::read_to_string(&comm_path) {
-            if comm.trim() == name {
-                return Some(ServiceStatus::Running);
-            }
+        if let Ok(comm) = std::fs::read_to_string(&comm_path)
+            && comm.trim() == name
+        {
+            return Some(ServiceStatus::Running);
         }
     }
 
@@ -256,7 +256,7 @@ pub fn parse_systemctl_status(output: &str) -> ServiceStatus {
 /// Attempt to restart a managed service via `systemctl restart`.
 pub async fn restart_service(name: &str) -> Result<()> {
     if !MANAGED_SERVICES.contains(&name) {
-        return Err(ControllerError::ServiceNotFound(name.to_owned()).into());
+        return Err(ControllerError::ServiceNotFound(name.to_owned()));
     }
 
     tracing::warn!(service = %name, "restarting service");
@@ -273,8 +273,7 @@ pub async fn restart_service(name: &str) -> Result<()> {
         return Err(ControllerError::RestartFailed {
             name: name.to_owned(),
             reason: stderr.to_string(),
-        }
-        .into());
+        });
     }
 
     tracing::info!(service = %name, "service restarted successfully");

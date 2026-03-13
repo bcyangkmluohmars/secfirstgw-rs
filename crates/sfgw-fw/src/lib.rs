@@ -58,6 +58,19 @@ pub enum FwError {
 /// Network zone classification for firewall rules.
 ///
 /// Core zones: WAN, LAN, DMZ. Others kept for compatibility.
+///
+/// ```
+/// use sfgw_fw::FirewallZone;
+///
+/// let zone = FirewallZone::from_role("wan");
+/// assert_eq!(zone, FirewallZone::Wan);
+/// assert_eq!(zone.to_string(), "wan");
+///
+/// // Unknown roles become Custom
+/// let custom = FirewallZone::from_role("cameras");
+/// assert!(matches!(custom, FirewallZone::Custom(_)));
+/// assert_eq!(custom.to_string(), "cameras");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FirewallZone {
@@ -148,6 +161,18 @@ pub struct WanMember {
 // ── Rule action ─────────────────────────────────────────────────────
 
 /// What to do with a matched packet.
+///
+/// ```
+/// use sfgw_fw::Action;
+///
+/// assert_eq!(Action::Drop.to_string(), "drop");
+/// assert_eq!(Action::Accept.to_string(), "accept");
+/// assert_eq!(Action::Reject.to_string(), "reject");
+///
+/// // JSON serialization uses lowercase
+/// let json = serde_json::to_string(&Action::Accept).unwrap();
+/// assert_eq!(json, r#""accept""#);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
@@ -169,6 +194,18 @@ impl std::fmt::Display for Action {
 // ── Rule detail (stored as JSON in the `rule` column) ───────────────
 
 /// The JSON payload stored in the `rule` column of `firewall_rules`.
+///
+/// ```
+/// use sfgw_fw::{RuleDetail, Action};
+///
+/// // Minimal rule — defaults to "any" for protocol/source/destination
+/// let json = r#"{"action": "accept"}"#;
+/// let rule: RuleDetail = serde_json::from_str(json).unwrap();
+/// assert_eq!(rule.action, Action::Accept);
+/// assert_eq!(rule.protocol, "any");
+/// assert_eq!(rule.source, "any");
+/// assert!(rule.port.is_none());
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuleDetail {
     pub action: Action,
@@ -210,6 +247,18 @@ pub struct FirewallRule {
 // ── Default policy ──────────────────────────────────────────────────
 
 /// Default chain policies — security-first!
+///
+/// Defaults to DROP input, DROP forward, ACCEPT output — the only sane
+/// default for a security gateway.
+///
+/// ```
+/// use sfgw_fw::{FirewallPolicy, Action};
+///
+/// let policy = FirewallPolicy::default();
+/// assert_eq!(policy.default_input, Action::Drop);
+/// assert_eq!(policy.default_forward, Action::Drop);
+/// assert_eq!(policy.default_output, Action::Accept);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FirewallPolicy {
     pub default_input: Action,
@@ -345,7 +394,10 @@ pub async fn update_rule(db: &sfgw_db::Db, rule: &FirewallRule) -> Result<(), Fw
 pub async fn delete_rule(db: &sfgw_db::Db, id: i64) -> Result<(), FwError> {
     let conn = db.lock().await;
     let affected = conn
-        .execute("DELETE FROM firewall_rules WHERE id = ?1", rusqlite::params![id])
+        .execute(
+            "DELETE FROM firewall_rules WHERE id = ?1",
+            rusqlite::params![id],
+        )
         .context("failed to delete firewall rule")?;
     if affected != 1 {
         return Err(FwError::RuleNotFound(id));
@@ -412,10 +464,7 @@ pub async fn load_interface_zones(db: &sfgw_db::Db) -> Result<Vec<ZonePolicy>, F
 
     let rows = stmt
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
         .context("failed to query interfaces")?;
 
@@ -443,9 +492,7 @@ pub async fn load_wan_groups(db: &sfgw_db::Db) -> Result<Vec<WanGroup>, FwError>
         .prepare("SELECT value FROM meta WHERE key = 'wan_groups'")
         .context("failed to prepare meta query for wan_groups")?;
 
-    let result: Option<String> = stmt
-        .query_row([], |row| row.get(0))
-        .ok();
+    let result: Option<String> = stmt.query_row([], |row| row.get(0)).ok();
 
     match result {
         Some(json) => {

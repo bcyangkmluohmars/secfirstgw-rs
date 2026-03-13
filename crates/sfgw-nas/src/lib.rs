@@ -114,7 +114,9 @@ impl ShareProtocol {
             "smb" => Ok(ShareProtocol::Smb),
             "nfs" => Ok(ShareProtocol::Nfs),
             "both" => Ok(ShareProtocol::Both),
-            other => return Err(NasError::Internal(anyhow::anyhow!("unknown share protocol: {other}"))),
+            other => Err(NasError::Internal(anyhow::anyhow!(
+                "unknown share protocol: {other}"
+            ))),
         }
     }
 }
@@ -145,7 +147,9 @@ pub struct NasShare {
 /// Validate a share name: alphanumeric, hyphens, underscores only; 1-64 chars.
 fn validate_share_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 64 {
-        return Err(NasError::InvalidShareName("name must be 1-64 characters".into()).into());
+        return Err(NasError::InvalidShareName(
+            "name must be 1-64 characters".into(),
+        ));
     }
     if !name
         .chars()
@@ -153,8 +157,7 @@ fn validate_share_name(name: &str) -> Result<()> {
     {
         return Err(NasError::InvalidShareName(
             "name may only contain alphanumeric characters, hyphens, and underscores".into(),
-        )
-        .into());
+        ));
     }
     Ok(())
 }
@@ -168,7 +171,7 @@ fn resolve_share_path(name: &str) -> Result<PathBuf> {
     // We check the string prefix since the directory may not exist yet.
     let normalized = share_path.components().collect::<PathBuf>();
     if !normalized.starts_with(base) {
-        return Err(NasError::PathTraversal.into());
+        return Err(NasError::PathTraversal);
     }
 
     Ok(normalized)
@@ -313,7 +316,7 @@ pub async fn delete_share(db: &sfgw_db::Db, name: &str) -> Result<()> {
         rusqlite::params![name],
     )?;
     if rows == 0 {
-        return Err(NasError::ShareNotFound(name.to_string()).into());
+        return Err(NasError::ShareNotFound(name.to_string()));
     }
     tracing::info!(share = name, "NAS share deleted");
     Ok(())
@@ -467,7 +470,9 @@ async fn restart_service(name: &str) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(NasError::Internal(anyhow::anyhow!("systemctl restart {name} failed: {stderr}")));
+        return Err(NasError::Internal(anyhow::anyhow!(
+            "systemctl restart {name} failed: {stderr}"
+        )));
     }
 
     tracing::info!(service = name, "service restarted");
@@ -493,7 +498,7 @@ pub async fn start(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Result<()
 
     if !is_volume_mounted() {
         tracing::warn!("encrypted volume not mounted — NAS services unavailable");
-        return Err(NasError::VolumeNotMounted.into());
+        return Err(NasError::VolumeNotMounted);
     }
 
     migrate(db).await?;

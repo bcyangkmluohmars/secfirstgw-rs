@@ -62,10 +62,30 @@ pub trait Display {
 ///
 /// Stored in the `meta` KV table under key `display_config`, or auto-detected
 /// from hardware via [`auto_detect`].
+///
+/// ```
+/// use sfgw_display::DisplayConfig;
+///
+/// // Default is None (no display)
+/// assert_eq!(DisplayConfig::default(), DisplayConfig::None);
+///
+/// // Deserialize from JSON — missing fields get defaults
+/// let config: DisplayConfig = serde_json::from_str(r#"{"type": "hd44780"}"#).unwrap();
+/// assert_eq!(config, DisplayConfig::Hd44780 {
+///     i2c_device: "/dev/i2c-1".to_string(),
+///     i2c_address: 0x27,
+/// });
+///
+/// // Roundtrip serialization
+/// let json = serde_json::to_string(&DisplayConfig::None).unwrap();
+/// assert_eq!(json, r#"{"type":"none"}"#);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum DisplayConfig {
     /// No display attached or display disabled.
+    #[default]
     None,
 
     /// HD44780-compatible 20x4 character LCD over I2C.
@@ -94,12 +114,6 @@ pub enum DisplayConfig {
     },
 }
 
-impl Default for DisplayConfig {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
 fn default_i2c_path() -> String {
     "/dev/i2c-1".to_string()
 }
@@ -124,6 +138,15 @@ fn default_fb_height() -> u32 {
 /// - Returns `DisplayConfig::None` if neither is found
 ///
 /// On VM/Docker: always returns `DisplayConfig::None`.
+///
+/// ```
+/// use sfgw_display::{auto_detect, DisplayConfig};
+/// use sfgw_hal::Platform;
+///
+/// // VM and Docker never have a display
+/// assert_eq!(auto_detect(&Platform::Vm), DisplayConfig::None);
+/// assert_eq!(auto_detect(&Platform::Docker), DisplayConfig::None);
+/// ```
 #[must_use]
 pub fn auto_detect(platform: &sfgw_hal::Platform) -> DisplayConfig {
     if !platform.has_lcd() {
@@ -157,6 +180,13 @@ pub fn auto_detect(platform: &sfgw_hal::Platform) -> DisplayConfig {
 /// Initialize a display backend from the given configuration.
 ///
 /// Returns `Ok(None)` for `DisplayConfig::None` (no display).
+///
+/// ```
+/// use sfgw_display::{init, DisplayConfig};
+///
+/// let display = init(&DisplayConfig::None).unwrap();
+/// assert!(display.is_none());
+/// ```
 pub fn init(config: &DisplayConfig) -> Result<Option<Box<dyn Display>>, DisplayError> {
     match config {
         DisplayConfig::None => {

@@ -5,7 +5,7 @@
 //! Supports the standard `wg-quick` INI format for import/export
 //! and QR code data generation for mobile peer provisioning.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use zeroize::Zeroize;
 
 use crate::{TunnelConfig, WgPeer};
@@ -51,6 +51,7 @@ pub fn generate_interface_config(config: &TunnelConfig, peers: &[WgPeer]) -> Res
 /// This is what you'd give to the peer device / show as QR code.
 /// `server_public_key` is the tunnel's public key.
 /// `server_endpoint` is the public IP:port of this gateway.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_peer_config(
     peer_private_key: &str,
     peer_address: &str,
@@ -149,8 +150,8 @@ pub fn parse_config(input: &str) -> Result<TunnelConfig> {
         bail!("missing Address in [Interface]");
     }
 
-    let public_key = crate::keys::public_key_from_private(&private_key)
-        .context("invalid PrivateKey")?;
+    let public_key =
+        crate::keys::public_key_from_private(&private_key).context("invalid PrivateKey")?;
 
     let secure_key = crate::keys::wrap_private_key(&private_key)?;
     private_key.zeroize();

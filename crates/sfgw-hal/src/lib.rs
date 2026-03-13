@@ -12,6 +12,18 @@ pub enum HalError {
 }
 
 /// Detected runtime platform.
+///
+/// The platform determines which hardware features are available
+/// (display, HDD, switch ASIC) and how services are configured.
+///
+/// ```
+/// use sfgw_hal::Platform;
+///
+/// let p = Platform::Vm;
+/// assert!(!p.has_display());
+/// assert!(!p.has_hdd());
+/// assert_eq!(p.to_string(), "vm");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     /// Running on Ubiquiti bare-metal hardware (ubnthal.ko present).
@@ -24,6 +36,14 @@ pub enum Platform {
 
 impl Platform {
     /// Returns `true` if the platform may have a display (bare metal only).
+    ///
+    /// ```
+    /// use sfgw_hal::Platform;
+    ///
+    /// assert!(Platform::BareMetal.has_display());
+    /// assert!(!Platform::Vm.has_display());
+    /// assert!(!Platform::Docker.has_display());
+    /// ```
     #[must_use]
     pub fn has_display(&self) -> bool {
         matches!(self, Platform::BareMetal)
@@ -36,6 +56,13 @@ impl Platform {
     }
 
     /// Returns `true` if the platform has an internal HDD bay.
+    ///
+    /// ```
+    /// use sfgw_hal::Platform;
+    ///
+    /// assert!(Platform::BareMetal.has_hdd());
+    /// assert!(!Platform::Vm.has_hdd());
+    /// ```
     #[must_use]
     pub fn has_hdd(&self) -> bool {
         matches!(self, Platform::BareMetal)
@@ -65,6 +92,15 @@ impl fmt::Display for Platform {
 /// 2. Check for `/dev/ubnthal` (ubnthal.ko) -> BareMetal
 /// 3. Check DMI product name for VM signatures -> Vm
 /// 4. Fall back to Vm
+///
+/// ```
+/// let platform = sfgw_hal::init().expect("platform detection failed");
+/// // Always returns one of the three variants
+/// assert!(matches!(
+///     platform,
+///     sfgw_hal::Platform::BareMetal | sfgw_hal::Platform::Vm | sfgw_hal::Platform::Docker
+/// ));
+/// ```
 pub fn init() -> Result<Platform, HalError> {
     // Docker: presence of /.dockerenv
     if std::path::Path::new("/.dockerenv").exists() {
@@ -102,7 +138,10 @@ mod tests {
         let platform = init().expect("init() should return Ok");
         // On any system, we must get one of the three variants.
         assert!(
-            matches!(platform, Platform::BareMetal | Platform::Vm | Platform::Docker),
+            matches!(
+                platform,
+                Platform::BareMetal | Platform::Vm | Platform::Docker
+            ),
             "init() returned an unexpected platform: {platform:?}"
         );
     }

@@ -227,9 +227,9 @@ fn validate_cidr(addr: &str) -> std::result::Result<(), WanValidationError> {
         ));
     }
     // Validate IP portion
-    parts[0].parse::<IpAddr>().map_err(|e| {
-        WanValidationError::CidrAddress(addr.to_string(), e.to_string())
-    })?;
+    parts[0]
+        .parse::<IpAddr>()
+        .map_err(|e| WanValidationError::CidrAddress(addr.to_string(), e.to_string()))?;
     // Validate prefix length
     let prefix: u8 = parts[1].parse().map_err(|_| {
         WanValidationError::CidrAddress(addr.to_string(), "invalid prefix length".to_string())
@@ -247,15 +247,14 @@ fn validate_cidr(addr: &str) -> std::result::Result<(), WanValidationError> {
 
 /// Validate a plain IP address string.
 fn validate_ip(addr: &str) -> std::result::Result<(), WanValidationError> {
-    addr.parse::<IpAddr>().map_err(|e| {
-        WanValidationError::IpAddress(addr.to_string(), e.to_string())
-    })?;
+    addr.parse::<IpAddr>()
+        .map_err(|e| WanValidationError::IpAddress(addr.to_string(), e.to_string()))?;
     Ok(())
 }
 
 /// Validate an MTU value (576-9000).
 fn validate_mtu(mtu: u16) -> std::result::Result<(), WanValidationError> {
-    if mtu < 576 || mtu > 9000 {
+    if !(576..=9000).contains(&mtu) {
         return Err(WanValidationError::Mtu(mtu));
     }
     Ok(())
@@ -291,7 +290,10 @@ fn validate_pppoe_username(username: &str) -> std::result::Result<(), WanValidat
         ));
     }
     // Disallow characters that could cause injection in pppd config files
-    let forbidden = ['\n', '\r', '"', '\'', '\\', '`', '$', ';', '|', '&', '<', '>', '(', ')', '{', '}', '[', ']', '!', '#', '~'];
+    let forbidden = [
+        '\n', '\r', '"', '\'', '\\', '`', '$', ';', '|', '&', '<', '>', '(', ')', '{', '}', '[',
+        ']', '!', '#', '~',
+    ];
     for c in forbidden {
         if username.contains(c) {
             return Err(WanValidationError::PppoeUsername(format!(
@@ -321,7 +323,9 @@ fn validate_pppoe_password_enc(enc: &str) -> std::result::Result<(), WanValidati
 }
 
 /// Validate a complete WanConnectionType recursively.
-fn validate_connection_type(conn: &WanConnectionType) -> std::result::Result<(), WanValidationError> {
+fn validate_connection_type(
+    conn: &WanConnectionType,
+) -> std::result::Result<(), WanValidationError> {
     match conn {
         WanConnectionType::Dhcp => Ok(()),
         WanConnectionType::Static {
@@ -369,9 +373,8 @@ fn validate_connection_type(conn: &WanConnectionType) -> std::result::Result<(),
         } => {
             if let Some(aftr) = aftr_address {
                 // AFTR must be a valid IPv6 address
-                aftr.parse::<Ipv6Addr>().map_err(|e| {
-                    WanValidationError::AftrAddress(e.to_string())
-                })?;
+                aftr.parse::<Ipv6Addr>()
+                    .map_err(|e| WanValidationError::AftrAddress(e.to_string()))?;
             }
             Ok(())
         }
@@ -400,12 +403,15 @@ pub fn validate_wan_config(config: &WanPortConfig) -> std::result::Result<(), Wa
     }
 
     // Health check must be a valid IP
-    config.health_check.parse::<IpAddr>().map_err(|_| {
-        WanValidationError::HealthCheck(config.health_check.clone())
-    })?;
+    config
+        .health_check
+        .parse::<IpAddr>()
+        .map_err(|_| WanValidationError::HealthCheck(config.health_check.clone()))?;
 
     if config.health_interval_secs == 0 || config.health_interval_secs > 3600 {
-        return Err(WanValidationError::HealthInterval(config.health_interval_secs));
+        return Err(WanValidationError::HealthInterval(
+            config.health_interval_secs,
+        ));
     }
 
     if let Some(mtu) = config.mtu {
@@ -429,10 +435,7 @@ pub fn validate_wan_config(config: &WanPortConfig) -> std::result::Result<(), Wa
 
 /// Read a WAN port configuration from the database.
 #[must_use = "WAN config result should be checked"]
-pub async fn get_wan_config(
-    db: &sfgw_db::Db,
-    interface: &str,
-) -> Result<Option<WanPortConfig>> {
+pub async fn get_wan_config(db: &sfgw_db::Db, interface: &str) -> Result<Option<WanPortConfig>> {
     validate_interface_name(interface).map_err(|e| NetError::Internal(e.into()))?;
 
     let conn = db.lock().await;
@@ -440,11 +443,10 @@ pub async fn get_wan_config(
         .prepare("SELECT config FROM wan_configs WHERE interface = ?1")
         .context("failed to prepare wan_config query")?;
 
-    let result = stmt
-        .query_row(rusqlite::params![interface], |row| {
-            let json: String = row.get(0)?;
-            Ok(json)
-        });
+    let result = stmt.query_row(rusqlite::params![interface], |row| {
+        let json: String = row.get(0)?;
+        Ok(json)
+    });
 
     match result {
         Ok(json) => {
@@ -579,73 +581,96 @@ fn apply_connection_type<'a>(
     conn: &'a WanConnectionType,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(async move {
-    match conn {
-        WanConnectionType::Dhcp => {
-            apply_dhcp(interface).await
-        }
-        WanConnectionType::Static {
-            address,
-            gateway,
-            address_v6,
-            gateway_v6,
-        } => {
-            apply_static(interface, address, gateway, address_v6.as_deref(), gateway_v6.as_deref())
+        match conn {
+            WanConnectionType::Dhcp => apply_dhcp(interface).await,
+            WanConnectionType::Static {
+                address,
+                gateway,
+                address_v6,
+                gateway_v6,
+            } => {
+                apply_static(
+                    interface,
+                    address,
+                    gateway,
+                    address_v6.as_deref(),
+                    gateway_v6.as_deref(),
+                )
                 .await
-        }
-        WanConnectionType::Pppoe {
-            username,
-            password_enc,
-            mtu,
-            service_name,
-            ac_name,
-            vlan_id,
-        } => {
-            // If PPPoE has a VLAN tag, set up the VLAN first
-            let effective_iface = if let Some(vid) = vlan_id {
-                let vlan_iface = format!("{interface}.{vid}");
-                let vid_str = vid.to_string();
-                // Create VLAN interface
+            }
+            WanConnectionType::Pppoe {
+                username,
+                password_enc,
+                mtu,
+                service_name,
+                ac_name,
+                vlan_id,
+            } => {
+                // If PPPoE has a VLAN tag, set up the VLAN first
+                let effective_iface = if let Some(vid) = vlan_id {
+                    let vlan_iface = format!("{interface}.{vid}");
+                    let vid_str = vid.to_string();
+                    // Create VLAN interface
+                    run_ip(&[
+                        "link",
+                        "add",
+                        "link",
+                        interface,
+                        "name",
+                        &vlan_iface,
+                        "type",
+                        "vlan",
+                        "id",
+                        &vid_str,
+                    ])
+                    .await
+                    .context("failed to create PPPoE VLAN interface")?;
+                    run_ip(&["link", "set", "dev", &vlan_iface, "up"])
+                        .await
+                        .context("failed to bring PPPoE VLAN interface up")?;
+                    vlan_iface
+                } else {
+                    interface.to_string()
+                };
+                apply_pppoe(
+                    &effective_iface,
+                    username,
+                    password_enc,
+                    *mtu,
+                    service_name.as_deref(),
+                    ac_name.as_deref(),
+                )
+                .await
+            }
+            WanConnectionType::DsLite {
+                aftr_address,
+                auto_aftr,
+            } => apply_dslite(interface, aftr_address.as_deref(), *auto_aftr).await,
+            WanConnectionType::Vlan { vlan_id, inner } => {
+                let vlan_iface = format!("{interface}.{vlan_id}");
+                let vid_str = vlan_id.to_string();
+                // Create VLAN sub-interface
                 run_ip(&[
-                    "link", "add", "link", interface,
-                    "name", &vlan_iface,
-                    "type", "vlan", "id", &vid_str,
+                    "link",
+                    "add",
+                    "link",
+                    interface,
+                    "name",
+                    &vlan_iface,
+                    "type",
+                    "vlan",
+                    "id",
+                    &vid_str,
                 ])
                 .await
-                .context("failed to create PPPoE VLAN interface")?;
+                .context("failed to create VLAN interface")?;
                 run_ip(&["link", "set", "dev", &vlan_iface, "up"])
                     .await
-                    .context("failed to bring PPPoE VLAN interface up")?;
-                vlan_iface
-            } else {
-                interface.to_string()
-            };
-            apply_pppoe(&effective_iface, username, password_enc, *mtu, service_name.as_deref(), ac_name.as_deref())
-                .await
+                    .context("failed to bring VLAN interface up")?;
+                // Apply inner connection type on the VLAN interface
+                apply_connection_type(&vlan_iface, inner).await
+            }
         }
-        WanConnectionType::DsLite {
-            aftr_address,
-            auto_aftr,
-        } => {
-            apply_dslite(interface, aftr_address.as_deref(), *auto_aftr).await
-        }
-        WanConnectionType::Vlan { vlan_id, inner } => {
-            let vlan_iface = format!("{interface}.{vlan_id}");
-            let vid_str = vlan_id.to_string();
-            // Create VLAN sub-interface
-            run_ip(&[
-                "link", "add", "link", interface,
-                "name", &vlan_iface,
-                "type", "vlan", "id", &vid_str,
-            ])
-            .await
-            .context("failed to create VLAN interface")?;
-            run_ip(&["link", "set", "dev", &vlan_iface, "up"])
-                .await
-                .context("failed to bring VLAN interface up")?;
-            // Apply inner connection type on the VLAN interface
-            apply_connection_type(&vlan_iface, inner).await
-        }
-    }
     })
 }
 
@@ -688,9 +713,11 @@ async fn apply_static(
         .context("failed to add static IPv4 address")?;
 
     // Add default route
-    run_ip(&["route", "replace", "default", "via", gateway, "dev", interface])
-        .await
-        .context("failed to set static IPv4 default route")?;
+    run_ip(&[
+        "route", "replace", "default", "via", gateway, "dev", interface,
+    ])
+    .await
+    .context("failed to set static IPv4 default route")?;
 
     // Add IPv6 if configured
     if let Some(v6_addr) = address_v6 {
@@ -699,9 +726,11 @@ async fn apply_static(
             .context("failed to add static IPv6 address")?;
     }
     if let Some(v6_gw) = gateway_v6 {
-        run_ip(&["-6", "route", "replace", "default", "via", v6_gw, "dev", interface])
-            .await
-            .context("failed to set static IPv6 default route")?;
+        run_ip(&[
+            "-6", "route", "replace", "default", "via", v6_gw, "dev", interface,
+        ])
+        .await
+        .context("failed to set static IPv6 default route")?;
     }
 
     Ok(())
@@ -717,7 +746,14 @@ async fn apply_pppoe(
     ac_name: Option<&str>,
 ) -> Result<()> {
     let peer_name = format!("sfgw-{interface}");
-    let config = generate_pppoe_config(interface, username, password_enc, mtu, service_name, ac_name);
+    let config = generate_pppoe_config(
+        interface,
+        username,
+        password_enc,
+        mtu,
+        service_name,
+        ac_name,
+    );
 
     let peer_path = PathBuf::from("/etc/ppp/peers").join(&peer_name);
 
@@ -730,7 +766,12 @@ async fn apply_pppoe(
 
     tokio::fs::write(&peer_path, config.as_bytes())
         .await
-        .with_context(|| format!("failed to write PPPoE peer config to {}", peer_path.display()))?;
+        .with_context(|| {
+            format!(
+                "failed to write PPPoE peer config to {}",
+                peer_path.display()
+            )
+        })?;
 
     tracing::info!(peer = %peer_name, "PPPoE peer config written");
 
@@ -796,11 +837,7 @@ pub fn generate_pppoe_config(
 }
 
 /// Apply DS-Lite (IPv4-in-IPv6 tunnel).
-async fn apply_dslite(
-    interface: &str,
-    aftr_address: Option<&str>,
-    auto_aftr: bool,
-) -> Result<()> {
+async fn apply_dslite(interface: &str, aftr_address: Option<&str>, auto_aftr: bool) -> Result<()> {
     // First, get a local IPv6 address on the interface
     let local_v6 = get_interface_ipv6(interface).await?;
     let local_v6 = local_v6.ok_or_else(|| {
@@ -824,11 +861,17 @@ async fn apply_dslite(
 
     // Create the IPIP6 tunnel
     run_ip(&[
-        "tunnel", "add", &tunnel_name,
-        "mode", "ipip6",
-        "remote", &aftr,
-        "local", &local_v6,
-        "dev", interface,
+        "tunnel",
+        "add",
+        &tunnel_name,
+        "mode",
+        "ipip6",
+        "remote",
+        &aftr,
+        "local",
+        &local_v6,
+        "dev",
+        interface,
     ])
     .await
     .context("failed to create DS-Lite tunnel")?;
@@ -879,7 +922,7 @@ async fn discover_aftr(interface: &str) -> Result<String> {
     for line in lease.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("aftr_name=") || trimmed.starts_with("option_64=") {
-            let addr = trimmed.splitn(2, '=').nth(1).unwrap_or("").trim();
+            let addr = trimmed.split_once('=').map(|x| x.1).unwrap_or("").trim();
             if !addr.is_empty() {
                 // Validate the address
                 if addr.parse::<Ipv6Addr>().is_ok() {
@@ -910,10 +953,10 @@ async fn get_interface_ipv6(interface: &str) -> Result<Option<String>> {
         if parts.len() >= 6 && parts[5] == interface {
             let scope = parts[3];
             // Scope 00 = global
-            if scope == "00" {
-                if let Some(addr) = hex_to_ipv6(parts[0]) {
-                    return Ok(Some(addr));
-                }
+            if scope == "00"
+                && let Some(addr) = hex_to_ipv6(parts[0])
+            {
+                return Ok(Some(addr));
             }
         }
     }
@@ -1018,21 +1061,35 @@ pub fn generate_wan_commands(config: &WanPortConfig) -> Vec<Vec<String>> {
 
     if let Some(ref mac) = config.mac_override {
         commands.push(vec![
-            "ip".into(), "link".into(), "set".into(), "dev".into(),
-            config.interface.clone(), "address".into(), mac.clone(),
+            "ip".into(),
+            "link".into(),
+            "set".into(),
+            "dev".into(),
+            config.interface.clone(),
+            "address".into(),
+            mac.clone(),
         ]);
     }
 
     if let Some(mtu) = config.mtu {
         commands.push(vec![
-            "ip".into(), "link".into(), "set".into(), "dev".into(),
-            config.interface.clone(), "mtu".into(), mtu.to_string(),
+            "ip".into(),
+            "link".into(),
+            "set".into(),
+            "dev".into(),
+            config.interface.clone(),
+            "mtu".into(),
+            mtu.to_string(),
         ]);
     }
 
     commands.push(vec![
-        "ip".into(), "link".into(), "set".into(), "dev".into(),
-        config.interface.clone(), "up".into(),
+        "ip".into(),
+        "link".into(),
+        "set".into(),
+        "dev".into(),
+        config.interface.clone(),
+        "up".into(),
     ]);
 
     generate_connection_commands(&config.interface, &config.connection, &mut commands);
@@ -1048,7 +1105,10 @@ fn generate_connection_commands(
     match conn {
         WanConnectionType::Dhcp => {
             commands.push(vec![
-                "dhcpcd".into(), "--nobackground".into(), "-4".into(), interface.into(),
+                "dhcpcd".into(),
+                "--nobackground".into(),
+                "-4".into(),
+                interface.into(),
             ]);
         }
         WanConnectionType::Static {
@@ -1058,24 +1118,51 @@ fn generate_connection_commands(
             gateway_v6,
         } => {
             commands.push(vec![
-                "ip".into(), "addr".into(), "flush".into(), "dev".into(), interface.into(),
+                "ip".into(),
+                "addr".into(),
+                "flush".into(),
+                "dev".into(),
+                interface.into(),
             ]);
             commands.push(vec![
-                "ip".into(), "addr".into(), "add".into(), address.clone(), "dev".into(), interface.into(),
+                "ip".into(),
+                "addr".into(),
+                "add".into(),
+                address.clone(),
+                "dev".into(),
+                interface.into(),
             ]);
             commands.push(vec![
-                "ip".into(), "route".into(), "replace".into(), "default".into(),
-                "via".into(), gateway.clone(), "dev".into(), interface.into(),
+                "ip".into(),
+                "route".into(),
+                "replace".into(),
+                "default".into(),
+                "via".into(),
+                gateway.clone(),
+                "dev".into(),
+                interface.into(),
             ]);
             if let Some(v6_addr) = address_v6 {
                 commands.push(vec![
-                    "ip".into(), "addr".into(), "add".into(), v6_addr.clone(), "dev".into(), interface.into(),
+                    "ip".into(),
+                    "addr".into(),
+                    "add".into(),
+                    v6_addr.clone(),
+                    "dev".into(),
+                    interface.into(),
                 ]);
             }
             if let Some(v6_gw) = gateway_v6 {
                 commands.push(vec![
-                    "ip".into(), "-6".into(), "route".into(), "replace".into(), "default".into(),
-                    "via".into(), v6_gw.clone(), "dev".into(), interface.into(),
+                    "ip".into(),
+                    "-6".into(),
+                    "route".into(),
+                    "replace".into(),
+                    "default".into(),
+                    "via".into(),
+                    v6_gw.clone(),
+                    "dev".into(),
+                    interface.into(),
                 ]);
             }
         }
@@ -1090,18 +1177,36 @@ fn generate_connection_commands(
             if let Some(vid) = vlan_id {
                 let vlan_iface = format!("{interface}.{vid}");
                 commands.push(vec![
-                    "ip".into(), "link".into(), "add".into(), "link".into(), interface.into(),
-                    "name".into(), vlan_iface.clone(), "type".into(), "vlan".into(), "id".into(), vid.to_string(),
+                    "ip".into(),
+                    "link".into(),
+                    "add".into(),
+                    "link".into(),
+                    interface.into(),
+                    "name".into(),
+                    vlan_iface.clone(),
+                    "type".into(),
+                    "vlan".into(),
+                    "id".into(),
+                    vid.to_string(),
                 ]);
                 commands.push(vec![
-                    "ip".into(), "link".into(), "set".into(), "dev".into(), vlan_iface.clone(), "up".into(),
+                    "ip".into(),
+                    "link".into(),
+                    "set".into(),
+                    "dev".into(),
+                    vlan_iface.clone(),
+                    "up".into(),
                 ]);
                 commands.push(vec![
-                    "pppd".into(), "call".into(), format!("sfgw-{vlan_iface}"),
+                    "pppd".into(),
+                    "call".into(),
+                    format!("sfgw-{vlan_iface}"),
                 ]);
             } else {
                 commands.push(vec![
-                    "pppd".into(), "call".into(), format!("sfgw-{interface}"),
+                    "pppd".into(),
+                    "call".into(),
+                    format!("sfgw-{interface}"),
                 ]);
             }
         }
@@ -1109,27 +1214,57 @@ fn generate_connection_commands(
             let tunnel_name = format!("ds-lite-{interface}");
             if let Some(aftr) = aftr_address {
                 commands.push(vec![
-                    "ip".into(), "tunnel".into(), "add".into(), tunnel_name.clone(),
-                    "mode".into(), "ipip6".into(), "remote".into(), aftr.clone(),
-                    "dev".into(), interface.into(),
+                    "ip".into(),
+                    "tunnel".into(),
+                    "add".into(),
+                    tunnel_name.clone(),
+                    "mode".into(),
+                    "ipip6".into(),
+                    "remote".into(),
+                    aftr.clone(),
+                    "dev".into(),
+                    interface.into(),
                 ]);
             }
             commands.push(vec![
-                "ip".into(), "link".into(), "set".into(), "dev".into(), tunnel_name.clone(), "up".into(),
+                "ip".into(),
+                "link".into(),
+                "set".into(),
+                "dev".into(),
+                tunnel_name.clone(),
+                "up".into(),
             ]);
             commands.push(vec![
-                "ip".into(), "route".into(), "replace".into(), "default".into(),
-                "dev".into(), tunnel_name,
+                "ip".into(),
+                "route".into(),
+                "replace".into(),
+                "default".into(),
+                "dev".into(),
+                tunnel_name,
             ]);
         }
         WanConnectionType::Vlan { vlan_id, inner } => {
             let vlan_iface = format!("{interface}.{vlan_id}");
             commands.push(vec![
-                "ip".into(), "link".into(), "add".into(), "link".into(), interface.into(),
-                "name".into(), vlan_iface.clone(), "type".into(), "vlan".into(), "id".into(), vlan_id.to_string(),
+                "ip".into(),
+                "link".into(),
+                "add".into(),
+                "link".into(),
+                interface.into(),
+                "name".into(),
+                vlan_iface.clone(),
+                "type".into(),
+                "vlan".into(),
+                "id".into(),
+                vlan_id.to_string(),
             ]);
             commands.push(vec![
-                "ip".into(), "link".into(), "set".into(), "dev".into(), vlan_iface.clone(), "up".into(),
+                "ip".into(),
+                "link".into(),
+                "set".into(),
+                "dev".into(),
+                vlan_iface.clone(),
+                "up".into(),
             ]);
             generate_connection_commands(&vlan_iface, inner, commands);
         }
@@ -1332,7 +1467,14 @@ mod tests {
     fn serde_pppoe_defaults() {
         let json = r#"{"type":"pppoe","username":"user","password_enc":"enc"}"#;
         let conn: WanConnectionType = serde_json::from_str(json).expect("deserialize");
-        if let WanConnectionType::Pppoe { mtu, service_name, ac_name, vlan_id, .. } = conn {
+        if let WanConnectionType::Pppoe {
+            mtu,
+            service_name,
+            ac_name,
+            vlan_id,
+            ..
+        } = conn
+        {
             assert_eq!(mtu, 1492);
             assert!(service_name.is_none());
             assert!(ac_name.is_none());
@@ -1346,7 +1488,11 @@ mod tests {
     fn serde_dslite_defaults() {
         let json = r#"{"type":"dslite"}"#;
         let conn: WanConnectionType = serde_json::from_str(json).expect("deserialize");
-        if let WanConnectionType::DsLite { aftr_address, auto_aftr } = conn {
+        if let WanConnectionType::DsLite {
+            aftr_address,
+            auto_aftr,
+        } = conn
+        {
             assert!(aftr_address.is_none());
             assert!(auto_aftr);
         } else {
@@ -1599,8 +1745,12 @@ mod tests {
     #[test]
     fn pppoe_config_generation_with_service_and_ac() {
         let config = generate_pppoe_config(
-            "eth0.7", "user@telekom.de", "enc", 1492,
-            Some("telekom"), Some("bras01"),
+            "eth0.7",
+            "user@telekom.de",
+            "enc",
+            1492,
+            Some("telekom"),
+            Some("bras01"),
         );
         assert!(config.contains("rp_pppoe_service \"telekom\""));
         assert!(config.contains("rp_pppoe_ac \"bras01\""));
@@ -1625,9 +1775,15 @@ mod tests {
         // MAC override + MTU + bring up + flush + add addr + route + v6 addr + v6 route
         assert!(cmds.len() >= 6);
         // Should contain MAC override
-        assert!(cmds.iter().any(|c| c.contains(&"address".to_string()) && c.contains(&"AA:BB:CC:DD:EE:FF".to_string())));
+        assert!(
+            cmds.iter().any(|c| c.contains(&"address".to_string())
+                && c.contains(&"AA:BB:CC:DD:EE:FF".to_string()))
+        );
         // Should contain static address
-        assert!(cmds.iter().any(|c| c.contains(&"203.0.113.5/24".to_string())));
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains(&"203.0.113.5/24".to_string()))
+        );
     }
 
     #[test]
@@ -1635,7 +1791,10 @@ mod tests {
         let config = vlan_pppoe_config();
         let cmds = generate_wan_commands(&config);
         // Should create VLAN, bring up, then pppd
-        assert!(cmds.iter().any(|c| c.contains(&"vlan".to_string()) && c.contains(&"7".to_string())));
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains(&"vlan".to_string()) && c.contains(&"7".to_string()))
+        );
         assert!(cmds.iter().any(|c| c[0] == "pppd"));
     }
 
@@ -1655,7 +1814,9 @@ mod tests {
         let db = test_db().await;
         let config = dhcp_config();
 
-        set_wan_config(&db, &config).await.expect("set_wan_config failed");
+        set_wan_config(&db, &config)
+            .await
+            .expect("set_wan_config failed");
         let loaded = get_wan_config(&db, "eth0")
             .await
             .expect("get_wan_config failed")
@@ -1681,8 +1842,12 @@ mod tests {
         let db = test_db().await;
 
         set_wan_config(&db, &dhcp_config()).await.expect("set dhcp");
-        set_wan_config(&db, &static_config()).await.expect("set static");
-        set_wan_config(&db, &pppoe_config()).await.expect("set pppoe");
+        set_wan_config(&db, &static_config())
+            .await
+            .expect("set static");
+        set_wan_config(&db, &pppoe_config())
+            .await
+            .expect("set pppoe");
 
         let configs = list_wan_configs(&db).await.expect("list failed");
         assert_eq!(configs.len(), 3);
@@ -1718,9 +1883,7 @@ mod tests {
         set_wan_config(&db, &dhcp_config()).await.expect("set");
         remove_wan_config(&db, "eth0").await.expect("remove");
 
-        let result = get_wan_config(&db, "eth0")
-            .await
-            .expect("get failed");
+        let result = get_wan_config(&db, "eth0").await.expect("get failed");
         assert!(result.is_none());
     }
 
@@ -1728,7 +1891,9 @@ mod tests {
     async fn db_remove_nonexistent_does_not_error() {
         let db = test_db().await;
         // Should not fail, just log a warning
-        remove_wan_config(&db, "eth99").await.expect("remove should not error");
+        remove_wan_config(&db, "eth99")
+            .await
+            .expect("remove should not error");
     }
 
     #[tokio::test]
@@ -1749,7 +1914,9 @@ mod tests {
         for cfg in &configs[..4] {
             set_wan_config(&db, cfg).await.expect("set failed");
         }
-        set_wan_config(&db, &vlan_cfg).await.expect("set vlan failed");
+        set_wan_config(&db, &vlan_cfg)
+            .await
+            .expect("set vlan failed");
 
         let loaded = list_wan_configs(&db).await.expect("list failed");
         assert_eq!(loaded.len(), 5);
@@ -1761,12 +1928,15 @@ mod tests {
     fn connection_type_display() {
         assert_eq!(format!("{}", WanConnectionType::Dhcp), "dhcp");
         assert_eq!(
-            format!("{}", WanConnectionType::Static {
-                address: "1.2.3.4/24".to_string(),
-                gateway: "1.2.3.1".to_string(),
-                address_v6: None,
-                gateway_v6: None,
-            }),
+            format!(
+                "{}",
+                WanConnectionType::Static {
+                    address: "1.2.3.4/24".to_string(),
+                    gateway: "1.2.3.1".to_string(),
+                    address_v6: None,
+                    gateway_v6: None,
+                }
+            ),
             "static"
         );
     }

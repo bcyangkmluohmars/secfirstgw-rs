@@ -20,11 +20,11 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::os::fd::{FromRawFd, OwnedFd, AsRawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use boringtun::noise::{Tunn, TunnResult, rate_limiter::RateLimiter};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use tokio::net::UdpSocket;
@@ -46,7 +46,10 @@ impl std::fmt::Debug for PeerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PeerConfig")
             .field("public_key", &self.public_key)
-            .field("preshared_key", &self.preshared_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "preshared_key",
+                &self.preshared_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("endpoint", &self.endpoint)
             .field("persistent_keepalive", &self.persistent_keepalive)
             .field("allowed_ips", &self.allowed_ips)
@@ -70,12 +73,7 @@ pub fn create_tun_device(name: &str) -> Result<OwnedFd> {
 
     // SAFETY: Opening /dev/net/tun is a standard Linux operation.
     // The returned fd is valid if open() succeeds (returns >= 0).
-    let fd = unsafe {
-        libc::open(
-            b"/dev/net/tun\0".as_ptr() as *const libc::c_char,
-            libc::O_RDWR | libc::O_CLOEXEC,
-        )
-    };
+    let fd = unsafe { libc::open(c"/dev/net/tun".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
     if fd < 0 {
         bail!(
             "failed to open /dev/net/tun: {}",
@@ -206,10 +204,10 @@ async fn run_tunnel_loop(
 
         peers.insert(peer_pub_array, Arc::new(Mutex::new(tunn)));
 
-        if let Some(ref ep) = pc.endpoint {
-            if let Ok(addr) = ep.parse::<SocketAddr>() {
-                endpoint_map.insert(peer_pub_array, addr);
-            }
+        if let Some(ref ep) = pc.endpoint
+            && let Ok(addr) = ep.parse::<SocketAddr>()
+        {
+            endpoint_map.insert(peer_pub_array, addr);
         }
     }
 
@@ -251,6 +249,8 @@ async fn run_tunnel_loop(
             readable = tun_async.readable() => {
                 let mut guard = readable?;
                 match guard.try_io(|inner| {
+                    // SAFETY: Reading from TUN fd into a valid buffer. The fd is
+                    // valid (from AsyncFd) and tun_buf is a heap-allocated Vec.
                     let n = unsafe {
                         libc::read(
                             inner.get_ref().0.as_raw_fd(),
@@ -271,11 +271,10 @@ async fn run_tunnel_loop(
                             let mut t = tunn.lock().await;
                             match t.encapsulate(&tun_buf[..n], &mut out_buf) {
                                 TunnResult::WriteToNetwork(data) => {
-                                    if let Some(endpoint) = endpoint_map.get(pub_key) {
-                                        if let Err(e) = udp.send_to(data, endpoint).await {
+                                    if let Some(endpoint) = endpoint_map.get(pub_key)
+                                        && let Err(e) = udp.send_to(data, endpoint).await {
                                             debug!(tunnel = name, "UDP send failed: {e}");
                                         }
-                                    }
                                     break;
                                 }
                                 TunnResult::Done => continue,
@@ -301,7 +300,8 @@ async fn run_tunnel_loop(
                     let mut t = tunn.lock().await;
                     match t.decapsulate(None, &udp_buf[..n], &mut out_buf) {
                         TunnResult::WriteToTunnelV4(data, _) | TunnResult::WriteToTunnelV6(data, _) => {
-                            // Write decrypted packet to TUN
+                            // SAFETY: Writing decrypted packet to TUN fd. The fd is valid
+                            // (from AsyncFd), data is a valid slice from boringtun.
                             let written = unsafe {
                                 libc::write(
                                     tun_async.get_ref().0.as_raw_fd(),
@@ -332,6 +332,8 @@ async fn run_tunnel_loop(
                                         }
                                     }
                                     TunnResult::WriteToTunnelV4(data2, _) | TunnResult::WriteToTunnelV6(data2, _) => {
+                                        // SAFETY: Writing follow-up decrypted packet to TUN fd.
+                                        // Same guarantees as the outer TUN write above.
                                         let written = unsafe {
                                             libc::write(
                                                 tun_async.get_ref().0.as_raw_fd(),
@@ -361,11 +363,10 @@ async fn run_tunnel_loop(
                     let mut t = tunn.lock().await;
                     match t.update_timers(&mut out_buf) {
                         TunnResult::WriteToNetwork(data) => {
-                            if let Some(endpoint) = endpoint_map.get(pub_key) {
-                                if let Err(e) = udp.send_to(data, endpoint).await {
+                            if let Some(endpoint) = endpoint_map.get(pub_key)
+                                && let Err(e) = udp.send_to(data, endpoint).await {
                                     debug!(tunnel = name, "UDP send failed: {e}");
                                 }
-                            }
                         }
                         TunnResult::Err(e) => {
                             debug!(tunnel = name, "timer error: {:?}", e);

@@ -7,7 +7,7 @@ use axum::http::{Request, StatusCode, header};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
@@ -104,9 +104,9 @@ async fn fresh_db() -> (sfgw_db::Db, NamedTempFile) {
     (db, tmp)
 }
 
+use axum::Json;
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
-use axum::Json;
 
 // Thin handler wrappers that replicate the private handlers in sfgw_api lib.
 
@@ -185,7 +185,7 @@ async fn proxy_login(
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "invalid credentials" })),
-            )
+            );
         }
     };
     match sfgw_api::auth::verify_password(&password, &password_hash) {
@@ -194,7 +194,7 @@ async fn proxy_login(
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "invalid credentials" })),
-            )
+            );
         }
     }
 
@@ -202,9 +202,7 @@ async fn proxy_login(
     let test_addr: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
     let client_ip = sfgw_api::middleware::client_ip_from_addr(&test_addr);
 
-    match sfgw_api::auth::create_session(&db, user.id, &client_ip, &fingerprint, "")
-        .await
-    {
+    match sfgw_api::auth::create_session(&db, user.id, &client_ip, &fingerprint, "").await {
         Ok((token, expires_at)) => (
             StatusCode::OK,
             Json(json!({
@@ -227,7 +225,11 @@ async fn proxy_status(
     let fw_status = {
         let conn = db.lock().await;
         let rule_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM firewall_rules WHERE enabled = 1", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM firewall_rules WHERE enabled = 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         if rule_count > 0 { "running" } else { "stopped" }
     };
@@ -360,7 +362,10 @@ async fn test_status_endpoint() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "ok");
-    assert!(body["services"].is_object(), "status response should contain services object");
+    assert!(
+        body["services"].is_object(),
+        "status response should contain services object"
+    );
     // In a fresh test DB with no firewall rules, firewall should be stopped
     assert_eq!(body["services"]["firewall"], "stopped");
 }

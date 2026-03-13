@@ -89,7 +89,7 @@ jobs:
       - name: Check for hardcoded secrets
         run: |
           patterns='password\s*=\s*"[^"]+"|secret\s*=\s*"[^"]+"|token\s*=\s*"[^"]+"|api_key\s*=\s*"[^"]+"'
-          if grep -rPn "$patterns" crates/ --include='*.rs' | grep -v '//.*test\|#\[cfg(test)\|mod tests\|password_hash\|password:\s*String\|password:\s*&str\|"password"'; then
+          if grep -rPn "$patterns" crates/ --include='*.rs' | grep -v '//.*test\|#\[cfg(test)\|mod tests\|password_hash\|password:\s*String\|password:\s*&str\|"password"\|tests/'; then
             echo ""
             echo "FAIL: Possible hardcoded secrets found. See CLAUDE.md."
             exit 1

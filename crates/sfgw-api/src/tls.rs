@@ -20,9 +20,8 @@ const TLS_DIR: &str = "/data/sfgw-tls";
 /// Certificates are stored in `{tls_dir}/cert.pem` and `{tls_dir}/key.pem`.
 /// The `tls_dir` defaults to [`TLS_DIR`] but can be overridden via `SFGW_TLS_DIR`.
 pub fn load_or_create_tls_config() -> Result<ServerConfig> {
-    let tls_dir = PathBuf::from(
-        std::env::var("SFGW_TLS_DIR").unwrap_or_else(|_| TLS_DIR.to_string()),
-    );
+    let tls_dir =
+        PathBuf::from(std::env::var("SFGW_TLS_DIR").unwrap_or_else(|_| TLS_DIR.to_string()));
 
     let cert_path = tls_dir.join("cert.pem");
     let key_path = tls_dir.join("key.pem");
@@ -31,7 +30,10 @@ pub fn load_or_create_tls_config() -> Result<ServerConfig> {
         tracing::info!("loading TLS certificate from {}", cert_path.display());
         load_cert_and_key(&cert_path, &key_path)?
     } else {
-        tracing::info!("generating self-signed TLS certificate in {}", tls_dir.display());
+        tracing::info!(
+            "generating self-signed TLS certificate in {}",
+            tls_dir.display()
+        );
         generate_and_store(&tls_dir, &cert_path, &key_path)?
     };
 
@@ -146,7 +148,10 @@ fn generate_and_store(
             .with_context(|| format!("failed to set permissions on {}", key_path.display()))?;
     }
 
-    tracing::info!("self-signed TLS certificate generated at {}", cert_path.display());
+    tracing::info!(
+        "self-signed TLS certificate generated at {}",
+        cert_path.display()
+    );
 
     // Parse back for rustls
     let cert_der = CertificateDer::from(cert.der().to_vec());
@@ -156,7 +161,9 @@ fn generate_and_store(
 }
 
 /// Convert a [`ServerConfig`] into an [`axum_server::tls_rustls::RustlsConfig`].
-pub async fn into_axum_rustls_config(config: ServerConfig) -> Result<axum_server::tls_rustls::RustlsConfig> {
+pub async fn into_axum_rustls_config(
+    config: ServerConfig,
+) -> Result<axum_server::tls_rustls::RustlsConfig> {
     let config = Arc::new(config);
     Ok(axum_server::tls_rustls::RustlsConfig::from_config(config))
 }

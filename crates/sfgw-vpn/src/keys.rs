@@ -8,8 +8,8 @@
 //! a WireGuard config file or pass to `wg set`.
 
 use anyhow::Result;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use rand::rngs::OsRng;
 use sfgw_crypto::secure_mem::SecureBox;
 use x25519_dalek::{PublicKey, StaticSecret};

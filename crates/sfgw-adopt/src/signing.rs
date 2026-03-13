@@ -8,7 +8,7 @@
 //! "Ed25519 + ML-DSA for signing. Both must pass."
 
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use ed25519_dalek::{Signature as EdSignature, Verifier as _, VerifyingKey};
 use fips204::ml_dsa_65;
 use fips204::traits::{SerDes, Verifier};
@@ -69,16 +69,13 @@ pub fn verify_signature(
     let vk = ml_dsa_65::PublicKey::try_from_bytes(*vk_arr)
         .map_err(|e| anyhow::anyhow!("invalid ML-DSA-65 public key: {e:?}"))?;
 
-    let sig_arr: [u8; ml_dsa_65::SIG_LEN] = ml_sig_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "ML-DSA-65 signature wrong length: expected {}, got {}",
-                ml_dsa_65::SIG_LEN,
-                ml_sig_bytes.len()
-            )
-        })?;
+    let sig_arr: [u8; ml_dsa_65::SIG_LEN] = ml_sig_bytes.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "ML-DSA-65 signature wrong length: expected {}, got {}",
+            ml_dsa_65::SIG_LEN,
+            ml_sig_bytes.len()
+        )
+    })?;
 
     if !vk.verify(&payload_bytes, &sig_arr, b"") {
         anyhow::bail!("ML-DSA-65 signature verification failed");

@@ -18,7 +18,7 @@ use std::os::fd::AsRawFd;
 use anyhow::{Context, Result};
 use chrono::Utc;
 
-use super::arp::{format_mac, ArpBinding};
+use super::arp::{ArpBinding, format_mac};
 use super::{IdsEvent, Severity};
 
 /// DHCP message types (option 53)
@@ -107,7 +107,7 @@ impl DhcpMonitor {
         match dhcp.msg_type {
             // --- Rogue DHCP server detection ---
             DHCP_OFFER | DHCP_ACK => {
-                let from_us = self.our_macs.iter().any(|m| *m == dhcp.server_mac);
+                let from_us = self.our_macs.contains(&dhcp.server_mac);
                 if !from_us {
                     return Ok(Some(IdsEvent {
                         timestamp: now,

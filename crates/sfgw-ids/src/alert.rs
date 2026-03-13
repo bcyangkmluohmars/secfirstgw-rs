@@ -80,7 +80,11 @@ impl AlertEngine {
         );
         severity_actions.insert(
             SeverityLevel::Critical,
-            vec![AutoAction::Log, AutoAction::BlockMac, AutoAction::IsolatePort],
+            vec![
+                AutoAction::Log,
+                AutoAction::BlockMac,
+                AutoAction::IsolatePort,
+            ],
         );
 
         Self {
@@ -118,12 +122,12 @@ impl AlertEngine {
         };
 
         let now = Utc::now();
-        if let Some(last) = self.last_alert.get(&key) {
-            if (now - *last).num_seconds() < ALERT_RATE_LIMIT_SECS {
-                // Rate limited — still store in DB but don't dispatch alerts/actions
-                self.store_event(event).await?;
-                return Ok(vec![ResponseAction::LogOnly]);
-            }
+        if let Some(last) = self.last_alert.get(&key)
+            && (now - *last).num_seconds() < ALERT_RATE_LIMIT_SECS
+        {
+            // Rate limited — still store in DB but don't dispatch alerts/actions
+            self.store_event(event).await?;
+            return Ok(vec![ResponseAction::LogOnly]);
         }
         self.last_alert.insert(key, now);
 
@@ -136,21 +140,15 @@ impl AlertEngine {
 
         // --- Log via tracing ---
         match event.severity {
-            Severity::Info => tracing::info!(
-                detector = event.detector,
-                "IDS: {}",
-                event.description
-            ),
-            Severity::Warning => tracing::warn!(
-                detector = event.detector,
-                "IDS: {}",
-                event.description
-            ),
-            Severity::Critical => tracing::error!(
-                detector = event.detector,
-                "IDS: {}",
-                event.description
-            ),
+            Severity::Info => {
+                tracing::info!(detector = event.detector, "IDS: {}", event.description)
+            }
+            Severity::Warning => {
+                tracing::warn!(detector = event.detector, "IDS: {}", event.description)
+            }
+            Severity::Critical => {
+                tracing::error!(detector = event.detector, "IDS: {}", event.description)
+            }
         }
 
         // --- Determine and execute response actions ---
