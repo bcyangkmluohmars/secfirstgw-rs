@@ -18,6 +18,7 @@ import { api, isAuthenticated, clearToken } from './api'
 import { initSession } from './crypto'
 import { BootContext, type BootStatus } from './boot'
 import { ToastProvider } from './hooks/useToast'
+import { StatusProvider } from './hooks/useStatus'
 
 function useBootCheck() {
   const [status, setStatus] = useState<BootStatus>('loading')
@@ -92,7 +93,7 @@ export default function App() {
           <Route path="/setup" element={<Setup />} />
           <Route path="/login" element={<Login />} />
           {boot.status === 'ready' && (
-            <Route element={<Layout />}>
+            <Route element={<StatusProvider><Layout /></StatusProvider>}>
               <Route path="/" element={<Dashboard />} />
               <Route path="/interfaces" element={<Interfaces />} />
               <Route path="/wan" element={<Wan />} />

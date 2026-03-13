@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useEffect, useState, useRef, useCallback } from 'react'
-import { api, type SystemStatus } from '../api'
+import { useEffect, useState, useRef } from 'react'
 import { Card, PageHeader, Spinner, Sparkline, MiniGauge, StatCard } from '../components/ui'
-import { useToast } from '../hooks/useToast'
+import { useStatus } from '../hooks/useStatus'
 
 const MAX_HISTORY = 60 // 10 min at 10s interval
 
@@ -119,27 +118,22 @@ function ServiceGrid({ services }: { services: Record<string, string> }) {
 }
 
 export default function Dashboard() {
-  const [status, setStatus] = useState<SystemStatus | null>(null)
+  const { status } = useStatus()
   const [loadHistory, setLoadHistory] = useState<number[]>([])
   const [memHistory, setMemHistory] = useState<number[]>([])
-  const toast = useToast()
+  const prevUptime = useRef(0)
 
-  const fetchStatus = useCallback(() => {
-    api.getStatus()
-      .then((s) => {
-        setStatus(s)
-        setLoadHistory((prev) => [...prev.slice(-(MAX_HISTORY - 1)), s.load_average[0]])
-        const memPct = s.memory.total_mb > 0 ? (s.memory.used_mb / s.memory.total_mb) * 100 : 0
-        setMemHistory((prev) => [...prev.slice(-(MAX_HISTORY - 1)), memPct])
-      })
-      .catch((e: Error) => toast.error(e.message))
-  }, [toast])
-
+  // Build sparkline history from shared status updates
   useEffect(() => {
-    fetchStatus()
-    const interval = setInterval(fetchStatus, 10000)
-    return () => clearInterval(interval)
-  }, [fetchStatus])
+    if (!status) return
+    // Only append when uptime changes (i.e. new data from server, not re-render)
+    if (status.uptime_secs === prevUptime.current) return
+    prevUptime.current = status.uptime_secs
+
+    setLoadHistory((prev) => [...prev.slice(-(MAX_HISTORY - 1)), status.load_average[0]])
+    const memPct = status.memory.total_mb > 0 ? (status.memory.used_mb / status.memory.total_mb) * 100 : 0
+    setMemHistory((prev) => [...prev.slice(-(MAX_HISTORY - 1)), memPct])
+  }, [status])
 
   if (!status) return <Spinner label="Loading system status..." />
 

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { Outlet, NavLink } from 'react-router-dom'
-import { useEffect, useState, useCallback } from 'react'
-import { api, clearToken, type SystemStatus } from '../api'
+import { useState } from 'react'
+import { api, clearToken } from '../api'
 import { setEnvelopeKey } from '../crypto'
 import { useBoot } from '../boot'
+import { useStatus } from '../hooks/useStatus'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: 'dashboard' },
@@ -32,22 +33,9 @@ const iconPaths: Record<string, React.ReactNode> = {
 
 export default function Layout() {
   const { setLogout } = useBoot()
-  const [status, setStatus] = useState<SystemStatus | null>(null)
-  const [online, setOnline] = useState(false)
+  const { status, online } = useStatus()
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
-
-  const fetchStatus = useCallback(() => {
-    api.getStatus()
-      .then((s) => { setStatus(s); setOnline(true) })
-      .catch(() => setOnline(false))
-  }, [])
-
-  useEffect(() => {
-    fetchStatus()
-    const interval = setInterval(fetchStatus, 10000)
-    return () => clearInterval(interval)
-  }, [fetchStatus])
 
   const handleLogout = async () => {
     try { await api.logout() } catch { /* ignore */ }
