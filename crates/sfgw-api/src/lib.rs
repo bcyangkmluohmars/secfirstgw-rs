@@ -39,10 +39,12 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
     let envelope_key_store = e2ee::new_envelope_key_store();
 
     // ----- Rate limiters -----
-    // Auth endpoints: 5 requests per minute per IP
-    let auth_limiter = RateLimiter::new(5, Duration::from_secs(60));
-    // All other endpoints: 60 requests per minute per IP
-    let general_limiter = RateLimiter::new(60, Duration::from_secs(60));
+    // Auth mutations (login, session, setup POST): 10 requests per minute per IP.
+    // Normal login flow uses ~3 (session + login + setup-check), so 10 gives margin.
+    let auth_limiter = RateLimiter::new(10, Duration::from_secs(60));
+    // Protected API + read-only public endpoints: 120 requests per minute per IP.
+    // Dashboard loads ~8-10 API calls at once, so 60 was too tight for power users.
+    let general_limiter = RateLimiter::new(120, Duration::from_secs(60));
 
     // ----- CORS -----
     let listen_host = if listen_addr.ip().is_unspecified() {
@@ -65,7 +67,9 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
         .allow_credentials(true);
 
     // ----- Public routes (no auth required, stricter rate limit) -----
-    let public_routes = Router::new()
+    // Auth mutations (login, session, setup POST) use the stricter auth limiter.
+    // Setup status check (GET) is on the general limiter — read-only, called on every page load.
+    let auth_rate_limited = Router::new()
         .route("/api/v1/auth/session", post(session_handler))
         .route("/api/v1/auth/login", post(login_handler))
         .route("/api/v1/auth/setup", post(setup_handler))
@@ -73,6 +77,13 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
             auth_limiter.clone(),
             ratelimit::rate_limit_middleware,
         ));
+    let public_status = Router::new()
+        .route("/api/v1/auth/setup", get(setup_status_handler))
+        .layer(axum::middleware::from_fn_with_state(
+            general_limiter.clone(),
+            ratelimit::rate_limit_middleware,
+        ));
+    let public_routes = auth_rate_limited.merge(public_status);
 
     // ----- Protected routes (auth required, general rate limit) -----
     let protected_routes = Router::new()
@@ -80,8 +91,15 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
         .route("/api/v1/status", get(status_handler))
         .route("/api/v1/system", get(system_handler))
         .route("/api/v1/interfaces", get(interfaces_handler))
+        .route("/api/v1/interfaces/{name}", put(interface_update).delete(interface_delete))
+        .route("/api/v1/interfaces/{name}/toggle", post(interface_toggle))
+        .route("/api/v1/interfaces/vlan", post(interface_create_vlan))
         .route("/api/v1/auth/me", get(me_handler))
         .route("/api/v1/auth/logout", post(logout_handler))
+        // User management
+        .route("/api/v1/users", get(users_list).post(users_create))
+        .route("/api/v1/users/{id}", put(users_update).delete(users_delete))
+        .route("/api/v1/users/{id}/password", post(users_change_password))
         // Firewall
         .route("/api/v1/firewall/rules", get(fw_list_rules).post(fw_insert_rule))
         .route("/api/v1/firewall/rules/{id}", put(fw_update_rule).delete(fw_delete_rule))
@@ -455,6 +473,23 @@ struct SetupRequest {
     password: String,
 }
 
+async fn setup_status_handler(
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    let conn = db.lock().await;
+    let count: i64 = match conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0)) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("setup status user count error: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal server error" })),
+            );
+        }
+    };
+    (StatusCode::OK, Json(json!({ "needed": count == 0 })))
+}
+
 async fn setup_handler(
     Extension(db): Extension<sfgw_db::Db>,
     Json(body): Json<SetupRequest>,
@@ -637,7 +672,7 @@ async fn status_handler(
     _auth: AuthUser,
     Extension(db): Extension<sfgw_db::Db>,
 ) -> Json<Value> {
-    let uptime = read_uptime_secs();
+    let uptime = read_uptime_secs() as u64;
     let (load1, load5, load15) = read_loadavg();
     let mem = read_meminfo();
 
@@ -645,40 +680,74 @@ async fn status_handler(
     let fw_status = {
         let conn = db.lock().await;
         let rule_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM firewall_rules", [], |r| r.get(0))
+            .unwrap_or(0);
+        let enabled_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM firewall_rules WHERE enabled = 1", [], |r| r.get(0))
             .unwrap_or(0);
-        if rule_count > 0 { "running" } else { "stopped" }
+        if rule_count == 0 {
+            "not_configured"
+        } else if enabled_count > 0 {
+            "running"
+        } else {
+            "disabled"
+        }
     };
 
     let dns_status = {
         // Check if dnsmasq PID file exists and process is alive
-        let running = std::fs::read_to_string("/run/dnsmasq.pid")
+        let pid_alive = std::fs::read_to_string("/run/dnsmasq.pid")
             .or_else(|_| std::fs::read_to_string("/var/run/dnsmasq/dnsmasq.pid"))
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
             .map(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
             .unwrap_or(false);
-        if running { "running" } else { "stopped" }
+        let conn = db.lock().await;
+        let has_config: bool = conn
+            .query_row("SELECT COUNT(*) FROM dns_config", [], |r| r.get::<_, i64>(0))
+            .unwrap_or(0) > 0;
+        if pid_alive {
+            "running"
+        } else if has_config {
+            "stopped"
+        } else {
+            "not_configured"
+        }
     };
 
     let vpn_status = {
         let conn = db.lock().await;
-        let tunnel_count: i64 = conn
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM vpn_tunnels", [], |r| r.get(0))
+            .unwrap_or(0);
+        let enabled: i64 = conn
             .query_row("SELECT COUNT(*) FROM vpn_tunnels WHERE enabled = 1", [], |r| r.get(0))
             .unwrap_or(0);
-        if tunnel_count > 0 { "running" } else { "stopped" }
+        if total == 0 {
+            "not_configured"
+        } else if enabled > 0 {
+            "running"
+        } else {
+            "disabled"
+        }
     };
 
     // IDS is spawned as a background task at boot; if we are serving requests it is running
     let ids_status = "running";
 
-    // NAS: check if any HDD is present via platform detection
-    let nas_status = if std::path::Path::new("/dev/sda").exists()
-        || std::path::Path::new("/dev/nvme0").exists()
-    {
-        "running"
-    } else {
-        "stopped"
+    // NAS: check if storage devices are present
+    let nas_status = {
+        let has_storage = std::path::Path::new("/dev/sda").exists()
+            || std::path::Path::new("/dev/nvme0").exists();
+        let has_share_config = std::path::Path::new("/etc/samba/smb.conf").exists()
+            || std::path::Path::new("/etc/exports").exists();
+        if has_storage && has_share_config {
+            "running"
+        } else if has_storage {
+            "not_configured"
+        } else {
+            "unavailable"
+        }
     };
 
     Json(json!({
@@ -730,22 +799,349 @@ async fn interfaces_handler(
     Extension(db): Extension<sfgw_db::Db>,
 ) -> impl IntoResponse {
     let conn = db.lock().await;
-    let mut stmt = match conn.prepare("SELECT name, role, vlan_id, enabled FROM interfaces") {
+    let mut stmt = match conn.prepare(
+        "SELECT name, mac, ips, mtu, is_up, role, vlan_id, enabled FROM interfaces ORDER BY name",
+    ) {
         Ok(s) => s,
         Err(e) => return internal_err(anyhow::anyhow!("{e}")),
     };
     let rows: Vec<Value> = match stmt.query_map([], |row| {
+        let name: String = row.get(0)?;
+        let ips_json: String = row.get(2)?;
+        let ips: Value = serde_json::from_str(&ips_json).unwrap_or(Value::Array(vec![]));
+
+        // Detect hardware port type from sysfs
+        let port_info = detect_port_type(&name);
+
         Ok(json!({
-            "name": row.get::<_, String>(0)?,
-            "role": row.get::<_, String>(1)?,
-            "vlan_id": row.get::<_, Option<i64>>(2)?,
-            "enabled": row.get::<_, bool>(3)?,
+            "name": name,
+            "mac": row.get::<_, String>(1)?,
+            "ips": ips,
+            "mtu": row.get::<_, i64>(3)?,
+            "is_up": row.get::<_, bool>(4)?,
+            "role": row.get::<_, String>(5)?,
+            "vlan_id": row.get::<_, Option<i64>>(6)?,
+            "enabled": row.get::<_, bool>(7)?,
+            "speed": port_info.0,
+            "driver": port_info.1,
+            "port_type": port_info.2,
         }))
     }) {
         Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
         Err(e) => return internal_err(anyhow::anyhow!("{e}")),
     };
     (StatusCode::OK, Json(json!({ "interfaces": rows })))
+}
+
+/// Detect port type, speed, and driver from sysfs.
+/// Returns (speed_mbps_or_null, driver_name, port_type_label).
+fn detect_port_type(name: &str) -> (Value, Value, Value) {
+    let base = format!("/sys/class/net/{name}");
+
+    // Speed (e.g. "1000", "10000", "25000")
+    let speed: Value = std::fs::read_to_string(format!("{base}/speed"))
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|&s| s > 0)
+        .map(|s| json!(s))
+        .unwrap_or(Value::Null);
+
+    // Driver name from device/driver symlink
+    let driver: Value = std::fs::read_link(format!("{base}/device/driver"))
+        .ok()
+        .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
+        .map(|d| json!(d))
+        .unwrap_or(Value::Null);
+
+    // Derive port type from driver + speed
+    let driver_str = driver.as_str().unwrap_or("");
+    let speed_val = speed.as_i64().unwrap_or(0);
+    let port_type = match driver_str {
+        // Common 1G copper drivers
+        "e1000" | "e1000e" | "igb" | "igc" | "r8169" | "tg3" | "bnxt_en" | "atlantic"
+            => json!(format!("RJ45 {}", format_speed(speed_val))),
+        // 10G/25G SFP+ drivers
+        "ixgbe" | "i40e" | "ice" | "bnx2x"
+            => if speed_val >= 25000 { json!("SFP28") }
+               else { json!(format!("SFP+ {}", format_speed(speed_val))) },
+        // Mellanox
+        "mlx4_en" | "mlx5_core"
+            => if speed_val >= 100000 { json!("QSFP28") }
+               else if speed_val >= 40000 { json!("QSFP+") }
+               else { json!(format!("SFP+ {}", format_speed(speed_val))) },
+        // Intel X520/X710 etc
+        "igb_uio" | "vfio-pci" => json!("SR-IOV VF"),
+        // Virtual
+        "virtio_net" | "vmxnet3" | "hv_netvsc" | "xen_netfront" => json!("Virtual"),
+        // Bridge/VLAN/bond
+        "bridge" => json!("Bridge"),
+        "bonding" => json!("Bond"),
+        "802.1Q" => json!("VLAN"),
+        // Docker veth
+        "veth" => json!("veth"),
+        _ => {
+            // Check if it's a VLAN (name contains dot)
+            if name.contains('.') { json!("VLAN") }
+            else if name.starts_with("br") { json!("Bridge") }
+            else if name.starts_with("bond") { json!("Bond") }
+            else if name == "lo" { json!("Loopback") }
+            else if name.starts_with("docker") || name.starts_with("veth") { json!("Container") }
+            else { json!("Ethernet") }
+        }
+    };
+
+    (speed, driver, port_type)
+}
+
+fn format_speed(mbps: i64) -> String {
+    match mbps {
+        s if s >= 100000 => format!("{}G", s / 1000),
+        s if s >= 1000 => format!("{}G", s / 1000),
+        s if s > 0 => format!("{}M", s),
+        _ => String::new(),
+    }
+}
+
+/// Update interface properties (role, vlan_id, mtu, enabled).
+async fn interface_update(
+    _auth: AuthUser,
+    Path(name): Path<String>,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let conn = db.lock().await;
+
+    // Validate role if provided
+    if let Some(role) = body.get("role").and_then(|v| v.as_str()) {
+        let valid_roles = ["wan", "lan", "dmz", "mgmt", "guest"];
+        if !valid_roles.contains(&role) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": format!("invalid role: {role}. Must be one of: {}", valid_roles.join(", ")) })),
+            );
+        }
+    }
+
+    // Build dynamic UPDATE
+    let mut sets = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(role) = body.get("role").and_then(|v| v.as_str()) {
+        sets.push("role = ?");
+        params.push(Box::new(role.to_string()));
+    }
+    if let Some(vlan_id) = body.get("vlan_id") {
+        sets.push("vlan_id = ?");
+        if vlan_id.is_null() {
+            params.push(Box::new(Option::<i64>::None));
+        } else if let Some(v) = vlan_id.as_i64() {
+            if !(1..=4094).contains(&v) {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": "vlan_id must be 1-4094" })),
+                );
+            }
+            params.push(Box::new(Some(v)));
+        }
+    }
+    if let Some(mtu) = body.get("mtu").and_then(|v| v.as_i64()) {
+        if !(576..=9216).contains(&mtu) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "mtu must be 576-9216" })),
+            );
+        }
+        sets.push("mtu = ?");
+        params.push(Box::new(mtu));
+    }
+    if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
+        sets.push("enabled = ?");
+        params.push(Box::new(enabled as i32));
+    }
+
+    if sets.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "no fields to update" })),
+        );
+    }
+
+    let sql = format!("UPDATE interfaces SET {} WHERE name = ?", sets.join(", "));
+    params.push(Box::new(name.clone()));
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    match conn.execute(&sql, param_refs.as_slice()) {
+        Ok(0) => (StatusCode::NOT_FOUND, Json(json!({ "error": "interface not found" }))),
+        Ok(_) => {
+            tracing::info!(interface = %name, "interface updated");
+            (StatusCode::OK, Json(json!({ "ok": true })))
+        }
+        Err(e) => internal_err(anyhow::anyhow!("{e}")),
+    }
+}
+
+/// Toggle interface enabled state.
+async fn interface_toggle(
+    _auth: AuthUser,
+    Path(name): Path<String>,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let enabled = match body.get("enabled").and_then(|v| v.as_bool()) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "missing 'enabled' boolean" })),
+            );
+        }
+    };
+    let conn = db.lock().await;
+    match conn.execute(
+        "UPDATE interfaces SET enabled = ? WHERE name = ?",
+        rusqlite::params![enabled as i32, name],
+    ) {
+        Ok(0) => (StatusCode::NOT_FOUND, Json(json!({ "error": "interface not found" }))),
+        Ok(_) => {
+            tracing::info!(interface = %name, enabled, "interface toggled");
+            (StatusCode::OK, Json(json!({ "ok": true })))
+        }
+        Err(e) => internal_err(anyhow::anyhow!("{e}")),
+    }
+}
+
+/// Create a VLAN sub-interface.
+async fn interface_create_vlan(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let parent = match body.get("parent").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "missing 'parent' interface name" })),
+            );
+        }
+    };
+    let vlan_id = match body.get("vlan_id").and_then(|v| v.as_i64()) {
+        Some(v) if (1..=4094).contains(&v) => v,
+        _ => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "vlan_id must be 1-4094" })),
+            );
+        }
+    };
+    let role = body
+        .get("role")
+        .and_then(|v| v.as_str())
+        .unwrap_or("lan")
+        .to_string();
+    let valid_roles = ["wan", "lan", "dmz", "mgmt", "guest"];
+    if !valid_roles.contains(&role.as_str()) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": format!("invalid role: {role}") })),
+        );
+    }
+
+    let vlan_name = format!("{parent}.{vlan_id}");
+    let conn = db.lock().await;
+
+    // Check parent exists
+    let parent_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM interfaces WHERE name = ?",
+            [&parent],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if !parent_exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("parent interface '{parent}' not found") })),
+        );
+    }
+
+    // Check VLAN doesn't already exist
+    let already_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM interfaces WHERE name = ?",
+            [&vlan_name],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if already_exists {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!("interface '{vlan_name}' already exists") })),
+        );
+    }
+
+    match conn.execute(
+        "INSERT INTO interfaces (name, mac, ips, mtu, is_up, role, vlan_id, enabled)
+         VALUES (?, '', '[]', 1500, 0, ?, ?, 1)",
+        rusqlite::params![vlan_name, role, vlan_id],
+    ) {
+        Ok(_) => {
+            tracing::info!(
+                parent = %parent,
+                vlan_id,
+                vlan_name = %vlan_name,
+                role = %role,
+                "VLAN sub-interface created"
+            );
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "name": vlan_name,
+                    "vlan_id": vlan_id,
+                    "role": role,
+                })),
+            )
+        }
+        Err(e) => internal_err(anyhow::anyhow!("{e}")),
+    }
+}
+
+/// Delete a VLAN sub-interface. Only allows deleting VLAN interfaces (has vlan_id).
+async fn interface_delete(
+    _auth: AuthUser,
+    Path(name): Path<String>,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    let conn = db.lock().await;
+
+    // Only allow deleting VLAN sub-interfaces, not physical ones
+    let is_vlan: bool = conn
+        .query_row(
+            "SELECT vlan_id IS NOT NULL FROM interfaces WHERE name = ?",
+            [&name],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+
+    if !is_vlan {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "cannot delete physical interfaces, only VLAN sub-interfaces" })),
+        );
+    }
+
+    match conn.execute("DELETE FROM interfaces WHERE name = ?", [&name]) {
+        Ok(0) => (StatusCode::NOT_FOUND, Json(json!({ "error": "interface not found" }))),
+        Ok(_) => {
+            tracing::info!(interface = %name, "VLAN sub-interface deleted");
+            (StatusCode::OK, Json(json!({ "ok": true })))
+        }
+        Err(e) => internal_err(anyhow::anyhow!("{e}")),
+    }
 }
 
 async fn me_handler(auth_user: AuthUser) -> Json<Value> {
@@ -1447,6 +1843,225 @@ async fn wan_reconnect(
 
     match sfgw_net::wan::apply_wan_config(&config).await {
         Ok(()) => (StatusCode::OK, Json(json!({ "status": "reconnecting" }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// User management
+// ---------------------------------------------------------------------------
+
+const VALID_ROLES: &[&str] = &["admin", "readonly"];
+
+async fn users_list(
+    auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    if auth.user.role != "admin" {
+        return err_response(StatusCode::FORBIDDEN, anyhow::anyhow!("admin only"));
+    }
+    let conn = db.lock().await;
+    let mut stmt = match conn.prepare("SELECT id, username, role, created_at FROM users ORDER BY id") {
+        Ok(s) => s,
+        Err(e) => return internal_err(e),
+    };
+    let rows = match stmt.query_map([], |row| {
+        Ok(json!({
+            "id": row.get::<_, i64>(0)?,
+            "username": row.get::<_, String>(1)?,
+            "role": row.get::<_, String>(2)?,
+            "created_at": row.get::<_, String>(3)?,
+        }))
+    }) {
+        Ok(r) => r,
+        Err(e) => return internal_err(e),
+    };
+    let users: Vec<Value> = rows.filter_map(|r| r.ok()).collect();
+
+    (StatusCode::OK, Json(json!({ "users": users })))
+}
+
+async fn users_create(
+    auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    if auth.user.role != "admin" {
+        return err_response(StatusCode::FORBIDDEN, anyhow::anyhow!("admin only"));
+    }
+
+    let username = match body.get("username").and_then(|v| v.as_str()) {
+        Some(u) if !u.is_empty() && u.len() <= 64 => u,
+        _ => return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("username required (1-64 chars)")),
+    };
+    let password = match body.get("password").and_then(|v| v.as_str()) {
+        Some(p) if p.len() >= 8 => p,
+        _ => return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("password required (min 8 chars)")),
+    };
+    let role = body.get("role").and_then(|v| v.as_str()).unwrap_or("admin");
+    if !VALID_ROLES.contains(&role) {
+        return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("invalid role"));
+    }
+
+    let password_hash = match auth::hash_password(password) {
+        Ok(h) => h,
+        Err(e) => return internal_err(e),
+    };
+
+    match auth::create_user(&db, username, &password_hash, role).await {
+        Ok(id) => (StatusCode::CREATED, Json(json!({ "id": id, "username": username, "role": role }))),
+        Err(e) => {
+            if e.to_string().contains("UNIQUE") {
+                err_response(StatusCode::CONFLICT, anyhow::anyhow!("username already exists"))
+            } else {
+                internal_err(e)
+            }
+        }
+    }
+}
+
+async fn users_update(
+    auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    if auth.user.role != "admin" {
+        return err_response(StatusCode::FORBIDDEN, anyhow::anyhow!("admin only"));
+    }
+
+    let conn = db.lock().await;
+
+    // Build dynamic UPDATE
+    let mut sets = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(role) = body.get("role").and_then(|v| v.as_str()) {
+        if !VALID_ROLES.contains(&role) {
+            return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("invalid role"));
+        }
+        // Prevent demoting last admin
+        if role != "admin" && id == auth.user.id {
+            let admin_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM users WHERE role = 'admin'", [], |r| r.get(0))
+                .unwrap_or(0);
+            if admin_count <= 1 {
+                return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("cannot demote the last admin"));
+            }
+        }
+        sets.push(format!("role = ?{}", params.len() + 1));
+        params.push(Box::new(role.to_string()));
+    }
+
+    if let Some(username) = body.get("username").and_then(|v| v.as_str()) {
+        if username.is_empty() || username.len() > 64 {
+            return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("username must be 1-64 chars"));
+        }
+        sets.push(format!("username = ?{}", params.len() + 1));
+        params.push(Box::new(username.to_string()));
+    }
+
+    if sets.is_empty() {
+        return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("nothing to update"));
+    }
+
+    params.push(Box::new(id));
+    let sql = format!("UPDATE users SET {} WHERE id = ?{}", sets.join(", "), params.len());
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    match conn.execute(&sql, param_refs.as_slice()) {
+        Ok(0) => err_response(StatusCode::NOT_FOUND, anyhow::anyhow!("user not found")),
+        Ok(_) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Err(e) => {
+            if e.to_string().contains("UNIQUE") {
+                err_response(StatusCode::CONFLICT, anyhow::anyhow!("username already exists"))
+            } else {
+                internal_err(e)
+            }
+        }
+    }
+}
+
+async fn users_delete(
+    auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    if auth.user.role != "admin" {
+        return err_response(StatusCode::FORBIDDEN, anyhow::anyhow!("admin only"));
+    }
+
+    // Cannot delete yourself
+    if id == auth.user.id {
+        return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("cannot delete your own account"));
+    }
+
+    let conn = db.lock().await;
+
+    // Prevent deleting last admin
+    let target_role: String = match conn.query_row(
+        "SELECT role FROM users WHERE id = ?1",
+        rusqlite::params![id],
+        |r| r.get(0),
+    ) {
+        Ok(r) => r,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return err_response(StatusCode::NOT_FOUND, anyhow::anyhow!("user not found"));
+        }
+        Err(e) => return internal_err(e),
+    };
+
+    if target_role == "admin" {
+        let admin_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM users WHERE role = 'admin'", [], |r| r.get(0))
+            .unwrap_or(0);
+        if admin_count <= 1 {
+            return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("cannot delete the last admin"));
+        }
+    }
+
+    // Delete sessions for this user first
+    let _ = conn.execute("DELETE FROM sessions WHERE user_id = ?1", rusqlite::params![id]);
+
+    match conn.execute("DELETE FROM users WHERE id = ?1", rusqlite::params![id]) {
+        Ok(0) => err_response(StatusCode::NOT_FOUND, anyhow::anyhow!("user not found")),
+        Ok(_) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn users_change_password(
+    auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    // Admins can change any password; non-admins can only change their own
+    if auth.user.role != "admin" && auth.user.id != id {
+        return err_response(StatusCode::FORBIDDEN, anyhow::anyhow!("forbidden"));
+    }
+
+    let new_password = match body.get("password").and_then(|v| v.as_str()) {
+        Some(p) if p.len() >= 8 => p,
+        _ => return err_response(StatusCode::BAD_REQUEST, anyhow::anyhow!("password required (min 8 chars)")),
+    };
+
+    let password_hash = match auth::hash_password(new_password) {
+        Ok(h) => h,
+        Err(e) => return internal_err(e),
+    };
+
+    let conn = db.lock().await;
+
+    // Invalidate all existing sessions for this user (force re-login)
+    let _ = conn.execute("DELETE FROM sessions WHERE user_id = ?1", rusqlite::params![id]);
+
+    match conn.execute(
+        "UPDATE users SET password_hash = ?1 WHERE id = ?2",
+        rusqlite::params![password_hash, id],
+    ) {
+        Ok(0) => err_response(StatusCode::NOT_FOUND, anyhow::anyhow!("user not found")),
+        Ok(_) => (StatusCode::OK, Json(json!({ "ok": true }))),
         Err(e) => internal_err(e),
     }
 }

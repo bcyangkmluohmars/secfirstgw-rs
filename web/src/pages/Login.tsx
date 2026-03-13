@@ -10,6 +10,8 @@ import {
   setEnvelopeKey,
   isE2EESupported,
 } from '../crypto'
+import { useBoot } from '../boot'
+import { Input, Button } from '../components/ui'
 
 export default function Login() {
   const [username, setUsername] = useState('')
@@ -17,6 +19,7 @@ export default function Login() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
+  const { setReady } = useBoot()
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -57,6 +60,7 @@ export default function Login() {
         setEnvelopeKey(null)
       }
 
+      setReady()
       navigate('/')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed')
@@ -68,7 +72,6 @@ export default function Login() {
   return (
     <div className="min-h-screen bg-navy-950 flex items-center justify-center p-4">
       <div className="w-full max-w-sm animate-fade-in">
-        {/* Logo */}
         <div className="text-center mb-8">
           <div className="w-14 h-14 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center mx-auto mb-4">
             <svg className="w-7 h-7 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
@@ -89,42 +92,24 @@ export default function Login() {
           )}
 
           <div className="space-y-4">
-            <div>
-              <label className="block text-[11px] font-medium text-navy-400 mb-1.5">Username</label>
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoComplete="username"
-                required
-                className="w-full bg-navy-800 border border-navy-700/50 rounded-lg px-3 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50 transition-colors placeholder-navy-600"
-              />
-            </div>
-            <div>
-              <label className="block text-[11px] font-medium text-navy-400 mb-1.5">Password</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="current-password"
-                required
-                className="w-full bg-navy-800 border border-navy-700/50 rounded-lg px-3 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50 transition-colors placeholder-navy-600"
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed text-emerald-400 text-sm font-medium py-2.5 rounded-lg transition-all duration-200"
-            >
-              {loading ? (
-                <span className="flex items-center justify-center gap-2">
-                  <div className="w-3.5 h-3.5 border-2 border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin" />
-                  Establishing secure channel...
-                </span>
-              ) : (
-                'Sign In'
-              )}
-            </button>
+            <Input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoComplete="username"
+              required
+              label="Username"
+            />
+            <Input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+              required
+              label="Password"
+            />
+            <Button type="submit" loading={loading} className="w-full py-2.5">
+              {loading ? 'Establishing secure channel...' : 'Sign In'}
+            </Button>
           </div>
         </form>
 

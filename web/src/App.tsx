@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { Routes, Route, Navigate, useNavigate } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import { Routes, Route, Navigate } from 'react-router-dom'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
+import Interfaces from './pages/Interfaces'
+import Wan from './pages/Wan'
 import Firewall from './pages/Firewall'
 import Network from './pages/Network'
 import Vpn from './pages/Vpn'
@@ -11,88 +13,100 @@ import Devices from './pages/Devices'
 import Ids from './pages/Ids'
 import Settings from './pages/Settings'
 import Login from './pages/Login'
-import { isAuthenticated, clearToken } from './api'
+import Setup from './pages/Setup'
+import { api, isAuthenticated, clearToken } from './api'
 import { initSession } from './crypto'
+import { BootContext, type BootStatus } from './boot'
+import { ToastProvider } from './hooks/useToast'
 
-/**
- * Auth guard: on mount, calls /auth/session to:
- * 1. Establish E2EE channel (X25519 key exchange)
- * 2. If token exists, validate + resume session with new envelope key
- * 3. Redirect to /login if not authenticated
- */
-function AuthGuard({ children }: { children: React.ReactNode }) {
-  const navigate = useNavigate()
-  const [ready, setReady] = useState(false)
+function useBootCheck() {
+  const [status, setStatus] = useState<BootStatus>('loading')
+  const ran = useRef(false)
 
   useEffect(() => {
-    let cancelled = false
+    if (ran.current) return
+    ran.current = true
 
-    async function init() {
-      if (!isAuthenticated()) {
-        navigate('/login', { replace: true })
-        return
-      }
+    async function check() {
+      try {
+        const { needed } = await api.setupStatus()
+        if (needed) { setStatus('setup'); return }
+      } catch { /* fall through */ }
+
+      if (!isAuthenticated()) { setStatus('login'); return }
 
       try {
         const result = await initSession()
-
-        if (!result.authenticated) {
-          clearToken()
-          if (!cancelled) navigate('/login', { replace: true })
-          return
-        }
-
-        if (!cancelled) setReady(true)
+        if (!result.authenticated) { clearToken(); setStatus('login'); return }
+        setStatus('ready')
       } catch (err) {
         if (import.meta.env.DEV) console.error('Session init failed:', err)
         clearToken()
-        if (!cancelled) navigate('/login', { replace: true })
+        setStatus('login')
       }
     }
 
-    init()
-    return () => { cancelled = true }
-  }, [navigate])
+    check()
+  }, [])
 
-  if (!ready) {
-    return (
-      <div className="min-h-screen bg-navy-950 flex items-center justify-center">
-        <div className="text-center animate-fade-in">
-          <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center mx-auto mb-4">
-            <svg className="w-5 h-5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 2L4 6v6c0 5.25 3.4 10.15 8 11.43C16.6 22.15 20 17.25 20 12V6l-8-4z" />
-            </svg>
-          </div>
-          <div className="w-6 h-6 border-2 border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-sm text-navy-400">Establishing secure channel...</p>
-        </div>
-      </div>
-    )
+  const setLogin = useCallback(() => setStatus('login'), [])
+  const setReady = useCallback(() => setStatus('ready'), [])
+  const setLogout = useCallback(() => setStatus('login'), [])
+
+  return { status, setLogin, setReady, setLogout }
+}
+
+function defaultPath(status: BootStatus): string {
+  switch (status) {
+    case 'setup': return '/setup'
+    case 'login': return '/login'
+    default: return '/'
   }
+}
 
-  return <>{children}</>
+function LoadingScreen() {
+  return (
+    <div className="min-h-screen bg-navy-950 flex items-center justify-center">
+      <div className="text-center animate-fade-in">
+        <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center mx-auto mb-4">
+          <svg className="w-5 h-5 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2L4 6v6c0 5.25 3.4 10.15 8 11.43C16.6 22.15 20 17.25 20 12V6l-8-4z" />
+          </svg>
+        </div>
+        <div className="w-6 h-6 border-2 border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin mx-auto mb-3" />
+        <p className="text-sm text-navy-400">Establishing secure channel...</p>
+      </div>
+    </div>
+  )
 }
 
 export default function App() {
+  const boot = useBootCheck()
+
+  if (boot.status === 'loading') return <LoadingScreen />
+
   return (
-    <Routes>
-      <Route path="/login" element={<Login />} />
-      <Route
-        element={
-          <AuthGuard>
-            <Layout />
-          </AuthGuard>
-        }
-      >
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/firewall" element={<Firewall />} />
-        <Route path="/network" element={<Network />} />
-        <Route path="/vpn" element={<Vpn />} />
-        <Route path="/devices" element={<Devices />} />
-        <Route path="/ids" element={<Ids />} />
-        <Route path="/settings" element={<Settings />} />
-      </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    <BootContext.Provider value={boot}>
+      <ToastProvider>
+        <Routes>
+          <Route path="/setup" element={<Setup />} />
+          <Route path="/login" element={<Login />} />
+          {boot.status === 'ready' && (
+            <Route element={<Layout />}>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/interfaces" element={<Interfaces />} />
+              <Route path="/wan" element={<Wan />} />
+              <Route path="/network" element={<Network />} />
+              <Route path="/firewall" element={<Firewall />} />
+              <Route path="/vpn" element={<Vpn />} />
+              <Route path="/devices" element={<Devices />} />
+              <Route path="/ids" element={<Ids />} />
+              <Route path="/settings" element={<Settings />} />
+            </Route>
+          )}
+          <Route path="*" element={<Navigate to={defaultPath(boot.status)} replace />} />
+        </Routes>
+      </ToastProvider>
+    </BootContext.Provider>
   )
 }

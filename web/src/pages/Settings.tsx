@@ -1,83 +1,325 @@
-import { useState } from 'react'
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
-interface SettingGroup {
-  title: string
-  fields: { label: string; value: string; type?: string }[]
+import { useEffect, useState, useCallback } from 'react'
+import { api, type UserInfo } from '../api'
+import { Card, PageHeader, Spinner, Button, Modal, Input, Select, Badge } from '../components/ui'
+import { useToast } from '../hooks/useToast'
+
+interface SystemInfo {
+  hostname?: string
+  platform?: string
+  arch?: string
+  kernel?: string
+  cpu_count?: number
+  version?: string
+  schema_version?: number
+  [key: string]: unknown
 }
 
-const settingGroups: SettingGroup[] = [
-  {
-    title: 'General',
-    fields: [
-      { label: 'Hostname', value: 'secfirstgw' },
-      { label: 'Timezone', value: 'UTC' },
-      { label: 'DNS Server 1', value: '1.1.1.1' },
-      { label: 'DNS Server 2', value: '8.8.8.8' },
-    ],
-  },
-  {
-    title: 'Management',
-    fields: [
-      { label: 'Web UI Port', value: '443' },
-      { label: 'SSH Port', value: '22' },
-      { label: 'API Port', value: '8443' },
-    ],
-  },
-  {
-    title: 'Logging',
-    fields: [
-      { label: 'Log Level', value: 'info' },
-      { label: 'Syslog Server', value: '' },
-      { label: 'Log Retention (days)', value: '30' },
-    ],
-  },
-]
-
-// TODO: Wire to settings API when implemented
 export default function Settings() {
-  const [groups, setGroups] = useState(settingGroups)
+  const [system, setSystem] = useState<SystemInfo | null>(null)
+  const [currentUser, setCurrentUser] = useState<{ id: number; username: string; role: string } | null>(null)
+  const [users, setUsers] = useState<UserInfo[]>([])
+  const [loading, setLoading] = useState(true)
+  const [showCreateUser, setShowCreateUser] = useState(false)
+  const [showChangePassword, setShowChangePassword] = useState<UserInfo | null>(null)
+  const [showEditUser, setShowEditUser] = useState<UserInfo | null>(null)
+  const [newUser, setNewUser] = useState({ username: '', password: '', confirmPassword: '', role: 'admin' })
+  const [newPassword, setNewPassword] = useState({ password: '', confirmPassword: '' })
+  const [editRole, setEditRole] = useState('')
+  const toast = useToast()
 
-  function handleChange(gi: number, fi: number, val: string) {
-    setGroups((prev) => {
-      const next = [...prev]
-      next[gi] = {
-        ...next[gi],
-        fields: next[gi].fields.map((f, i) => (i === fi ? { ...f, value: val } : f)),
-      }
-      return next
-    })
+  const load = useCallback(async () => {
+    try {
+      const [sysRes, meRes, usersRes] = await Promise.all([
+        api.getSystem(),
+        api.getMe(),
+        api.getUsers(),
+      ])
+      setSystem(sysRes as SystemInfo)
+      setCurrentUser(meRes.user)
+      setUsers(usersRes.users ?? [])
+    } catch (e: unknown) { toast.error((e as Error).message) }
+    finally { setLoading(false) }
+  }, [toast])
+
+  useEffect(() => { load() }, [load])
+
+  const handleCreateUser = async () => {
+    if (!newUser.username.trim()) { toast.error('Username is required'); return }
+    if (newUser.password.length < 8) { toast.error('Password must be at least 8 characters'); return }
+    if (newUser.password !== newUser.confirmPassword) { toast.error('Passwords do not match'); return }
+    try {
+      await api.createUser({ username: newUser.username.trim(), password: newUser.password, role: newUser.role })
+      toast.success(`User "${newUser.username}" created`)
+      setShowCreateUser(false)
+      setNewUser({ username: '', password: '', confirmPassword: '', role: 'admin' })
+      load()
+    } catch (e: unknown) { toast.error((e as Error).message) }
   }
 
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-gray-100">Settings</h2>
-        <button
-          disabled
-          className="px-4 py-2 text-xs font-medium rounded-lg border transition-all duration-200 bg-navy-800 text-navy-500 border-navy-700/50 cursor-not-allowed"
-        >
-          Not yet implemented
-        </button>
-      </div>
+  const handleChangePassword = async () => {
+    if (!showChangePassword) return
+    if (newPassword.password.length < 8) { toast.error('Password must be at least 8 characters'); return }
+    if (newPassword.password !== newPassword.confirmPassword) { toast.error('Passwords do not match'); return }
+    try {
+      await api.changePassword(showChangePassword.id, newPassword.password)
+      toast.success(`Password updated for "${showChangePassword.username}"`)
+      setShowChangePassword(null)
+      setNewPassword({ password: '', confirmPassword: '' })
+    } catch (e: unknown) { toast.error((e as Error).message) }
+  }
 
-      {groups.map((group, gi) => (
-        <div key={group.title} className="bg-navy-900 border border-navy-800/50 rounded-xl p-5 animate-fade-in">
-          <p className="text-[11px] font-medium text-navy-400 uppercase tracking-wider mb-5">{group.title}</p>
-          <div className="space-y-4">
-            {group.fields.map((field, fi) => (
-              <div key={field.label} className="flex items-center gap-4">
-                <label className="w-48 text-sm text-navy-400 shrink-0">{field.label}</label>
-                <input
-                  type={field.type ?? 'text'}
-                  value={field.value}
-                  onChange={(e) => handleChange(gi, fi, e.target.value)}
-                  className="flex-1 bg-navy-800 border border-navy-700/50 rounded-lg px-3 py-2 text-sm font-mono text-gray-200 focus:outline-none focus:border-emerald-500/50 transition-colors"
-                />
-              </div>
-            ))}
+  const handleUpdateRole = async () => {
+    if (!showEditUser) return
+    try {
+      await api.updateUser(showEditUser.id, { role: editRole })
+      toast.success(`Role updated for "${showEditUser.username}"`)
+      setShowEditUser(null)
+      load()
+    } catch (e: unknown) { toast.error((e as Error).message) }
+  }
+
+  const handleDeleteUser = async (user: UserInfo) => {
+    if (user.id === currentUser?.id) { toast.error('Cannot delete your own account'); return }
+    try {
+      await api.deleteUser(user.id)
+      toast.success(`User "${user.username}" deleted`)
+      load()
+    } catch (e: unknown) { toast.error((e as Error).message) }
+  }
+
+  if (loading) return <Spinner label="Loading settings..." />
+
+  const isAdmin = currentUser?.role === 'admin'
+
+  return (
+    <div className="space-y-6 stagger-children">
+      <PageHeader title="Settings" />
+
+      <Card title="System Information">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {[
+            ['Hostname', system?.hostname ?? '---'],
+            ['Platform', system?.platform ?? '---'],
+            ['Architecture', system?.arch ?? '---'],
+            ['Kernel', system?.kernel ?? '---'],
+            ['CPU Cores', system?.cpu_count ?? '---'],
+            ['Version', system?.version ?? '---'],
+            ['DB Schema', system?.schema_version ?? '---'],
+          ].map(([label, value]) => (
+            <div key={String(label)} className="flex items-center gap-4">
+              <span className="w-32 text-sm text-navy-400 shrink-0">{String(label)}</span>
+              <span className="text-sm font-mono text-gray-200">{String(value)}</span>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {/* Current account */}
+      <Card title="Your Account">
+        {currentUser ? (
+          <div className="space-y-3">
+            <div className="flex items-center gap-4">
+              <span className="w-32 text-sm text-navy-400">Username</span>
+              <span className="text-sm font-mono text-gray-200">{currentUser.username}</span>
+            </div>
+            <div className="flex items-center gap-4">
+              <span className="w-32 text-sm text-navy-400">Role</span>
+              <Badge variant={currentUser.role === 'admin' ? 'success' : 'info'}>{currentUser.role.toUpperCase()}</Badge>
+            </div>
+            <div className="pt-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  setNewPassword({ password: '', confirmPassword: '' })
+                  setShowChangePassword(currentUser as UserInfo)
+                }}
+              >
+                Change Password
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-navy-500">Unable to load account info</p>
+        )}
+      </Card>
+
+      {/* User management */}
+      {isAdmin && (
+        <Card
+          title="User Management"
+          actions={<Button size="sm" onClick={() => {
+            setNewUser({ username: '', password: '', confirmPassword: '', role: 'admin' })
+            setShowCreateUser(true)
+          }}>+ Add User</Button>}
+        >
+          {users.length === 0 ? (
+            <p className="text-sm text-navy-500">No users found</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-navy-800/50">
+                    {['Username', 'Role', 'Created', ''].map((h) => (
+                      <th key={h} className="text-left px-4 py-2 text-[11px] text-navy-400 uppercase tracking-wider font-medium">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {users.map((user) => (
+                    <tr key={user.id} className="border-b border-navy-800/30 hover:bg-navy-800/20 transition-colors">
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-gray-200">{user.username}</span>
+                          {user.id === currentUser?.id && (
+                            <span className="text-[10px] text-navy-500 border border-navy-700/50 rounded px-1.5 py-0.5">you</span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <Badge variant={user.role === 'admin' ? 'success' : 'info'}>{user.role.toUpperCase()}</Badge>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-navy-400 font-mono">
+                        {user.created_at ? new Date(user.created_at).toLocaleDateString() : '---'}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-1.5">
+                          <Button variant="secondary" size="sm" onClick={() => {
+                            setEditRole(user.role)
+                            setShowEditUser(user)
+                          }}>Edit</Button>
+                          <Button variant="secondary" size="sm" onClick={() => {
+                            setNewPassword({ password: '', confirmPassword: '' })
+                            setShowChangePassword(user)
+                          }}>Password</Button>
+                          {user.id !== currentUser?.id && (
+                            <Button variant="danger" size="sm" onClick={() => handleDeleteUser(user)}>Delete</Button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+      )}
+
+      {/* Create User Modal */}
+      <Modal open={showCreateUser} onClose={() => setShowCreateUser(false)} title="Create User">
+        <div className="space-y-4">
+          <Input
+            label="Username"
+            mono
+            value={newUser.username}
+            onChange={(e) => setNewUser({ ...newUser, username: e.target.value })}
+            placeholder="admin2"
+          />
+          <Input
+            label="Password (min. 8 characters)"
+            type="password"
+            mono
+            value={newUser.password}
+            onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+          />
+          <Input
+            label="Confirm Password"
+            type="password"
+            mono
+            value={newUser.confirmPassword}
+            onChange={(e) => setNewUser({ ...newUser, confirmPassword: e.target.value })}
+          />
+          <Select
+            label="Role"
+            value={newUser.role}
+            onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}
+            options={[
+              { value: 'admin', label: 'Admin — Full access' },
+              { value: 'readonly', label: 'Read-only — View only' },
+            ]}
+          />
+          <div className="flex gap-2 pt-2">
+            <Button onClick={handleCreateUser}>Create User</Button>
+            <Button variant="secondary" onClick={() => setShowCreateUser(false)}>Cancel</Button>
           </div>
         </div>
-      ))}
+      </Modal>
+
+      {/* Change Password Modal */}
+      <Modal
+        open={showChangePassword !== null}
+        onClose={() => setShowChangePassword(null)}
+        title={`Change Password: ${showChangePassword?.username ?? ''}`}
+      >
+        <div className="space-y-4">
+          <Input
+            label="New Password (min. 8 characters)"
+            type="password"
+            mono
+            value={newPassword.password}
+            onChange={(e) => setNewPassword({ ...newPassword, password: e.target.value })}
+          />
+          <Input
+            label="Confirm New Password"
+            type="password"
+            mono
+            value={newPassword.confirmPassword}
+            onChange={(e) => setNewPassword({ ...newPassword, confirmPassword: e.target.value })}
+          />
+          {showChangePassword && showChangePassword.id !== currentUser?.id && (
+            <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
+              <p className="text-xs text-amber-400">This will log out all active sessions for this user.</p>
+            </div>
+          )}
+          <div className="flex gap-2 pt-2">
+            <Button onClick={handleChangePassword}>Change Password</Button>
+            <Button variant="secondary" onClick={() => setShowChangePassword(null)}>Cancel</Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Edit User Modal */}
+      <Modal
+        open={showEditUser !== null}
+        onClose={() => setShowEditUser(null)}
+        title={`Edit User: ${showEditUser?.username ?? ''}`}
+      >
+        <div className="space-y-4">
+          <Select
+            label="Role"
+            value={editRole}
+            onChange={(e) => setEditRole(e.target.value)}
+            options={[
+              { value: 'admin', label: 'Admin — Full access' },
+              { value: 'readonly', label: 'Read-only — View only' },
+            ]}
+          />
+          {showEditUser?.id === currentUser?.id && editRole !== 'admin' && (
+            <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3">
+              <p className="text-xs text-red-400">Warning: Demoting yourself from admin will restrict your access.</p>
+            </div>
+          )}
+          <div className="flex gap-2 pt-2">
+            <Button onClick={handleUpdateRole}>Save</Button>
+            <Button variant="secondary" onClick={() => setShowEditUser(null)}>Cancel</Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Card title="Backup / Restore">
+        <p className="text-sm text-navy-500">Configuration backup and restore will be available in a future release.</p>
+      </Card>
+
+      <Card title="Firmware">
+        <div className="flex items-center gap-4">
+          <span className="w-32 text-sm text-navy-400">Version</span>
+          <span className="text-sm font-mono text-gray-200">{system?.version ?? '0.1.0'}</span>
+        </div>
+        <p className="text-xs text-navy-500 mt-3">Firmware updates will be available in a future release.</p>
+      </Card>
     </div>
   )
 }

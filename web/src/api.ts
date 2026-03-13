@@ -50,9 +50,6 @@ async function request<T>(path: string, opts: ApiOptions = {}): Promise<T> {
 
   if (res.status === 401) {
     localStorage.removeItem('token');
-    if (window.location.pathname !== '/login') {
-      window.location.href = '/login';
-    }
     throw new ApiError(401, 'unauthorized');
   }
 
@@ -113,9 +110,16 @@ export interface SystemStatus {
 
 export interface NetworkInterface {
   name: string;
+  mac: string;
+  ips: string[];
+  mtu: number;
+  is_up: boolean;
   role: string;
   vlan_id: number | null;
   enabled: boolean;
+  speed: string | null;
+  driver: string | null;
+  port_type: string | null;
 }
 
 export interface Device {
@@ -266,6 +270,49 @@ export interface DeviceSummary {
   state: string;
 }
 
+// WAN types
+export interface WanPortConfig {
+  interface: string
+  connection: WanConnectionType
+  enabled: boolean
+  priority: number
+  weight: number
+  health_check: string
+  health_interval_secs: number
+  mtu: number | null
+  dns_override: string[] | null
+  mac_override: string | null
+}
+
+export type WanConnectionType =
+  | { type: 'dhcp' }
+  | { type: 'static'; address: string; gateway: string; address_v6?: string; gateway_v6?: string }
+  | { type: 'pppoe'; username: string; password: string; mtu?: number; service_name?: string; vlan_id?: number }
+  | { type: 'dslite'; aftr?: string }
+  | { type: 'vlan'; vlan_id: number; inner: WanConnectionType }
+
+export interface WanStatus {
+  interface: string
+  connection_type: string
+  link_up: boolean
+  ipv4: string | null
+  ipv6: string | null
+  gateway_v4: string | null
+  gateway_v6: string | null
+  dns_servers: string[]
+  uptime_secs: number
+  rx_bytes: number
+  tx_bytes: number
+}
+
+// User management types
+export interface UserInfo {
+  id: number;
+  username: string;
+  role: string;
+  created_at: string;
+}
+
 // ---- API endpoints ----
 
 export const api = {
@@ -273,6 +320,14 @@ export const api = {
   getStatus: () => request<SystemStatus>('/api/v1/status'),
   getSystem: () => request<Record<string, unknown>>('/api/v1/system'),
   getInterfaces: () => request<{ interfaces: NetworkInterface[] }>('/api/v1/interfaces'),
+  updateInterface: (name: string, body: { role?: string; vlan_id?: number | null; mtu?: number; enabled?: boolean }) =>
+    request<{ ok: boolean }>(`/api/v1/interfaces/${encodeURIComponent(name)}`, { method: 'PUT', body }),
+  toggleInterface: (name: string, enabled: boolean) =>
+    request<{ ok: boolean }>(`/api/v1/interfaces/${encodeURIComponent(name)}/toggle`, { method: 'POST', body: { enabled } }),
+  createVlan: (body: { parent: string; vlan_id: number; role?: string }) =>
+    request<{ name: string; vlan_id: number; role: string }>('/api/v1/interfaces/vlan', { method: 'POST', body }),
+  deleteInterface: (name: string) =>
+    request<{ ok: boolean }>(`/api/v1/interfaces/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   getMe: () => request<{ user: { id: number; username: string; role: string } }>('/api/v1/auth/me'),
   logout: () => request<void>('/api/v1/auth/logout', { method: 'POST' }),
 
@@ -281,8 +336,21 @@ export const api = {
     request<SessionResponse>('/api/v1/auth/session', { method: 'POST', body, skipE2EE: true }),
   login: (body: Record<string, string>) =>
     request<LoginResponse>('/api/v1/auth/login', { method: 'POST', body, skipE2EE: true }),
+  setupStatus: () =>
+    request<{ needed: boolean }>('/api/v1/auth/setup', { skipE2EE: true }),
   setup: (creds: { username: string; password: string }) =>
     request<{ user_id: number }>('/api/v1/auth/setup', { method: 'POST', body: creds, skipE2EE: true }),
+
+  // Users
+  getUsers: () => request<{ users: UserInfo[] }>('/api/v1/users'),
+  createUser: (body: { username: string; password: string; role?: string }) =>
+    request<{ id: number; username: string; role: string }>('/api/v1/users', { method: 'POST', body }),
+  updateUser: (id: number, body: { username?: string; role?: string }) =>
+    request<{ ok: boolean }>(`/api/v1/users/${id}`, { method: 'PUT', body }),
+  deleteUser: (id: number) =>
+    request<{ ok: boolean }>(`/api/v1/users/${id}`, { method: 'DELETE' }),
+  changePassword: (id: number, password: string) =>
+    request<{ ok: boolean }>(`/api/v1/users/${id}/password`, { method: 'POST', body: { password } }),
 
   // Firewall
   getFirewallRules: () => request<{ rules: FirewallRule[] }>('/api/v1/firewall/rules'),
@@ -330,6 +398,14 @@ export const api = {
   rejectDevice: (mac: string) => request<void>(`/api/v1/devices/${encodeURIComponent(mac)}/reject`, { method: 'POST' }),
   getDeviceConfig: (mac: string) => request<unknown>(`/api/v1/devices/${encodeURIComponent(mac)}/config`),
   pushDeviceConfig: (mac: string, config: unknown) => request<{ sequence: number }>(`/api/v1/devices/${encodeURIComponent(mac)}/config`, { method: 'PUT', body: config }),
+
+  // WAN
+  getWanConfigs: () => request<{ configs: WanPortConfig[] }>('/api/v1/wan'),
+  getWanConfig: (iface: string) => request<{ config: WanPortConfig }>(`/api/v1/wan/${encodeURIComponent(iface)}`),
+  setWanConfig: (iface: string, config: WanPortConfig) => request<void>(`/api/v1/wan/${encodeURIComponent(iface)}`, { method: 'PUT', body: config }),
+  deleteWanConfig: (iface: string) => request<void>(`/api/v1/wan/${encodeURIComponent(iface)}`, { method: 'DELETE' }),
+  getWanStatus: (iface: string) => request<{ wan_status: WanStatus }>(`/api/v1/wan/${encodeURIComponent(iface)}/status`),
+  reconnectWan: (iface: string) => request<void>(`/api/v1/wan/${encodeURIComponent(iface)}/reconnect`, { method: 'POST' }),
 };
 
 export { BASE_URL };
