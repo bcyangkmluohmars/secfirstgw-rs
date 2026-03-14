@@ -907,22 +907,18 @@ fn emit_hardened_defaults(out: &mut String) {
     }
 
     // Allow HTTPS on MGMT only.
-    for iface in &["br-mgmt"] {
-        writeln!(
-            out,
-            "-A SFGW-INPUT -i {iface} -p tcp --dport 443 -j ACCEPT -m comment --comment \"HTTPS on MGMT\""
-        )
-        .unwrap();
-    }
+    writeln!(
+        out,
+        "-A SFGW-INPUT -i br-mgmt -p tcp --dport 443 -j ACCEPT -m comment --comment \"HTTPS on MGMT\""
+    )
+    .unwrap();
 
     // Allow SSH on MGMT only.
-    for iface in &["br-mgmt"] {
-        writeln!(
-            out,
-            "-A SFGW-INPUT -i {iface} -p tcp --dport 22 -j ACCEPT -m comment --comment \"SSH on MGMT\""
-        )
-        .unwrap();
-    }
+    writeln!(
+        out,
+        "-A SFGW-INPUT -i br-mgmt -p tcp --dport 22 -j ACCEPT -m comment --comment \"SSH on MGMT\""
+    )
+    .unwrap();
 
     // Allow Inform (8080) on MGMT VLAN only.
     writeln!(

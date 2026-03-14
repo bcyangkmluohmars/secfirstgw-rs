@@ -884,7 +884,6 @@ fn debug_udm_ruleset_with_db_rules() {
     ];
 
     let config = generate_zone_ruleset(&zones, &rules, &FirewallPolicy::default(), &[]);
-    eprintln!("\n=== GENERATED UDM RULESET ===\n{config}\n=== END ===\n");
 
     // MUST have SSH accept on br-mgmt
     assert!(
