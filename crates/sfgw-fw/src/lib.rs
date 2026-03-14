@@ -560,6 +560,7 @@ pub async fn create_default_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
 }
 
 /// Build the complete set of first-boot default firewall rules.
+#[allow(clippy::vec_init_then_push)]
 fn build_default_rules() -> Vec<FirewallRule> {
     let mut rules = Vec::new();
 

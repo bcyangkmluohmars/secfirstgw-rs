@@ -121,35 +121,34 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
     // Auto-create default WAN configs (DHCP) for interfaces with role=wan
     // that don't already have a wan_config entry.
     for iface in &interfaces {
-        if iface.role == "wan" {
-            if let Ok(existing) = wan::get_wan_config(db, &iface.name).await {
-                if existing.is_none() {
-                    let priority = if iface.name == "eth8" { 1 } else { 2 };
-                    let default_config = wan::WanPortConfig {
-                        interface: iface.name.clone(),
-                        enabled: true,
-                        connection: wan::WanConnectionType::Dhcp,
-                        priority,
-                        weight: 100,
-                        health_check: "1.1.1.1".to_string(),
-                        health_interval_secs: 5,
-                        mtu: None,
-                        dns_override: None,
-                        mac_override: None,
-                    };
-                    if let Err(e) = wan::set_wan_config(db, &default_config).await {
-                        tracing::warn!(
-                            interface = %iface.name,
-                            "failed to create default WAN config: {e}"
-                        );
-                    } else {
-                        tracing::info!(
-                            interface = %iface.name,
-                            priority,
-                            "created default WAN config (DHCP)"
-                        );
-                    }
-                }
+        if iface.role == "wan"
+            && let Ok(existing) = wan::get_wan_config(db, &iface.name).await
+            && existing.is_none()
+        {
+            let priority = if iface.name == "eth8" { 1 } else { 2 };
+            let default_config = wan::WanPortConfig {
+                interface: iface.name.clone(),
+                enabled: true,
+                connection: wan::WanConnectionType::Dhcp,
+                priority,
+                weight: 100,
+                health_check: "1.1.1.1".to_string(),
+                health_interval_secs: 5,
+                mtu: None,
+                dns_override: None,
+                mac_override: None,
+            };
+            if let Err(e) = wan::set_wan_config(db, &default_config).await {
+                tracing::warn!(
+                    interface = %iface.name,
+                    "failed to create default WAN config: {e}"
+                );
+            } else {
+                tracing::info!(
+                    interface = %iface.name,
+                    priority,
+                    "created default WAN config (DHCP)"
+                );
             }
         }
     }
@@ -163,6 +162,7 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
         .map_err(NetError::Database)?;
 
     if network_count == 0 {
+        #[allow(clippy::type_complexity)]
         let defaults: &[(&str, &str, Option<i32>, &str, &str, &str, &str, bool)] = &[
             (
                 "LAN",

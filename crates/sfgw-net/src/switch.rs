@@ -199,14 +199,13 @@ fn setup_switch_vlans(sw: &SwitchLayout, networks: &[NetworkSetup]) -> Result<()
         let prefix = format!("{}.", sw.device);
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(vid_str) = name.strip_prefix(&prefix) {
-                if let Ok(vid) = vid_str.parse::<i32>() {
-                    if !our_vlans.contains(&vid) {
-                        tracing::info!(iface = %name, vlan = vid, "removing stale VLAN sub-interface");
-                        let _ = run_ip(&["link", "set", &name, "down"]);
-                        let _ = run_ip(&["link", "del", &name]);
-                    }
-                }
+            if let Some(vid_str) = name.strip_prefix(&prefix)
+                && let Ok(vid) = vid_str.parse::<i32>()
+                && !our_vlans.contains(&vid)
+            {
+                tracing::info!(iface = %name, vlan = vid, "removing stale VLAN sub-interface");
+                let _ = run_ip(&["link", "set", &name, "down"]);
+                let _ = run_ip(&["link", "del", &name]);
             }
         }
     }
@@ -221,21 +220,21 @@ fn setup_switch_vlans(sw: &SwitchLayout, networks: &[NetworkSetup]) -> Result<()
         let prefix = format!("{}.", sw.device);
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(vid_str) = name.strip_prefix(&prefix) {
-                if let Ok(vid) = vid_str.parse::<i32>() {
-                    if !our_vlans.contains(&vid) {
-                        stale_vids.push(vid);
-                    }
-                }
+            if let Some(vid_str) = name.strip_prefix(&prefix)
+                && let Ok(vid) = vid_str.parse::<i32>()
+                && !our_vlans.contains(&vid)
+            {
+                stale_vids.push(vid);
             }
         }
     }
     // Also check low VLANs (commonly used by other firmware)
     for vid in 2..100i32 {
-        if !our_vlans.contains(&vid) && !stale_vids.contains(&vid) {
-            if swconfig_vlan_has_ports(&sw.device, vid) {
-                stale_vids.push(vid);
-            }
+        if !our_vlans.contains(&vid)
+            && !stale_vids.contains(&vid)
+            && swconfig_vlan_has_ports(&sw.device, vid)
+        {
+            stale_vids.push(vid);
         }
     }
 
@@ -271,13 +270,12 @@ fn setup_switch_vlans(sw: &SwitchLayout, networks: &[NetworkSetup]) -> Result<()
     }
 
     // Set MGMT port PVID
-    if let Some(mp) = sw.mgmt_port {
-        if let Some(mgmt_net) = networks.iter().find(|n| n.zone == "mgmt") {
-            if let Some(vid) = mgmt_net.vlan_id {
-                swconfig_set_pvid(&sw.device, mp, vid)?;
-                tracing::info!(port = mp, pvid = vid, "set MGMT port PVID");
-            }
-        }
+    if let Some(mp) = sw.mgmt_port
+        && let Some(mgmt_net) = networks.iter().find(|n| n.zone == "mgmt")
+        && let Some(vid) = mgmt_net.vlan_id
+    {
+        swconfig_set_pvid(&sw.device, mp, vid)?;
+        tracing::info!(port = mp, pvid = vid, "set MGMT port PVID");
     }
 
     // Apply all changes atomically
