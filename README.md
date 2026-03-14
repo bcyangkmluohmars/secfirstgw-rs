@@ -14,58 +14,63 @@ Because 180+ services, Java, MongoDB without auth, hardcoded credentials, and si
 
 A single Rust binary replacing bloated gateway stacks:
 
-- **Firewall & Router** — nftables via netlink, stateful packet inspection
+- **Firewall & Router** — nftables (modern kernels) + iptables-legacy (UDM Pro / kernel 4.19), dual-stack IPv4/IPv6
 - **Network Controller** — device adoption, provisioning, monitoring
 - **Multi-Core VPN** — WireGuard (boringtun) across all cores
 - **DNS & DHCP** — dnsmasq config generation
 - **Encrypted Storage** — LUKS2 FDE with hardware-bound key derivation
 - **Forward-Secret Logs** — daily key rotation, old keys deleted after export
 - **NAS** — SMB (ksmbd) + NFS
-- **Web UI + API** — axum-based, minimal attack surface
+- **Web UI + API** — axum-based, TLS 1.3 only, E2EE API layer, security headers, rate limiting
+- **IDS/IPS** — ARP/DHCP/DNS/VLAN anomaly detection with alert correlation
+- **Personality** — switchable error message styles (because security doesn't have to be boring)
 
 ## Platforms
 
-| Platform | Networking | Storage | LCD |
-|----------|-----------|---------|-----|
-| Bare Metal (ARM64) | Hardware switch ASICs | LUKS2 on HDD | Yes |
+| Platform | Networking | Storage | Display |
+|----------|-----------|---------|---------|
+| Bare Metal (ARM64) | Hardware switch ASICs | LUKS2 on HDD | HD44780 LCD / Framebuffer |
 | VM | virtio-net / e1000 | LUKS2 on vdisk | No |
 | Docker | macvlan / host | Volume mount | No |
 
 ## Zone Model
 
-Every interface is assigned a zone. Default firewall policies enforce strict isolation:
+Every interface is assigned a zone. Traffic uses bridge interfaces (`br-lan`, `br-mgmt`, etc.) — never individual switch ports. Default firewall policies enforce strict isolation with catch-all DROP on every zone.
 
 | Zone | Purpose |
 |------|---------|
 | **WAN** | Uplink(s) to internet. Multiple WAN ports supported with failover/load-balance. |
-| **LAN** | Trusted internal network. Full access to services and web UI. |
-| **DMZ** | Public-facing services. Isolated from LAN. |
+| **LAN** | Trusted internal network. DNS, DHCP. No direct gateway admin access. |
+| **DMZ** | Public-facing services. Isolated from LAN/MGMT. DNS/DHCP only to gateway. |
 | **MGMT** | Admin management. Web UI, SSH, device adoption (Inform). |
 | **GUEST** | Untrusted clients. Internet only, no internal access. |
 
 ### Default Zone-to-Zone Forwarding Matrix
 
 ```
-From \ To   │  WAN     LAN     DMZ     MGMT    GUEST
+From \ To   |  WAN     LAN     DMZ     MGMT    GUEST
 ────────────┼──────────────────────────────────────────
-WAN         │   -      DROP    DROP    DROP    DROP
-LAN         │   ✓      ✓       ✓       ✓      DROP
-DMZ         │   ✓      DROP    ✓       DROP    DROP
-MGMT        │  opt     ✓       ✓       ✓       ✓
-GUEST       │   ✓      DROP    DROP    DROP    DROP
+WAN         |   -      DROP    DROP    DROP    DROP
+LAN         |   ✓      ✓       ✓       ✓      DROP
+DMZ         |   ✓      DROP    ✓       DROP    DROP
+MGMT        |  opt     ✓       ✓       ✓       ✓
+GUEST       |   ✓      DROP    DROP    DROP    DROP
 ```
 
 ### Per-Zone Input Rules (to Gateway)
 
+Every zone ends with a catch-all DROP — nothing gets through unless explicitly allowed.
+
 | Service          | WAN  | LAN  | DMZ  | MGMT | GUEST |
 |------------------|------|------|------|------|-------|
 | Web UI (443)     | -    | -    | -    | ✓    | -     |
-| SSH (22)         | -    | ✓    | -    | ✓    | -     |
-| DNS (53)         | -    | ✓    | -    | ✓    | ✓     |
-| DHCP (67/68)     | -    | ✓    | -    | ✓    | ✓     |
+| SSH (22)         | -    | -    | -    | ✓    | -     |
+| DNS (53)         | -    | ✓    | ✓    | ✓    | ✓     |
+| DHCP (67/68)     | -    | ✓    | ✓    | ✓    | ✓     |
 | Inform (8080)    | -    | -    | -    | ✓    | -     |
 | Port Forwards    | ✓    | -    | -    | -    | -     |
 | Ping (ICMP)      | rate | ✓    | rate | ✓    | rate  |
+| **Catch-all**    | DROP | DROP | DROP | DROP | DROP  |
 
 ### WAN Failover / Load Balancing
 
@@ -73,6 +78,10 @@ Multiple interfaces can be assigned the WAN zone. Supported modes:
 
 - **Failover** — active/standby with health checks (ping gateway). Automatic switchover on failure.
 - **Load Balance** — weighted round-robin across healthy WANs via policy routing.
+
+### IPv6
+
+All filter rules are dual-stack — IPv4 (iptables) and IPv6 (ip6tables) with identical policies. IPv6 additionally permits ICMPv6 neighbor discovery (NDP types 133-136) required for IPv6 to function.
 
 ## First-Boot Defaults
 
@@ -114,15 +123,15 @@ Prepared networks are pre-configured but disabled. Enable them via the web UI to
 
 ### Default Firewall Policy
 
-31 rules are auto-created on first boot:
+Rules are auto-created on first boot:
 
-- **NAT**: Masquerade on all WAN interfaces
-- **LAN**: Full internet access, can reach Guest/DMZ
-- **Guest**: Internet only, all internal traffic blocked
-- **DMZ**: Internet only, LAN/MGMT access blocked
-- **MGMT**: Full access to everything
-- **WAN inbound**: Default deny (except established/related)
-- **Input**: Web UI (HTTPS) from MGMT only, SSH from LAN/MGMT, DNS/DHCP from all internal zones
+- **NAT**: Masquerade on all WAN interfaces (IPv4 only)
+- **LAN**: DNS/DHCP to gateway, full internet access, can reach Guest/DMZ. No SSH/Web UI.
+- **Guest**: DNS/DHCP to gateway, internet only, all internal traffic blocked
+- **DMZ**: DNS/DHCP to gateway, internet access, LAN/MGMT access blocked. No HTTP/HTTPS to gateway.
+- **MGMT**: Full access — Web UI, SSH, Inform, DNS/DHCP, internet
+- **WAN inbound**: Default deny (except established/related + port forwards)
+- **All zones**: Catch-all DROP at end — no traffic leaks through to platform services
 
 ### Default DNS/DHCP
 
@@ -131,32 +140,54 @@ Prepared networks are pre-configured but disabled. Enable them via the web UI to
 - DNSSEC validation enabled
 - DNS rebind protection enabled
 
+## Personality
+
+secfirstgw has attitude. Error messages, rate-limit responses, honeypot replies, and IDS alerts come with personality — switchable at runtime via the web UI settings.
+
+| Personality | Style |
+|-------------|-------|
+| **kevin** (default) | German/English street slang, zero filter |
+| **corporate** | "authentication required" |
+| **pirate** | "ye be no crew of mine!" |
+| **zen** | "the gate remains closed to those who do not know the way" |
+| **bofh** | "your credentials were lost in a tragic boating accident" |
+| **unreal-tournament** | "DENIED!" / "GODLIKE!" |
+| **gaming-legends** | "YOU SHALL NOT PASS!" / "all your base are belong to us" |
+
+Open source — add your own personality and submit a PR.
+
 ## Security First
 
 Every design decision prioritizes security:
 
 - No hardcoded keys or credentials
 - No unauthenticated databases
-- No trusted proxy headers without validation
+- No trusted proxy headers (`X-Forwarded-For` is untrusted input — always socket peer)
 - Encrypted at rest, encrypted in transit, encrypted in logs
 - Minimal attack surface: one binary, one process, one language
 - E2EE API layer: hybrid X25519 + ML-KEM-1024 (FIPS 203) key exchange, HKDF-SHA256, AES-256-GCM
+- Security headers: HSTS, CSP, X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy
+- Catch-all DROP on all firewall zones — no platform ports leak through
+- Dual-stack IPv4/IPv6 firewall — no IPv6 bypass
+- Rate limiting on every endpoint
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│                 sfgw-cli                     │  ← Single binary entry point
-├──────────┬──────────┬──────────┬────────────┤
-│ sfgw-fw  │ sfgw-net │ sfgw-vpn │  sfgw-api  │  ← Core services
-├──────────┼──────────┼──────────┼────────────┤
-│ sfgw-dns │sfgw-adopt│ sfgw-nas │  sfgw-lcd  │  ← Peripheral services
-├──────────┴──────────┴──────────┴────────────┤
-│ sfgw-crypto  │  sfgw-db  │  sfgw-log        │  ← Foundation
-├──────────────┴───────────┴──────────────────┤
-│              sfgw-hal                        │  ← Hardware abstraction
-│    bare_metal  │    vm    │    docker        │     (compile-time or runtime)
-└──────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│                   sfgw-cli                       │  ← Single binary entry point
+├──────────┬──────────┬──────────┬────────────────┤
+│ sfgw-fw  │ sfgw-net │ sfgw-vpn │   sfgw-api     │  ← Core services
+├──────────┼──────────┼──────────┼────────────────┤
+│ sfgw-dns │sfgw-adopt│ sfgw-nas │ sfgw-display   │  ← Peripheral services
+├──────────┼──────────┼──────────┼────────────────┤
+│ sfgw-ids │sfgw-personality     │ sfgw-controller │  ← Detection & orchestration
+├──────────┴─────────────────────┴────────────────┤
+│ sfgw-crypto  │   sfgw-db   │   sfgw-log         │  ← Foundation
+├──────────────┴─────────────┴────────────────────┤
+│                  sfgw-hal                        │  ← Hardware abstraction
+│    bare_metal    │     vm     │     docker       │     (compile-time or runtime)
+└─────────────────────────────────────────────────┘
 ```
 
 ## License
