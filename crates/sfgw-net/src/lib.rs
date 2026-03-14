@@ -164,14 +164,46 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
 
     if network_count == 0 {
         let defaults: &[(&str, &str, Option<i32>, &str, &str, &str, &str, bool)] = &[
-            ("LAN", "lan", None, "192.168.1.0/24", "192.168.1.1",
-             "192.168.1.100", "192.168.1.254", true),
-            ("Management", "mgmt", Some(3000), "10.0.0.0/24", "10.0.0.1",
-             "10.0.0.100", "10.0.0.254", true),
-            ("Guest", "guest", Some(3001), "192.168.3.0/24", "192.168.3.1",
-             "192.168.3.100", "192.168.3.254", false),
-            ("DMZ", "dmz", Some(3002), "172.16.0.0/24", "172.16.0.1",
-             "172.16.0.100", "172.16.0.254", false),
+            (
+                "LAN",
+                "lan",
+                None,
+                "192.168.1.0/24",
+                "192.168.1.1",
+                "192.168.1.100",
+                "192.168.1.254",
+                true,
+            ),
+            (
+                "Management",
+                "mgmt",
+                Some(3000),
+                "10.0.0.0/24",
+                "10.0.0.1",
+                "10.0.0.100",
+                "10.0.0.254",
+                true,
+            ),
+            (
+                "Guest",
+                "guest",
+                Some(3001),
+                "192.168.3.0/24",
+                "192.168.3.1",
+                "192.168.3.100",
+                "192.168.3.254",
+                false,
+            ),
+            (
+                "DMZ",
+                "dmz",
+                Some(3002),
+                "172.16.0.0/24",
+                "172.16.0.1",
+                "172.16.0.100",
+                "172.16.0.254",
+                false,
+            ),
         ];
 
         for (name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, enabled) in defaults {
@@ -358,7 +390,10 @@ fn detect_ubnt_port_map() -> Option<BoardPortMap> {
             switch: None,
         },
         _ => {
-            tracing::info!(board_id, "unknown Ubiquiti board ID — using default role heuristic");
+            tracing::info!(
+                board_id,
+                "unknown Ubiquiti board ID — using default role heuristic"
+            );
             return None;
         }
     };
@@ -943,14 +978,46 @@ mod tests {
         {
             let conn = db.lock().await;
             let defaults: &[(&str, &str, Option<i32>, &str, &str, &str, &str, bool)] = &[
-                ("LAN", "lan", None, "192.168.1.0/24", "192.168.1.1",
-                 "192.168.1.100", "192.168.1.254", true),
-                ("Management", "mgmt", Some(3000), "10.0.0.0/24", "10.0.0.1",
-                 "10.0.0.100", "10.0.0.254", false),
-                ("Guest", "guest", Some(3001), "192.168.3.0/24", "192.168.3.1",
-                 "192.168.3.100", "192.168.3.254", false),
-                ("DMZ", "dmz", Some(3002), "172.16.0.0/24", "172.16.0.1",
-                 "172.16.0.100", "172.16.0.254", false),
+                (
+                    "LAN",
+                    "lan",
+                    None,
+                    "192.168.1.0/24",
+                    "192.168.1.1",
+                    "192.168.1.100",
+                    "192.168.1.254",
+                    true,
+                ),
+                (
+                    "Management",
+                    "mgmt",
+                    Some(3000),
+                    "10.0.0.0/24",
+                    "10.0.0.1",
+                    "10.0.0.100",
+                    "10.0.0.254",
+                    false,
+                ),
+                (
+                    "Guest",
+                    "guest",
+                    Some(3001),
+                    "192.168.3.0/24",
+                    "192.168.3.1",
+                    "192.168.3.100",
+                    "192.168.3.254",
+                    false,
+                ),
+                (
+                    "DMZ",
+                    "dmz",
+                    Some(3002),
+                    "172.16.0.0/24",
+                    "172.16.0.1",
+                    "172.16.0.100",
+                    "172.16.0.254",
+                    false,
+                ),
             ];
 
             for (name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, enabled) in defaults {
@@ -971,11 +1038,9 @@ mod tests {
 
         // Verify LAN is enabled
         let lan_enabled: i32 = conn
-            .query_row(
-                "SELECT enabled FROM networks WHERE zone = 'lan'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT enabled FROM networks WHERE zone = 'lan'", [], |r| {
+                r.get(0)
+            })
             .expect("LAN network should exist");
         assert_eq!(lan_enabled, 1, "LAN should be enabled");
 
@@ -991,11 +1056,9 @@ mod tests {
 
         // Verify VLAN IDs
         let dmz_vlan: i32 = conn
-            .query_row(
-                "SELECT vlan_id FROM networks WHERE zone = 'dmz'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT vlan_id FROM networks WHERE zone = 'dmz'", [], |r| {
+                r.get(0)
+            })
             .expect("DMZ network should exist");
         assert_eq!(dmz_vlan, 3002, "DMZ should have VLAN 3002");
     }

@@ -255,10 +255,7 @@ pub async fn save_dns_overrides(db: &sfgw_db::Db, overrides: &[DnsOverride]) -> 
 ///
 /// If *either* `dns_config` or `dhcp_ranges` already exists in the DB, this
 /// function is a no-op — it never overwrites user configuration.
-pub async fn ensure_first_boot_defaults(
-    db: &sfgw_db::Db,
-    wan_gateway: Option<&str>,
-) -> Result<()> {
+pub async fn ensure_first_boot_defaults(db: &sfgw_db::Db, wan_gateway: Option<&str>) -> Result<()> {
     let conn = db.lock().await;
 
     let has_dns: bool = meta_get::<DnsConfig>(&conn, KEY_DNS_CONFIG)?.is_some();
@@ -778,7 +775,9 @@ mod tests {
     async fn test_first_boot_defaults_with_wan_gateway() {
         let db = test_db().await;
 
-        ensure_first_boot_defaults(&db, Some("10.0.0.1")).await.unwrap();
+        ensure_first_boot_defaults(&db, Some("10.0.0.1"))
+            .await
+            .unwrap();
 
         let dns = load_dns_config(&db).await.unwrap();
         assert_eq!(
@@ -812,7 +811,9 @@ mod tests {
         save_dhcp_ranges(&db, &[custom_range]).await.unwrap();
 
         // Calling first-boot defaults should be a no-op.
-        ensure_first_boot_defaults(&db, Some("99.99.99.99")).await.unwrap();
+        ensure_first_boot_defaults(&db, Some("99.99.99.99"))
+            .await
+            .unwrap();
 
         // Verify nothing was overwritten.
         let dns = load_dns_config(&db).await.unwrap();
@@ -827,7 +828,9 @@ mod tests {
     async fn test_first_boot_defaults_generate_valid_config() {
         let db = test_db().await;
 
-        ensure_first_boot_defaults(&db, Some("203.0.113.1")).await.unwrap();
+        ensure_first_boot_defaults(&db, Some("203.0.113.1"))
+            .await
+            .unwrap();
 
         // generate_config should produce valid dnsmasq output.
         let config = generate_config(&db).await.unwrap();

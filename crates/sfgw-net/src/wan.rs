@@ -544,7 +544,10 @@ pub async fn remove_wan_config(db: &sfgw_db::Db, interface: &str) -> Result<()> 
             rusqlite::params![interface],
         )
         .context("failed to revert interface role")?;
-        tracing::info!(interface, "WAN config removed, interface role reverted to lan");
+        tracing::info!(
+            interface,
+            "WAN config removed, interface role reverted to lan"
+        );
     }
     Ok(())
 }
@@ -1002,15 +1005,16 @@ pub async fn detect_wan_status(interface: &str) -> Result<WanStatus> {
     let dns_servers = read_dns_servers(interface);
 
     // Connection type from whether we have a lease file (DHCP) or static config
-    let connection_type = if std::path::Path::new(&format!("/var/lib/dhcp/dhclient.{interface}.leases")).exists()
-        || std::path::Path::new(&format!("/run/dhclient.{interface}.pid")).exists()
-    {
-        "dhcp"
-    } else if ipv4.is_some() {
-        "static"
-    } else {
-        "unknown"
-    };
+    let connection_type =
+        if std::path::Path::new(&format!("/var/lib/dhcp/dhclient.{interface}.leases")).exists()
+            || std::path::Path::new(&format!("/run/dhclient.{interface}.pid")).exists()
+        {
+            "dhcp"
+        } else if ipv4.is_some() {
+            "static"
+        } else {
+            "unknown"
+        };
 
     Ok(WanStatus {
         interface: interface.to_string(),
@@ -1050,7 +1054,9 @@ fn read_ipv4_addr(interface: &str) -> Option<String> {
 /// Read the first global-scope IPv6 address of an interface.
 fn read_ipv6_global(interface: &str) -> Option<String> {
     let output = std::process::Command::new("ip")
-        .args(["-6", "-o", "addr", "show", "dev", interface, "scope", "global"])
+        .args([
+            "-6", "-o", "addr", "show", "dev", interface, "scope", "global",
+        ])
         .output()
         .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);

@@ -89,9 +89,7 @@ async fn auto_unlock_bare_metal() -> Result<()> {
     if product_serial.is_empty() && board_serial.is_empty() {
         // ARM boards (e.g. UDM Pro) have no DMI — skip LUKS for now.
         // TODO: use eMMC serial or /dev/ubnthal for hardware-bound key on ARM.
-        tracing::warn!(
-            "bare metal — no DMI serial found (ARM?), skipping LUKS auto-unlock"
-        );
+        tracing::warn!("bare metal — no DMI serial found (ARM?), skipping LUKS auto-unlock");
         return Ok(());
     }
 

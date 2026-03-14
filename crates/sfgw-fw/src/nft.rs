@@ -119,10 +119,7 @@ fn validate_set_name(s: &str) -> Result<()> {
     if s.is_empty() || s.len() > 31 {
         bail!("invalid set name '{}': must be 1-31 characters", s);
     }
-    if !s
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
+    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         bail!(
             "invalid set name '{}': only alphanumeric and '_' allowed",
             s

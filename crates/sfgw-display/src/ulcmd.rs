@@ -82,9 +82,7 @@ impl UlcmdDisplay {
 
     /// Switch the MCU display to a named screen.
     pub fn set_screen(&self, screen_name: &str) -> Result<(), DisplayError> {
-        let cmd = format!(
-            r#"{{"command":"screen","parameter":"{screen_name}"}}"#
-        );
+        let cmd = format!(r#"{{"command":"screen","parameter":"{screen_name}"}}"#);
         let response = self.send_command(&cmd)?;
 
         if response.contains("\"error\"") {

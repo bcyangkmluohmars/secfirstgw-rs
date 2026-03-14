@@ -539,12 +539,8 @@ pub async fn create_default_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
     // Only insert defaults when the table is empty (first boot).
     let count: i64 = {
         let conn = db.lock().await;
-        conn.query_row(
-            "SELECT COUNT(*) FROM firewall_rules",
-            [],
-            |row| row.get(0),
-        )
-        .context("failed to count firewall_rules")?
+        conn.query_row("SELECT COUNT(*) FROM firewall_rules", [], |row| row.get(0))
+            .context("failed to count firewall_rules")?
     };
 
     if count > 0 {
@@ -571,73 +567,109 @@ fn build_default_rules() -> Vec<FirewallRule> {
 
     // MGMT → any: full access (management zone is fully trusted).
     rules.push(forward_rule(
-        50, "iif:@mgmt_ifaces", "any", Action::Accept,
+        50,
+        "iif:@mgmt_ifaces",
+        "any",
+        Action::Accept,
         Some("MGMT to any"),
     ));
 
     // LAN → WAN: internet access.
     rules.push(forward_rule(
-        100, "iif:@lan_ifaces", "oif:@wan_ifaces", Action::Accept,
+        100,
+        "iif:@lan_ifaces",
+        "oif:@wan_ifaces",
+        Action::Accept,
         Some("LAN to WAN"),
     ));
 
     // LAN → Guest: allow (LAN is trusted).
     rules.push(forward_rule(
-        110, "iif:@lan_ifaces", "oif:@guest_ifaces", Action::Accept,
+        110,
+        "iif:@lan_ifaces",
+        "oif:@guest_ifaces",
+        Action::Accept,
         Some("LAN to Guest"),
     ));
 
     // LAN → DMZ: allow (LAN is trusted).
     rules.push(forward_rule(
-        120, "iif:@lan_ifaces", "oif:@dmz_ifaces", Action::Accept,
+        120,
+        "iif:@lan_ifaces",
+        "oif:@dmz_ifaces",
+        Action::Accept,
         Some("LAN to DMZ"),
     ));
 
     // Guest → WAN: internet only.
     rules.push(forward_rule(
-        200, "iif:@guest_ifaces", "oif:@wan_ifaces", Action::Accept,
+        200,
+        "iif:@guest_ifaces",
+        "oif:@wan_ifaces",
+        Action::Accept,
         Some("Guest to WAN"),
     ));
 
     // Guest → LAN: blocked.
     rules.push(forward_rule(
-        210, "iif:@guest_ifaces", "oif:@lan_ifaces", Action::Drop,
+        210,
+        "iif:@guest_ifaces",
+        "oif:@lan_ifaces",
+        Action::Drop,
         Some("Guest to LAN blocked"),
     ));
 
     // Guest → DMZ: blocked.
     rules.push(forward_rule(
-        220, "iif:@guest_ifaces", "oif:@dmz_ifaces", Action::Drop,
+        220,
+        "iif:@guest_ifaces",
+        "oif:@dmz_ifaces",
+        Action::Drop,
         Some("Guest to DMZ blocked"),
     ));
 
     // Guest → MGMT: blocked.
     rules.push(forward_rule(
-        230, "iif:@guest_ifaces", "oif:@mgmt_ifaces", Action::Drop,
+        230,
+        "iif:@guest_ifaces",
+        "oif:@mgmt_ifaces",
+        Action::Drop,
         Some("Guest to MGMT blocked"),
     ));
 
     // DMZ → WAN: allow outbound.
     rules.push(forward_rule(
-        300, "iif:@dmz_ifaces", "oif:@wan_ifaces", Action::Accept,
+        300,
+        "iif:@dmz_ifaces",
+        "oif:@wan_ifaces",
+        Action::Accept,
         Some("DMZ to WAN"),
     ));
 
     // DMZ → LAN: blocked.
     rules.push(forward_rule(
-        310, "iif:@dmz_ifaces", "oif:@lan_ifaces", Action::Drop,
+        310,
+        "iif:@dmz_ifaces",
+        "oif:@lan_ifaces",
+        Action::Drop,
         Some("DMZ to LAN blocked"),
     ));
 
     // DMZ → MGMT: blocked.
     rules.push(forward_rule(
-        320, "iif:@dmz_ifaces", "oif:@mgmt_ifaces", Action::Drop,
+        320,
+        "iif:@dmz_ifaces",
+        "oif:@mgmt_ifaces",
+        Action::Drop,
         Some("DMZ to MGMT blocked"),
     ));
 
     // WAN → any: default deny inbound.
     rules.push(forward_rule(
-        400, "iif:@wan_ifaces", "any", Action::Drop,
+        400,
+        "iif:@wan_ifaces",
+        "any",
+        Action::Drop,
         Some("default deny inbound"),
     ));
 
@@ -645,85 +677,141 @@ fn build_default_rules() -> Vec<FirewallRule> {
 
     // SSH from LAN.
     rules.push(input_rule(
-        30, "tcp", "iif:@lan_ifaces", Some("22"), Action::Accept,
+        30,
+        "tcp",
+        "iif:@lan_ifaces",
+        Some("22"),
+        Action::Accept,
         Some("SSH from LAN"),
     ));
 
     // SSH from MGMT.
     rules.push(input_rule(
-        31, "tcp", "iif:@mgmt_ifaces", Some("22"), Action::Accept,
+        31,
+        "tcp",
+        "iif:@mgmt_ifaces",
+        Some("22"),
+        Action::Accept,
         Some("SSH from MGMT"),
     ));
 
     // DNS from LAN (TCP).
     rules.push(input_rule(
-        40, "tcp", "iif:@lan_ifaces", Some("53"), Action::Accept,
+        40,
+        "tcp",
+        "iif:@lan_ifaces",
+        Some("53"),
+        Action::Accept,
         Some("DNS TCP from LAN"),
     ));
 
     // DNS from LAN (UDP).
     rules.push(input_rule(
-        41, "udp", "iif:@lan_ifaces", Some("53"), Action::Accept,
+        41,
+        "udp",
+        "iif:@lan_ifaces",
+        Some("53"),
+        Action::Accept,
         Some("DNS UDP from LAN"),
     ));
 
     // DNS from Guest (TCP).
     rules.push(input_rule(
-        42, "tcp", "iif:@guest_ifaces", Some("53"), Action::Accept,
+        42,
+        "tcp",
+        "iif:@guest_ifaces",
+        Some("53"),
+        Action::Accept,
         Some("DNS TCP from Guest"),
     ));
 
     // DNS from Guest (UDP).
     rules.push(input_rule(
-        43, "udp", "iif:@guest_ifaces", Some("53"), Action::Accept,
+        43,
+        "udp",
+        "iif:@guest_ifaces",
+        Some("53"),
+        Action::Accept,
         Some("DNS UDP from Guest"),
     ));
 
     // DNS from MGMT (TCP).
     rules.push(input_rule(
-        44, "tcp", "iif:@mgmt_ifaces", Some("53"), Action::Accept,
+        44,
+        "tcp",
+        "iif:@mgmt_ifaces",
+        Some("53"),
+        Action::Accept,
         Some("DNS TCP from MGMT"),
     ));
 
     // DNS from MGMT (UDP).
     rules.push(input_rule(
-        45, "udp", "iif:@mgmt_ifaces", Some("53"), Action::Accept,
+        45,
+        "udp",
+        "iif:@mgmt_ifaces",
+        Some("53"),
+        Action::Accept,
         Some("DNS UDP from MGMT"),
     ));
 
     // DNS from DMZ (TCP).
     rules.push(input_rule(
-        46, "tcp", "iif:@dmz_ifaces", Some("53"), Action::Accept,
+        46,
+        "tcp",
+        "iif:@dmz_ifaces",
+        Some("53"),
+        Action::Accept,
         Some("DNS TCP from DMZ"),
     ));
 
     // DNS from DMZ (UDP).
     rules.push(input_rule(
-        47, "udp", "iif:@dmz_ifaces", Some("53"), Action::Accept,
+        47,
+        "udp",
+        "iif:@dmz_ifaces",
+        Some("53"),
+        Action::Accept,
         Some("DNS UDP from DMZ"),
     ));
 
     // DHCP from any zone (broadcast-based, must be open).
     rules.push(input_rule(
-        50, "udp", "any", Some("67-68"), Action::Accept,
+        50,
+        "udp",
+        "any",
+        Some("67-68"),
+        Action::Accept,
         Some("DHCP from any"),
     ));
 
     // HTTPS from MGMT only (web UI — management zone only).
     rules.push(input_rule(
-        60, "tcp", "iif:@mgmt_ifaces", Some("443"), Action::Accept,
+        60,
+        "tcp",
+        "iif:@mgmt_ifaces",
+        Some("443"),
+        Action::Accept,
         Some("HTTPS from MGMT"),
     ));
 
     // Inform protocol from MGMT only (device adoption).
     rules.push(input_rule(
-        70, "tcp", "iif:@mgmt_ifaces", Some("8080"), Action::Accept,
+        70,
+        "tcp",
+        "iif:@mgmt_ifaces",
+        Some("8080"),
+        Action::Accept,
         Some("Inform from MGMT"),
     ));
 
     // Drop all input from WAN (defense-in-depth, policy is DROP anyway).
     rules.push(input_rule(
-        900, "any", "iif:@wan_ifaces", None, Action::Drop,
+        900,
+        "any",
+        "iif:@wan_ifaces",
+        None,
+        Action::Drop,
         Some("drop all WAN input"),
     ));
 

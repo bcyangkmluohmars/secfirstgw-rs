@@ -60,10 +60,7 @@ pub struct NetworkSetup {
 /// - Without: creates only Linux bridges (VM/Docker mode).
 ///
 /// Legacy bridges are migrated, not destroyed. SSH survives.
-pub async fn setup_networks(
-    db: &sfgw_db::Db,
-    switch: Option<&SwitchLayout>,
-) -> Result<()> {
+pub async fn setup_networks(db: &sfgw_db::Db, switch: Option<&SwitchLayout>) -> Result<()> {
     let networks = load_enabled_networks(db).await?;
 
     if networks.is_empty() {
@@ -326,18 +323,24 @@ fn build_port_string(vlan_id: i32, sw: &SwitchLayout) -> String {
 
 fn swconfig_set_vlan_ports(device: &str, vlan_id: i32, ports: &str) -> Result<()> {
     run_swconfig(&[
-        "dev", device,
-        "vlan", &vlan_id.to_string(),
-        "set", "ports",
+        "dev",
+        device,
+        "vlan",
+        &vlan_id.to_string(),
+        "set",
+        "ports",
         ports,
     ])
 }
 
 fn swconfig_set_pvid(device: &str, port: u8, pvid: i32) -> Result<()> {
     run_swconfig(&[
-        "dev", device,
-        "port", &port.to_string(),
-        "set", "pvid",
+        "dev",
+        device,
+        "port",
+        &port.to_string(),
+        "set",
+        "pvid",
         &pvid.to_string(),
     ])
 }
@@ -407,9 +410,16 @@ fn setup_bridges(networks: &[NetworkSetup], switch_dev: Option<&str>) -> Result<
 
             if !link_exists(&vlan_iface) {
                 run_ip(&[
-                    "link", "add", "link", dev,
-                    "name", &vlan_iface,
-                    "type", "vlan", "id", &vid.to_string(),
+                    "link",
+                    "add",
+                    "link",
+                    dev,
+                    "name",
+                    &vlan_iface,
+                    "type",
+                    "vlan",
+                    "id",
+                    &vid.to_string(),
                 ])?;
                 tracing::info!(iface = %vlan_iface, "created VLAN sub-interface");
             }
@@ -515,9 +525,15 @@ mod tests {
 
     #[test]
     fn test_gateway_to_cidr() {
-        assert_eq!(gateway_to_cidr("192.168.1.1", "192.168.1.0/24"), "192.168.1.1/24");
+        assert_eq!(
+            gateway_to_cidr("192.168.1.1", "192.168.1.0/24"),
+            "192.168.1.1/24"
+        );
         assert_eq!(gateway_to_cidr("10.0.0.1", "10.0.0.0/24"), "10.0.0.1/24");
-        assert_eq!(gateway_to_cidr("172.16.0.1", "172.16.0.0/16"), "172.16.0.1/16");
+        assert_eq!(
+            gateway_to_cidr("172.16.0.1", "172.16.0.0/16"),
+            "172.16.0.1/16"
+        );
     }
 
     #[test]
