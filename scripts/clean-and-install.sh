@@ -276,12 +276,47 @@ install_binary() {
 stop_existing() {
     if [ "${PLATFORM}" = "ubiquiti" ]; then
         log "Stopping UniFi services..."
+
         # Stop UniFi OS services — we're taking over
         systemctl stop unifi-core 2>/dev/null || true
         systemctl disable unifi-core 2>/dev/null || true
         systemctl stop unifi 2>/dev/null || true
         systemctl disable unifi 2>/dev/null || true
-        # Stop their dnsmasq/nftables — sfgw manages these
+
+        # Stop ubios-udapi-server — this is the process supervisor that
+        # respawns dnsmasq and other platform services on UDM/USG.
+        # Must be stopped BEFORE killing dnsmasq, otherwise it restarts them.
+        # WARNING: This temporarily breaks network connectivity until sfgw
+        # takes over. Only acceptable during full install (not dev-deploy).
+        if pgrep -f "ubios-udapi-server" >/dev/null 2>&1; then
+            log "Stopping ubios-udapi-server (service supervisor)..."
+            warn "Network connectivity will be temporarily interrupted."
+            killall ubios-udapi-server 2>/dev/null || true
+            sleep 1
+        fi
+
+        # Stop dnsmasq — try init script first (clean shutdown), then killall
+        if [ -x /etc/init.d/dnsmasq ]; then
+            /etc/init.d/dnsmasq stop 2>/dev/null || true
+        fi
+        systemctl stop dnsmasq 2>/dev/null || true
+        systemctl disable dnsmasq 2>/dev/null || true
+        killall -q dnsmasq 2>/dev/null || true
+        sleep 1
+
+        # Verify no dnsmasq left
+        if pgrep dnsmasq >/dev/null 2>&1; then
+            warn "dnsmasq still running — sending SIGKILL..."
+            killall -q -KILL dnsmasq 2>/dev/null || true
+            sleep 1
+        fi
+
+        log "All platform services stopped."
+    else
+        # Generic: stop system dnsmasq if present
+        if [ -x /etc/init.d/dnsmasq ]; then
+            /etc/init.d/dnsmasq stop 2>/dev/null || true
+        fi
         systemctl stop dnsmasq 2>/dev/null || true
         systemctl disable dnsmasq 2>/dev/null || true
     fi

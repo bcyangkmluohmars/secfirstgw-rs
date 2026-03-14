@@ -6,7 +6,8 @@
 //! Supports multiple display backends selected via [`DisplayConfig`]:
 //!
 //! - **HD44780**: 20x4 character LCD over I2C (PCF8574 backpack)
-//! - **Framebuffer**: SPI-attached TFT panel with optional touch input (e.g. UDM Pro)
+//! - **Framebuffer**: SPI-attached TFT panel with optional touch input
+//! - **Ulcmd**: UDM Pro front-panel LCD controlled via `ulcmd` daemon Unix socket
 //! - **None**: no display (VM, Docker, or headless bare metal)
 //!
 //! The [`init`] function takes a [`DisplayConfig`] and returns a boxed [`Display`]
@@ -14,6 +15,7 @@
 
 pub mod framebuffer;
 pub mod hd44780;
+pub mod ulcmd;
 
 use std::path::Path;
 
@@ -98,7 +100,7 @@ pub enum DisplayConfig {
         i2c_address: u16,
     },
 
-    /// Framebuffer-based TFT display (e.g. ST7789 on UDM Pro).
+    /// Framebuffer-based TFT display (e.g. ST7789 on UDM Pro SE).
     Framebuffer {
         /// Path to the framebuffer device (e.g. `/dev/fb0`).
         #[serde(default = "default_fb_path")]
@@ -111,6 +113,13 @@ pub enum DisplayConfig {
         /// Display height in pixels.
         #[serde(default = "default_fb_height")]
         height: u32,
+    },
+
+    /// UDM Pro front-panel LCD via `ulcmd` daemon Unix socket.
+    Ulcmd {
+        /// Path to the `ulcmd` Unix domain socket.
+        #[serde(default = "default_ulcmd_socket")]
+        socket_path: String,
     },
 }
 
@@ -129,13 +138,17 @@ fn default_fb_width() -> u32 {
 fn default_fb_height() -> u32 {
     240
 }
+fn default_ulcmd_socket() -> String {
+    ulcmd::DEFAULT_SOCKET_PATH.to_string()
+}
 
 /// Auto-detect the display hardware based on the platform.
 ///
 /// On bare metal:
-/// - Checks for `/dev/fb0` first (touchscreen TFT, e.g. UDM Pro LCM)
+/// - Checks for `/var/run/ulcmd_uds_server` first (UDM Pro LCM via ulcmd)
+/// - Then `/dev/fb0` (touchscreen TFT, e.g. UDM Pro SE)
 /// - Falls back to `/dev/i2c-1` (character LCD)
-/// - Returns `DisplayConfig::None` if neither is found
+/// - Returns `DisplayConfig::None` if none found
 ///
 /// On VM/Docker: always returns `DisplayConfig::None`.
 ///
@@ -153,7 +166,16 @@ pub fn auto_detect(platform: &sfgw_hal::Platform) -> DisplayConfig {
         return DisplayConfig::None;
     }
 
-    // Prefer framebuffer (touchscreen) over character LCD
+    // UDM Pro: ulcmd daemon controls the front-panel LCD via Unix socket
+    let ulcmd_socket = Path::new(ulcmd::DEFAULT_SOCKET_PATH);
+    if ulcmd_socket.exists() {
+        tracing::info!("auto-detected UDM Pro LCM display (ulcmd socket)");
+        return DisplayConfig::Ulcmd {
+            socket_path: default_ulcmd_socket(),
+        };
+    }
+
+    // Framebuffer touchscreen (e.g. UDM Pro SE with TFT)
     if Path::new("/dev/fb0").exists() {
         tracing::info!("auto-detected framebuffer display at /dev/fb0");
         return DisplayConfig::Framebuffer {
@@ -164,7 +186,7 @@ pub fn auto_detect(platform: &sfgw_hal::Platform) -> DisplayConfig {
         };
     }
 
-    // Fall back to I2C character LCD
+    // I2C character LCD (custom hardware)
     if Path::new("/dev/i2c-1").exists() {
         tracing::info!("auto-detected HD44780 LCD on /dev/i2c-1");
         return DisplayConfig::Hd44780 {
@@ -213,6 +235,10 @@ pub fn init(config: &DisplayConfig) -> Result<Option<Box<dyn Display>>, DisplayE
                 *height,
             )?;
             Ok(Some(Box::new(fb)))
+        }
+        DisplayConfig::Ulcmd { socket_path } => {
+            let display = ulcmd::init(Path::new(socket_path))?;
+            Ok(Some(Box::new(display)))
         }
     }
 }
@@ -291,6 +317,18 @@ mod tests {
     }
 
     #[test]
+    fn config_ulcmd_defaults() {
+        let json = r#"{"type": "ulcmd"}"#;
+        let config: DisplayConfig = serde_json::from_str(json).expect("parse");
+        assert_eq!(
+            config,
+            DisplayConfig::Ulcmd {
+                socket_path: "/var/run/ulcmd_uds_server".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn config_roundtrip() {
         let configs = vec![
             DisplayConfig::None,
@@ -303,6 +341,9 @@ mod tests {
                 touch_device: Some("/dev/input/event2".to_string()),
                 width: 320,
                 height: 240,
+            },
+            DisplayConfig::Ulcmd {
+                socket_path: "/var/run/ulcmd_uds_server".to_string(),
             },
         ];
 

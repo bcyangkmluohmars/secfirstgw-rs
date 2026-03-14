@@ -27,11 +27,12 @@ rebind-localhost-ok
 {% endif %}
 
 # ---------- Security: DNSSEC ----------
-{% if dnssec %}
-dnssec
-dnssec-check-unsigned
-trust-anchor=.,20326,8,2,E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D
-{% endif %}
+# Note: requires dnsmasq compiled with DNSSEC support (--enable-dnssec).
+# UDM/USG stock dnsmasq lacks this. Enable when using a custom build.
+# {% if dnssec %}
+# dnssec
+# trust-anchor=.,20326,8,2,E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D
+# {% endif %}
 
 # ---------- Security: No Open Resolver ----------
 # Bind only to LAN/MGMT interfaces, never WAN
@@ -89,4 +90,4 @@ log-facility=/var/log/sfgw/dnsmasq.log
 dhcp-leasefile=/var/lib/misc/dnsmasq.leases
 
 # ---------- PID File ----------
-pid-file=/var/run/dnsmasq/sfgw-dnsmasq.pid
+pid-file=/run/sfgw-dnsmasq.pid

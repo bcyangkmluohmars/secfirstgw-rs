@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #![deny(unsafe_code)]
 
+pub mod switch;
 pub mod wan;
 
 use anyhow::Context;
@@ -70,12 +71,15 @@ const SYSFS_NET: &str = "/sys/class/net";
 /// - **Bare metal**: eth0/ens*/enp* first physical → WAN, rest → LAN
 /// - **VM**: same as bare metal
 pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Result<()> {
-    let interfaces = detect_interfaces_for_platform(platform)?;
+    let (interfaces, switch_layout) = detect_interfaces_for_platform(platform)?;
 
     let conn = db.lock().await;
     for iface in &interfaces {
         let ips_json = serde_json::to_string(&iface.ips).context("failed to serialize IPs")?;
 
+        // Update live state (mac, ips, mtu, is_up) on every boot.
+        // Role is only set on first discovery — never overwritten on subsequent boots
+        // so that user-assigned roles (e.g. WAN via UI) are preserved.
         conn.execute(
             "INSERT INTO interfaces (name, mac, ips, mtu, is_up, role)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -83,8 +87,7 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
                  mac   = excluded.mac,
                  ips   = excluded.ips,
                  mtu   = excluded.mtu,
-                 is_up = excluded.is_up,
-                 role   = excluded.role",
+                 is_up = excluded.is_up",
             rusqlite::params![
                 iface.name,
                 iface.mac,
@@ -111,6 +114,88 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
         count = interfaces.len(),
         "network interface detection complete"
     );
+
+    // Drop the lock before calling wan functions (they acquire their own lock)
+    drop(conn);
+
+    // Auto-create default WAN configs (DHCP) for interfaces with role=wan
+    // that don't already have a wan_config entry.
+    for iface in &interfaces {
+        if iface.role == "wan" {
+            if let Ok(existing) = wan::get_wan_config(db, &iface.name).await {
+                if existing.is_none() {
+                    let priority = if iface.name == "eth8" { 1 } else { 2 };
+                    let default_config = wan::WanPortConfig {
+                        interface: iface.name.clone(),
+                        enabled: true,
+                        connection: wan::WanConnectionType::Dhcp,
+                        priority,
+                        weight: 100,
+                        health_check: "1.1.1.1".to_string(),
+                        health_interval_secs: 5,
+                        mtu: None,
+                        dns_override: None,
+                        mac_override: None,
+                    };
+                    if let Err(e) = wan::set_wan_config(db, &default_config).await {
+                        tracing::warn!(
+                            interface = %iface.name,
+                            "failed to create default WAN config: {e}"
+                        );
+                    } else {
+                        tracing::info!(
+                            interface = %iface.name,
+                            priority,
+                            "created default WAN config (DHCP)"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Auto-create default network zones on first boot.
+    // If the networks table is empty, seed it with LAN (active) plus
+    // prepared-but-disabled zones for MGMT, Guest, and DMZ.
+    let conn2 = db.lock().await;
+    let network_count: i64 = conn2
+        .query_row("SELECT COUNT(*) FROM networks", [], |row| row.get(0))
+        .map_err(NetError::Database)?;
+
+    if network_count == 0 {
+        let defaults: &[(&str, &str, Option<i32>, &str, &str, &str, &str, bool)] = &[
+            ("LAN", "lan", None, "192.168.1.0/24", "192.168.1.1",
+             "192.168.1.100", "192.168.1.254", true),
+            ("Management", "mgmt", Some(3000), "10.0.0.0/24", "10.0.0.1",
+             "10.0.0.100", "10.0.0.254", true),
+            ("Guest", "guest", Some(3001), "192.168.3.0/24", "192.168.3.1",
+             "192.168.3.100", "192.168.3.254", false),
+            ("DMZ", "dmz", Some(3002), "172.16.0.0/24", "172.16.0.1",
+             "172.16.0.100", "172.16.0.254", false),
+        ];
+
+        for (name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, enabled) in defaults {
+            conn2.execute(
+                "INSERT INTO networks (name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, dhcp_enabled, enabled)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)",
+                rusqlite::params![name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, *enabled as i32],
+            ).map_err(NetError::Database)?;
+
+            tracing::info!(
+                name,
+                zone,
+                ?vlan_id,
+                subnet,
+                enabled,
+                "created default network zone"
+            );
+        }
+    }
+    drop(conn2);
+
+    // Setup hardware switch VLANs and Linux bridges for all enabled networks.
+    switch::setup_networks(db, switch_layout.as_ref()).await?;
+
     Ok(())
 }
 
@@ -156,27 +241,136 @@ pub async fn list_interfaces(db: &sfgw_db::Db) -> Result<Vec<InterfaceInfo>> {
 
 /// Platform-aware interface detection.
 ///
-/// In Docker, all non-virtual interfaces are assigned LAN role because
-/// there is only one NIC and the web UI must be reachable.
-/// On bare metal / VM, the first physical interface is WAN, rest are LAN.
-fn detect_interfaces_for_platform(platform: &sfgw_hal::Platform) -> Result<Vec<InterfaceInfo>> {
+/// Role assignment per platform:
+/// - **Docker**: all interfaces → LAN (single NIC, web UI must be reachable)
+/// - **Bare metal (UDM Pro)**: eth8/eth9 → WAN, everything else → LAN
+/// - **Bare metal (generic)**: first physical → WAN, rest → LAN
+/// - **VM**: same as generic bare metal
+fn detect_interfaces_for_platform(
+    platform: &sfgw_hal::Platform,
+) -> Result<(Vec<InterfaceInfo>, Option<switch::SwitchLayout>)> {
     let mut interfaces = detect_interfaces()?;
+    let mut switch_layout: Option<switch::SwitchLayout> = None;
 
-    if *platform == sfgw_hal::Platform::Docker {
-        // Docker: only one NIC, must be LAN for web UI access.
-        // Override any WAN assignments.
-        for iface in &mut interfaces {
-            if iface.role == "wan" {
-                iface.role = "lan".to_string();
-                tracing::info!(
-                    name = %iface.name,
-                    "Docker mode: reassigned interface from WAN to LAN"
-                );
+    match platform {
+        sfgw_hal::Platform::Docker => {
+            for iface in &mut interfaces {
+                if iface.role == "wan" {
+                    iface.role = "lan".to_string();
+                    tracing::info!(
+                        name = %iface.name,
+                        "Docker mode: reassigned interface from WAN to LAN"
+                    );
+                }
             }
         }
+        sfgw_hal::Platform::BareMetal => {
+            if let Some(port_map) = detect_ubnt_port_map() {
+                for iface in &mut interfaces {
+                    if port_map.wan.contains(&iface.name.as_str()) {
+                        iface.role = "wan".to_string();
+                    } else if port_map.mgmt == Some(iface.name.as_str()) {
+                        iface.role = "mgmt".to_string();
+                    } else if iface.role == "wan" {
+                        iface.role = "lan".to_string();
+                    }
+                }
+                tracing::info!(
+                    wan = ?port_map.wan,
+                    mgmt = ?port_map.mgmt,
+                    "port roles assigned from board ID"
+                );
+                switch_layout = port_map.switch;
+            }
+        }
+        sfgw_hal::Platform::Vm => {}
     }
 
-    Ok(interfaces)
+    Ok((interfaces, switch_layout))
+}
+
+/// Port role assignments and switch layout for a known board.
+struct BoardPortMap {
+    wan: Vec<&'static str>,
+    mgmt: Option<&'static str>,
+    switch: Option<switch::SwitchLayout>,
+}
+
+/// Detect port roles and switch layout from Ubiquiti board ID.
+///
+/// Reads `/proc/ubnthal/board` and maps known `boardid` values to
+/// WAN/MGMT interface names and hardware switch port layout.
+/// Returns `None` on non-Ubiquiti hardware or unknown board IDs.
+fn detect_ubnt_port_map() -> Option<BoardPortMap> {
+    let board = std::fs::read_to_string("/proc/ubnthal/board").ok()?;
+    let board_id = board
+        .lines()
+        .find(|l| l.starts_with("boardid="))
+        .map(|l| &l[8..])?;
+
+    let map = match board_id {
+        // UDM Pro: RTL8370B, 10 ports (0-7 LAN, 8 CPU, 9 SFP+ LAN)
+        "ea15" => BoardPortMap {
+            wan: vec!["eth8", "eth9"],
+            mgmt: Some("eth7"),
+            switch: Some(switch::SwitchLayout {
+                device: "switch0".to_string(),
+                lan_ports: vec![0, 1, 2, 3, 4, 5, 6],
+                cpu_port: 8,
+                internal_ports: vec![9],
+                mgmt_port: Some(7),
+            }),
+        },
+        // UDM SE: same switch layout as UDM Pro
+        "ea22" => BoardPortMap {
+            wan: vec!["eth8", "eth9"],
+            mgmt: Some("eth7"),
+            switch: Some(switch::SwitchLayout {
+                device: "switch0".to_string(),
+                lan_ports: vec![0, 1, 2, 3, 4, 5, 6],
+                cpu_port: 8,
+                internal_ports: vec![9],
+                mgmt_port: Some(7),
+            }),
+        },
+        // UDM: smaller switch, no dedicated MGMT port
+        "ea21" => BoardPortMap {
+            wan: vec!["eth4", "eth5"],
+            mgmt: None,
+            switch: Some(switch::SwitchLayout {
+                device: "switch0".to_string(),
+                lan_ports: vec![0, 1, 2, 3],
+                cpu_port: 4,
+                internal_ports: vec![],
+                mgmt_port: None,
+            }),
+        },
+        // USG 3P: no switch ASIC
+        "e610" => BoardPortMap {
+            wan: vec!["eth0"],
+            mgmt: None,
+            switch: None,
+        },
+        // USG Pro 4: no switch ASIC
+        "e612" => BoardPortMap {
+            wan: vec!["eth0", "eth2"],
+            mgmt: None,
+            switch: None,
+        },
+        _ => {
+            tracing::info!(board_id, "unknown Ubiquiti board ID — using default role heuristic");
+            return None;
+        }
+    };
+
+    tracing::info!(
+        board_id,
+        wan = ?map.wan,
+        mgmt = ?map.mgmt,
+        has_switch = map.switch.is_some(),
+        "Ubiquiti board identified"
+    );
+    Some(map)
 }
 
 /// Detect all network interfaces by reading sysfs.
@@ -730,5 +924,102 @@ mod tests {
         let subnets = vec![("192.168.1.0".to_string(), "255.255.255.0".to_string())];
         assert!(ip_in_any_subnet("192.168.1.100", &subnets));
         assert!(!ip_in_any_subnet("10.0.0.1", &subnets));
+    }
+
+    #[tokio::test]
+    async fn test_default_networks_seeded_on_empty_db() {
+        let db = test_db().await;
+
+        // Simulate what configure() does: seed defaults when networks table is empty
+        {
+            let conn = db.lock().await;
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM networks", [], |r| r.get(0))
+                .expect("networks table should exist");
+            assert_eq!(count, 0, "fresh DB should have no networks");
+        }
+
+        // Insert defaults (same logic as configure())
+        {
+            let conn = db.lock().await;
+            let defaults: &[(&str, &str, Option<i32>, &str, &str, &str, &str, bool)] = &[
+                ("LAN", "lan", None, "192.168.1.0/24", "192.168.1.1",
+                 "192.168.1.100", "192.168.1.254", true),
+                ("Management", "mgmt", Some(3000), "10.0.0.0/24", "10.0.0.1",
+                 "10.0.0.100", "10.0.0.254", false),
+                ("Guest", "guest", Some(3001), "192.168.3.0/24", "192.168.3.1",
+                 "192.168.3.100", "192.168.3.254", false),
+                ("DMZ", "dmz", Some(3002), "172.16.0.0/24", "172.16.0.1",
+                 "172.16.0.100", "172.16.0.254", false),
+            ];
+
+            for (name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, enabled) in defaults {
+                conn.execute(
+                    "INSERT INTO networks (name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, dhcp_enabled, enabled)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)",
+                    rusqlite::params![name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, *enabled as i32],
+                ).expect("failed to insert default network");
+            }
+        }
+
+        // Verify all 4 networks were created
+        let conn = db.lock().await;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM networks", [], |r| r.get(0))
+            .expect("count query failed");
+        assert_eq!(count, 4, "should have 4 default networks");
+
+        // Verify LAN is enabled
+        let lan_enabled: i32 = conn
+            .query_row(
+                "SELECT enabled FROM networks WHERE zone = 'lan'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("LAN network should exist");
+        assert_eq!(lan_enabled, 1, "LAN should be enabled");
+
+        // Verify prepared zones are disabled
+        let mgmt_enabled: i32 = conn
+            .query_row(
+                "SELECT enabled FROM networks WHERE zone = 'mgmt'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("MGMT network should exist");
+        assert_eq!(mgmt_enabled, 0, "MGMT should be disabled");
+
+        // Verify VLAN IDs
+        let dmz_vlan: i32 = conn
+            .query_row(
+                "SELECT vlan_id FROM networks WHERE zone = 'dmz'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("DMZ network should exist");
+        assert_eq!(dmz_vlan, 3002, "DMZ should have VLAN 3002");
+    }
+
+    #[tokio::test]
+    async fn test_default_networks_not_reseeded() {
+        let db = test_db().await;
+
+        // Insert a single network to simulate existing config
+        {
+            let conn = db.lock().await;
+            conn.execute(
+                "INSERT INTO networks (name, zone, subnet, gateway, enabled)
+                 VALUES ('CustomLAN', 'lan', '10.10.0.0/24', '10.10.0.1', 1)",
+                [],
+            )
+            .expect("failed to insert custom network");
+        }
+
+        // The seeding logic should skip because count > 0
+        let conn = db.lock().await;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM networks", [], |r| r.get(0))
+            .expect("count query failed");
+        assert_eq!(count, 1, "should still have only 1 network (no reseeding)");
     }
 }

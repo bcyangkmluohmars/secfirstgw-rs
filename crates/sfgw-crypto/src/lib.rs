@@ -87,10 +87,12 @@ async fn auto_unlock_bare_metal() -> Result<()> {
     let board_serial = read_dmi_field("board_serial").await?;
 
     if product_serial.is_empty() && board_serial.is_empty() {
-        return Err(CryptoError::CryptoFailed(
-            "bare metal LUKS auto-unlock: both product_serial and board_serial are empty"
-                .to_string(),
-        ));
+        // ARM boards (e.g. UDM Pro) have no DMI — skip LUKS for now.
+        // TODO: use eMMC serial or /dev/ubnthal for hardware-bound key on ARM.
+        tracing::warn!(
+            "bare metal — no DMI serial found (ARM?), skipping LUKS auto-unlock"
+        );
+        return Ok(());
     }
 
     // Build input keying material: product_serial || ":" || board_serial

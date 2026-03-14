@@ -483,11 +483,18 @@ pub async fn set_wan_config(db: &sfgw_db::Db, config: &WanPortConfig) -> Result<
     )
     .context("failed to upsert wan_config")?;
 
+    // Also update the interface role to "wan"
+    conn.execute(
+        "UPDATE interfaces SET role = 'wan' WHERE name = ?1",
+        rusqlite::params![config.interface],
+    )
+    .context("failed to update interface role to wan")?;
+
     tracing::info!(
         interface = %config.interface,
         enabled = config.enabled,
         priority = config.priority,
-        "WAN config saved"
+        "WAN config saved, interface role set to wan"
     );
     Ok(())
 }
@@ -531,7 +538,13 @@ pub async fn remove_wan_config(db: &sfgw_db::Db, interface: &str) -> Result<()> 
     if affected == 0 {
         tracing::warn!(interface, "no WAN config found to remove");
     } else {
-        tracing::info!(interface, "WAN config removed");
+        // Revert interface role back to "lan"
+        conn.execute(
+            "UPDATE interfaces SET role = 'lan' WHERE name = ?1 AND role = 'wan'",
+            rusqlite::params![interface],
+        )
+        .context("failed to revert interface role")?;
+        tracing::info!(interface, "WAN config removed, interface role reverted to lan");
     }
     Ok(())
 }
@@ -983,20 +996,115 @@ pub async fn detect_wan_status(interface: &str) -> Result<WanStatus> {
 
     let link_up = read_operstate(interface);
     let (rx_bytes, tx_bytes) = read_traffic_counters(interface);
+    let ipv4 = read_ipv4_addr(interface);
+    let ipv6 = read_ipv6_global(interface);
+    let gateway_v4 = read_default_gateway_v4(interface);
+    let dns_servers = read_dns_servers(interface);
+
+    // Connection type from whether we have a lease file (DHCP) or static config
+    let connection_type = if std::path::Path::new(&format!("/var/lib/dhcp/dhclient.{interface}.leases")).exists()
+        || std::path::Path::new(&format!("/run/dhclient.{interface}.pid")).exists()
+    {
+        "dhcp"
+    } else if ipv4.is_some() {
+        "static"
+    } else {
+        "unknown"
+    };
 
     Ok(WanStatus {
         interface: interface.to_string(),
-        connection_type: "unknown".to_string(),
+        connection_type: connection_type.to_string(),
         link_up,
-        ipv4: None,
-        ipv6: None,
-        gateway_v4: None,
+        ipv4,
+        ipv6,
+        gateway_v4,
         gateway_v6: None,
-        dns_servers: Vec::new(),
+        dns_servers,
         uptime_secs: None,
         rx_bytes,
         tx_bytes,
     })
+}
+
+/// Read the primary IPv4 address of an interface from /proc/net/fib_trie or ip command output.
+fn read_ipv4_addr(interface: &str) -> Option<String> {
+    let output = std::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show", "dev", interface])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Format: "4: eth8    inet 192.168.178.25/24 brd ..."
+    for line in stdout.lines() {
+        if let Some(inet_pos) = line.find("inet ") {
+            let rest = &line[inet_pos + 5..];
+            // Take up to the space (includes /prefix) then strip prefix
+            let addr_cidr = rest.split_whitespace().next()?;
+            let addr = addr_cidr.split('/').next()?;
+            return Some(addr.to_string());
+        }
+    }
+    None
+}
+
+/// Read the first global-scope IPv6 address of an interface.
+fn read_ipv6_global(interface: &str) -> Option<String> {
+    let output = std::process::Command::new("ip")
+        .args(["-6", "-o", "addr", "show", "dev", interface, "scope", "global"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(inet6_pos) = line.find("inet6 ") {
+            let rest = &line[inet6_pos + 6..];
+            let addr_cidr = rest.split_whitespace().next()?;
+            let addr = addr_cidr.split('/').next()?;
+            return Some(addr.to_string());
+        }
+    }
+    None
+}
+
+/// Read the default gateway for a specific interface from all routing tables.
+fn read_default_gateway_v4(interface: &str) -> Option<String> {
+    let output = std::process::Command::new("ip")
+        .args(["-4", "route", "show", "table", "all"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Look for "default via X.X.X.X dev <interface>"
+    for line in stdout.lines() {
+        if line.starts_with("default via ") && line.contains(&format!("dev {interface}")) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                return Some(parts[2].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Read DNS servers — check resolv.conf and interface-specific configs.
+fn read_dns_servers(interface: &str) -> Vec<String> {
+    let mut servers = Vec::new();
+    // Try interface-specific resolv.conf first (UDM style)
+    let iface_resolv = format!("/run/resolv.conf.d/{interface}");
+    let path = if std::path::Path::new(&iface_resolv).exists() {
+        iface_resolv
+    } else {
+        "/etc/resolv.conf".to_string()
+    };
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        for line in content.lines() {
+            if let Some(rest) = line.strip_prefix("nameserver ") {
+                let ns = rest.trim();
+                if ns != "127.0.0.1" && ns != "::1" {
+                    servers.push(ns.to_string());
+                }
+            }
+        }
+    }
+    servers
 }
 
 /// Read interface operstate from sysfs.

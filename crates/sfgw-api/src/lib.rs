@@ -744,8 +744,7 @@ async fn status_handler(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) 
 
     let dns_status = {
         // Check if dnsmasq PID file exists and process is alive
-        let pid_alive = std::fs::read_to_string("/run/dnsmasq.pid")
-            .or_else(|_| std::fs::read_to_string("/var/run/dnsmasq/dnsmasq.pid"))
+        let pid_alive = std::fs::read_to_string("/run/sfgw-dnsmasq.pid")
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
             .map(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
@@ -1850,7 +1849,7 @@ async fn devices_push_config(
 
 async fn wan_list(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) -> impl IntoResponse {
     match sfgw_net::wan::list_wan_configs(&db).await {
-        Ok(configs) => (StatusCode::OK, Json(json!({ "wan_configs": configs }))),
+        Ok(configs) => (StatusCode::OK, Json(json!({ "configs": configs }))),
         Err(e) => internal_err(e),
     }
 }
@@ -1861,7 +1860,7 @@ async fn wan_get(
     Path(interface): Path<String>,
 ) -> impl IntoResponse {
     match sfgw_net::wan::get_wan_config(&db, &interface).await {
-        Ok(Some(config)) => (StatusCode::OK, Json(json!({ "wan_config": config }))),
+        Ok(Some(config)) => (StatusCode::OK, Json(json!({ "config": config }))),
         Ok(None) => err_response(
             StatusCode::NOT_FOUND,
             anyhow::anyhow!("WAN config not found"),

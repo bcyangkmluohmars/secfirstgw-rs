@@ -240,6 +240,87 @@ pub async fn save_dns_overrides(db: &sfgw_db::Db, overrides: &[DnsOverride]) -> 
 }
 
 // ---------------------------------------------------------------------------
+// First-boot defaults
+// ---------------------------------------------------------------------------
+
+/// Seed sensible DNS/DHCP defaults when no configuration exists in the database.
+///
+/// On a fresh install the `meta` table has no DNS or DHCP keys. This function
+/// detects that situation and writes safe defaults:
+///
+/// - **DNS**: upstream servers from `wan_gateway` (if provided) plus the
+///   hardcoded fallbacks `1.1.1.1` and `9.9.9.9`.
+/// - **DHCP on br-lan**: `192.168.1.100 – 192.168.1.254`, gateway
+///   `192.168.1.1`, 12 h lease, domain `lan`.
+///
+/// If *either* `dns_config` or `dhcp_ranges` already exists in the DB, this
+/// function is a no-op — it never overwrites user configuration.
+pub async fn ensure_first_boot_defaults(
+    db: &sfgw_db::Db,
+    wan_gateway: Option<&str>,
+) -> Result<()> {
+    let conn = db.lock().await;
+
+    let has_dns: bool = meta_get::<DnsConfig>(&conn, KEY_DNS_CONFIG)?.is_some();
+    let has_dhcp: bool = meta_get::<Vec<DhcpRange>>(&conn, KEY_DHCP_RANGES)?.is_some();
+
+    if has_dns && has_dhcp {
+        tracing::debug!("DNS/DHCP config already present — skipping first-boot defaults");
+        return Ok(());
+    }
+
+    tracing::info!("first boot detected — seeding DNS/DHCP defaults");
+
+    if !has_dns {
+        let mut upstream: Vec<String> = Vec::new();
+        if let Some(gw) = wan_gateway {
+            upstream.push(gw.to_string());
+        }
+        // Always include public fallback resolvers.
+        upstream.push("1.1.1.1".into());
+        upstream.push("9.9.9.9".into());
+
+        let dns_config = DnsConfig {
+            upstream_dns: upstream,
+            bind_interfaces: vec!["br-lan".into(), "br-mgmt".into()],
+            ..DnsConfig::default()
+        };
+        meta_set(&conn, KEY_DNS_CONFIG, &dns_config)?;
+        tracing::info!(
+            upstream = ?dns_config.upstream_dns,
+            "seeded default DNS config"
+        );
+    }
+
+    if !has_dhcp {
+        let ranges = vec![
+            DhcpRange {
+                interface: "br-lan".into(),
+                start_ip: "192.168.1.100".into(),
+                end_ip: "192.168.1.254".into(),
+                netmask: "255.255.255.0".into(),
+                gateway: "192.168.1.1".into(),
+                lease_time: "12h".into(),
+                vlan_id: None,
+            },
+            DhcpRange {
+                interface: "br-mgmt".into(),
+                start_ip: "10.0.0.100".into(),
+                end_ip: "10.0.0.254".into(),
+                netmask: "255.255.255.0".into(),
+                gateway: "10.0.0.1".into(),
+                lease_time: "12h".into(),
+                vlan_id: Some(3000),
+            },
+        ];
+        meta_set(&conn, KEY_DHCP_RANGES, &ranges)?;
+        tracing::info!("seeded default DHCP ranges (br-lan + br-mgmt)");
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Config generation
 // ---------------------------------------------------------------------------
 
@@ -291,7 +372,8 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/dnsmasq.d/sfgw.conf";
 const DEFAULT_LEASE_FILE: &str = "/var/lib/misc/dnsmasq.leases";
 
 /// Default PID file for the managed dnsmasq instance.
-const DEFAULT_PID_FILE: &str = "/var/run/dnsmasq/sfgw-dnsmasq.pid";
+/// Uses /run/ which exists on all modern Linux (systemd, OpenRC, etc.).
+const DEFAULT_PID_FILE: &str = "/run/sfgw-dnsmasq.pid";
 
 /// Write the generated config to disk.
 pub async fn write_config(db: &sfgw_db::Db, path: Option<&Path>) -> Result<PathBuf> {
@@ -361,8 +443,22 @@ impl DnsmasqProcess {
 
 /// Start the dnsmasq process with the generated config.
 ///
-/// Generates the config from the DB, writes it to disk, and launches dnsmasq.
+/// On first boot (no DNS/DHCP config in the database) this seeds sensible
+/// defaults before generating the dnsmasq configuration.  Pass the WAN
+/// gateway IP (if known) so it can be added as the primary upstream DNS
+/// server; public resolvers `1.1.1.1` and `9.9.9.9` are always appended
+/// as fallback.
 pub async fn start(db: &sfgw_db::Db) -> Result<DnsmasqProcess> {
+    start_with_upstream(db, None).await
+}
+
+/// Like [`start`], but accepts an optional WAN gateway to use as the
+/// primary upstream DNS forwarder on first boot.
+pub async fn start_with_upstream(
+    db: &sfgw_db::Db,
+    wan_gateway: Option<&str>,
+) -> Result<DnsmasqProcess> {
+    ensure_first_boot_defaults(db, wan_gateway).await?;
     start_with_paths(db, None, None).await
 }
 
@@ -383,6 +479,11 @@ pub async fn start_with_paths(
             .await
             .with_context(|| format!("failed to create pid dir: {}", parent.display()))?;
     }
+
+    // Ensure log directory exists
+    tokio::fs::create_dir_all("/var/log/sfgw")
+        .await
+        .with_context(|| "failed to create /var/log/sfgw")?;
 
     let child = tokio::process::Command::new("dnsmasq")
         .arg("--keep-in-foreground")
@@ -534,8 +635,6 @@ mod tests {
 
         // Security defaults present
         assert!(result.contains("stop-dns-rebind"));
-        assert!(result.contains("dnssec"));
-        assert!(result.contains("dnssec-check-unsigned"));
         assert!(result.contains("bind-interfaces"));
         assert!(result.contains("log-queries"));
         assert!(result.contains("bogus-priv"));
@@ -583,7 +682,8 @@ mod tests {
 
         let result = render_template(&cfg, &[], &[], &[]).unwrap();
         assert!(!result.contains("stop-dns-rebind"));
-        assert!(!result.contains("dnssec"));
+        // DNSSEC block is commented out in template (UDM stock dnsmasq lacks support).
+        // The word "dnssec" appears in comments, but no active dnssec directive should be present.
     }
 
     #[test]
@@ -634,5 +734,113 @@ mod tests {
         let cfg2: DnsConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg.upstream_dns, cfg2.upstream_dns);
         assert_eq!(cfg.dnssec, cfg2.dnssec);
+    }
+
+    /// Helper: create an in-memory database with the sfgw schema.
+    async fn test_db() -> sfgw_db::Db {
+        sfgw_db::open_in_memory()
+            .await
+            .expect("failed to open in-memory db")
+    }
+
+    #[tokio::test]
+    async fn test_first_boot_defaults_seeds_config() {
+        let db = test_db().await;
+
+        // Verify nothing exists yet.
+        let ranges = load_dhcp_ranges(&db).await.unwrap();
+        assert!(ranges.is_empty(), "fresh DB should have no DHCP ranges");
+
+        // Seed defaults without a WAN gateway.
+        ensure_first_boot_defaults(&db, None).await.unwrap();
+
+        // DNS config should now exist with public fallback resolvers.
+        let dns = load_dns_config(&db).await.unwrap();
+        assert_eq!(dns.upstream_dns, vec!["1.1.1.1", "9.9.9.9"]);
+        assert_eq!(dns.domain, "lan");
+        assert!(dns.dnssec);
+        assert!(dns.rebind_protection);
+        assert_eq!(dns.bind_interfaces, vec!["br-lan", "br-mgmt"]);
+
+        // DHCP range should exist with the expected defaults.
+        let ranges = load_dhcp_ranges(&db).await.unwrap();
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].interface, "br-lan");
+        assert_eq!(ranges[0].start_ip, "192.168.1.100");
+        assert_eq!(ranges[0].end_ip, "192.168.1.254");
+        assert_eq!(ranges[0].netmask, "255.255.255.0");
+        assert_eq!(ranges[0].gateway, "192.168.1.1");
+        assert_eq!(ranges[0].lease_time, "12h");
+        assert!(ranges[0].vlan_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_first_boot_defaults_with_wan_gateway() {
+        let db = test_db().await;
+
+        ensure_first_boot_defaults(&db, Some("10.0.0.1")).await.unwrap();
+
+        let dns = load_dns_config(&db).await.unwrap();
+        assert_eq!(
+            dns.upstream_dns,
+            vec!["10.0.0.1", "1.1.1.1", "9.9.9.9"],
+            "WAN gateway should be the primary upstream"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_first_boot_defaults_noop_when_config_exists() {
+        let db = test_db().await;
+
+        // Manually save custom DNS config.
+        let custom_dns = DnsConfig {
+            upstream_dns: vec!["8.8.8.8".into()],
+            ..DnsConfig::default()
+        };
+        save_dns_config(&db, &custom_dns).await.unwrap();
+
+        // Manually save a custom DHCP range.
+        let custom_range = DhcpRange {
+            interface: "br-lan".into(),
+            start_ip: "10.0.0.50".into(),
+            end_ip: "10.0.0.100".into(),
+            netmask: "255.255.255.0".into(),
+            gateway: "10.0.0.1".into(),
+            lease_time: "24h".into(),
+            vlan_id: None,
+        };
+        save_dhcp_ranges(&db, &[custom_range]).await.unwrap();
+
+        // Calling first-boot defaults should be a no-op.
+        ensure_first_boot_defaults(&db, Some("99.99.99.99")).await.unwrap();
+
+        // Verify nothing was overwritten.
+        let dns = load_dns_config(&db).await.unwrap();
+        assert_eq!(dns.upstream_dns, vec!["8.8.8.8"]);
+
+        let ranges = load_dhcp_ranges(&db).await.unwrap();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].start_ip, "10.0.0.50");
+    }
+
+    #[tokio::test]
+    async fn test_first_boot_defaults_generate_valid_config() {
+        let db = test_db().await;
+
+        ensure_first_boot_defaults(&db, Some("203.0.113.1")).await.unwrap();
+
+        // generate_config should produce valid dnsmasq output.
+        let config = generate_config(&db).await.unwrap();
+        assert!(config.contains("server=203.0.113.1"));
+        assert!(config.contains("server=1.1.1.1"));
+        assert!(config.contains("server=9.9.9.9"));
+        assert!(config.contains("dhcp-range=br-lan,192.168.1.100,192.168.1.254,255.255.255.0,12h"));
+        assert!(config.contains("dhcp-option=br-lan,3,192.168.1.1"));
+        assert!(config.contains("dhcp-option=br-lan,6,192.168.1.1"));
+        assert!(config.contains("domain=lan"));
+        assert!(config.contains("interface=br-lan"));
+        assert!(config.contains("interface=br-mgmt"));
+        // MGMT DHCP range
+        assert!(config.contains("dhcp-range=br-mgmt,10.0.0.100,10.0.0.254,255.255.255.0,12h"));
     }
 }

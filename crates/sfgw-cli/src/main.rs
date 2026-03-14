@@ -140,11 +140,12 @@ async fn start_services() -> Result<()> {
 
     // Phase 6: Firewall
     tracing::info!("loading firewall rules");
+    sfgw_fw::create_default_rules(&db).await?;
     sfgw_fw::load_rules(&db).await?;
 
     // Phase 7: DNS/DHCP
     tracing::info!("starting DNS/DHCP");
-    sfgw_dns::start(&db).await?;
+    let _dnsmasq = sfgw_dns::start(&db).await?;
 
     // Phase 8: VPN
     tracing::info!("starting VPN services");
@@ -152,7 +153,9 @@ async fn start_services() -> Result<()> {
 
     // Phase 9: NAS (if HDD/volume present)
     tracing::info!("starting NAS services");
-    sfgw_nas::start(&db, &platform).await?;
+    if let Err(e) = sfgw_nas::start(&db, &platform).await {
+        tracing::warn!("NAS services unavailable: {e}");
+    }
 
     // Phase 10: Device adoption listener
     tracing::info!("starting adoption service");
@@ -165,7 +168,13 @@ async fn start_services() -> Result<()> {
     // Phase 12: Display (auto-detect: character LCD, framebuffer touchscreen, or none)
     tracing::info!("initializing display");
     let display_config = sfgw_display::auto_detect(&platform);
-    let _display = sfgw_display::init(&display_config)?;
+    let _display = match sfgw_display::init(&display_config) {
+        Ok(d) => Some(d),
+        Err(e) => {
+            tracing::warn!("display unavailable: {e}");
+            None
+        }
+    };
 
     // Phase 13: API server (blocks)
     tracing::info!("starting API server");

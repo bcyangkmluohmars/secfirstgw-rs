@@ -107,8 +107,10 @@ pub fn init() -> Result<Platform, HalError> {
         return Ok(Platform::Docker);
     }
 
-    // Bare metal: ubnthal kernel module device node
-    if std::path::Path::new("/dev/ubnthal").exists() {
+    // Bare metal: ubnthal kernel module (device node or sysfs module entry)
+    if std::path::Path::new("/dev/ubnthal").exists()
+        || std::path::Path::new("/sys/module/ubnthal").exists()
+    {
         return Ok(Platform::BareMetal);
     }
 

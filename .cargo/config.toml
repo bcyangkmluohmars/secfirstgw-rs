@@ -8,7 +8,7 @@
 #   apt install gcc-aarch64-linux-gnu  # or: brew install aarch64-elf-gcc
 
 [target.aarch64-unknown-linux-musl]
-linker = "aarch64-linux-gnu-gcc"
+linker = "/home/kevin/tools/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc"
 rustflags = ["-C", "target-feature=+crt-static"]
 
 [target.x86_64-unknown-linux-musl]

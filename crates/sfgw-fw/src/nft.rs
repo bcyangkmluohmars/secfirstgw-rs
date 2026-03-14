@@ -114,6 +114,23 @@ pub fn validate_interface_name(s: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate a named set reference: alphanumeric + underscore, 1-31 chars.
+fn validate_set_name(s: &str) -> Result<()> {
+    if s.is_empty() || s.len() > 31 {
+        bail!("invalid set name '{}': must be 1-31 characters", s);
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        bail!(
+            "invalid set name '{}': only alphanumeric and '_' allowed",
+            s
+        );
+    }
+    Ok(())
+}
+
 /// Validate a chain name for user rules.
 fn validate_chain(s: &str) -> Result<()> {
     const ALLOWED: &[&str] = &["input", "forward", "output", "prerouting", "postrouting"];
@@ -904,8 +921,14 @@ fn emit_single_rule_validated(out: &mut String, rule: &FirewallRule) -> Result<(
     let src = detail.source.to_lowercase();
     if src != "any" && src != "0.0.0.0/0" {
         if let Some(iface) = src.strip_prefix("iif:") {
-            validate_interface_name(iface)?;
-            parts.push(format!("iifname \"{iface}\""));
+            if let Some(set_name) = iface.strip_prefix('@') {
+                // Named set reference (e.g. "@lan_ifaces") — validated as alphanumeric + underscore.
+                validate_set_name(set_name)?;
+                parts.push(format!("iifname @{set_name}"));
+            } else {
+                validate_interface_name(iface)?;
+                parts.push(format!("iifname \"{iface}\""));
+            }
         } else {
             validate_ip_or_cidr(&src)?;
             parts.push(format!("ip saddr {src}"));
@@ -916,8 +939,14 @@ fn emit_single_rule_validated(out: &mut String, rule: &FirewallRule) -> Result<(
     let dst = detail.destination.to_lowercase();
     if dst != "any" && dst != "0.0.0.0/0" {
         if let Some(iface) = dst.strip_prefix("oif:") {
-            validate_interface_name(iface)?;
-            parts.push(format!("oifname \"{iface}\""));
+            if let Some(set_name) = iface.strip_prefix('@') {
+                // Named set reference (e.g. "@wan_ifaces") — validated as alphanumeric + underscore.
+                validate_set_name(set_name)?;
+                parts.push(format!("oifname @{set_name}"));
+            } else {
+                validate_interface_name(iface)?;
+                parts.push(format!("oifname \"{iface}\""));
+            }
         } else {
             validate_ip_or_cidr(&dst)?;
             parts.push(format!("ip daddr {dst}"));

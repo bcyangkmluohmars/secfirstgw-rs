@@ -139,6 +139,7 @@ fn run_migrations(conn: &Connection) -> Result<(), DbError> {
             include_str!("../migrations/002_firmware_manifests.sql"),
         ),
         ("003", include_str!("../migrations/003_wan_config.sql")),
+        ("004", include_str!("../migrations/004_networks.sql")),
     ];
 
     for (version_str, sql) in migrations {
@@ -196,7 +197,7 @@ mod tests {
             )
             .expect("schema_version should exist");
         // After all migrations, schema version should be "3"
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
     }
 
     #[tokio::test]
@@ -218,6 +219,7 @@ mod tests {
             "ids_events",
             "firmware_manifests",
             "wan_configs",
+            "networks",
         ];
 
         for table in &expected_tables {
@@ -252,7 +254,7 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("schema_version should exist after second init");
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
     }
 
     #[tokio::test]
@@ -273,7 +275,7 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("schema_version should exist");
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
     }
 
     #[tokio::test]
