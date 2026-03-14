@@ -8,16 +8,18 @@ Current version: **v0.0.3**
 
 - **Firewall** — nftables (modern kernels) + iptables-legacy (UDM Pro / kernel 4.19). Dual-stack IPv4/IPv6. Zone model with catch-all DROP on all zones. Port forwards. NAT masquerade. Atomic ruleset application with SSH lockout rollback.
 - **Networking** — Interface management, VLAN creation, bridge configuration. Auto-detection of Ubiquiti hardware (UDM Pro, SE, USG). Switch ASIC VLAN programming via swconfig.
-- **VPN** — WireGuard tunnels via boringtun. Peer management, config generation. Multi-core.
 - **Web UI + API** — axum, TLS 1.3 only. E2EE (X25519 + ML-KEM-1024, AES-256-GCM). Session binding (IP + fingerprint). Rate limiting on every endpoint. Security headers (HSTS, CSP, X-Frame-Options, etc.). User management.
 - **DNS/DHCP** — dnsmasq config generation. DHCP ranges, static leases, DNS overrides. DNSSEC validation.
-- **Device Adoption** — mTLS CA, Inform protocol handling, device approval/rejection workflow.
-- **IDS** — ARP/DHCP/DNS/VLAN anomaly detection framework with alert correlation.
 - **Personality** — 7 switchable personalities for error messages, honeypot, IDS alerts. Switchable via web UI settings.
-- **Display** — HD44780 LCD driver (UDM Pro front panel via ulcmd), framebuffer touchscreen abstraction.
 - **Database** — SQLite, encrypted at rest, parameterized queries, migrations.
 - **Auth** — Argon2id password hashing, session tokens, E2EE envelope middleware.
 - **Deploy** — dev-deploy.sh for rapid iteration on UDM Pro (rsync + on-device build + restart with SSH lockout protection).
+
+### Untested  
+- **Device Adoption** — mTLS CA, Inform protocol handling, device approval/rejection workflow.
+- **Display** — HD44780 LCD driver (UDM Pro front panel via ulcmd), framebuffer touchscreen abstraction.
+- **VPN** — WireGuard tunnels via boringtun. Peer management, config generation. Multi-core.
+- **IDS** — ARP/DHCP/DNS/VLAN anomaly detection framework with alert correlation.
 
 ### In Progress
 
