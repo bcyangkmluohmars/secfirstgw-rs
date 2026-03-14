@@ -10,6 +10,8 @@ A security-focused gateway firmware, written in Rust. Runs on bare metal, VM, or
 
 Because 180+ services, Java, MongoDB without auth, hardcoded credentials, and single-core VPN at 30 MB/s in 2026 is not acceptable.
 
+**12 MB RAM** on a UDM Pro. Their stack uses 1.8 GB.
+
 ## What?
 
 A single Rust binary replacing bloated gateway stacks:
