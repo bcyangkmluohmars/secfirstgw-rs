@@ -503,11 +503,12 @@ pub async fn load_interface_zones(db: &sfgw_db::Db) -> Result<Vec<ZonePolicy>, F
         .into_iter()
         .map(|(role, interfaces)| {
             // For bridged zones, replace individual port interfaces with the bridge.
-            let effective_ifaces = if role != "wan" && role != "loopback" && bridged_zones.contains(&role) {
-                vec![format!("br-{role}")]
-            } else {
-                interfaces
-            };
+            let effective_ifaces =
+                if role != "wan" && role != "loopback" && bridged_zones.contains(&role) {
+                    vec![format!("br-{role}")]
+                } else {
+                    interfaces
+                };
             ZonePolicy {
                 zone: FirewallZone::from_role(&role),
                 interfaces: effective_ifaces,

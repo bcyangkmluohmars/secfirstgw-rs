@@ -284,7 +284,9 @@ fn validate_no_lockout(config: &str) -> Result<()> {
         .lines()
         .any(|l| l.contains("--dport 22") && l.contains("-j ACCEPT"));
     if !has_ssh_accept {
-        bail!("REFUSING to apply ruleset: no SSH ACCEPT rule found — would lock out all management access");
+        bail!(
+            "REFUSING to apply ruleset: no SSH ACCEPT rule found — would lock out all management access"
+        );
     }
     Ok(())
 }
@@ -411,19 +413,14 @@ async fn restore_state(cmd: &str, backup: &str) -> Result<()> {
 /// Verify connectivity by TCP-connecting to our own SSH (22) and HTTPS (443)
 /// on localhost. If iptables blocks loopback or our own ports, this catches it.
 async fn verify_connectivity() -> Result<()> {
-    use tokio::net::TcpStream;
     use std::time::Duration;
+    use tokio::net::TcpStream;
 
     // Give the kernel a moment to process the new rules.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Test SSH (port 22) — the OS sshd should always be listening.
-    match tokio::time::timeout(
-        Duration::from_secs(3),
-        TcpStream::connect("127.0.0.1:22"),
-    )
-    .await
-    {
+    match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect("127.0.0.1:22")).await {
         Ok(Ok(_)) => {
             tracing::debug!("connectivity check: SSH on 127.0.0.1:22 OK");
         }
@@ -431,7 +428,9 @@ async fn verify_connectivity() -> Result<()> {
             // Connection refused = port not listening, but not blocked by firewall.
             // Connection reset or timeout = firewall is blocking.
             if e.kind() == std::io::ErrorKind::ConnectionRefused {
-                tracing::debug!("connectivity check: SSH on 127.0.0.1:22 refused (sshd not running, but not blocked)");
+                tracing::debug!(
+                    "connectivity check: SSH on 127.0.0.1:22 refused (sshd not running, but not blocked)"
+                );
             } else {
                 anyhow::bail!("SSH on 127.0.0.1:22 failed: {e}");
             }
@@ -625,7 +624,10 @@ pub async fn flush_ruleset() -> Result<()> {
                 "SFGW-OUTPUT" => "OUTPUT",
                 _ => continue,
             };
-            let _ = Command::new(cmd).args(["-D", builtin, "-j", chain]).output().await;
+            let _ = Command::new(cmd)
+                .args(["-D", builtin, "-j", chain])
+                .output()
+                .await;
             let _ = Command::new(cmd).args(["-F", chain]).output().await;
             let _ = Command::new(cmd).args(["-X", chain]).output().await;
         }

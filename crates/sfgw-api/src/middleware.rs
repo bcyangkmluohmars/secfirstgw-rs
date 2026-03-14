@@ -31,12 +31,14 @@ pub enum AuthError {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            AuthError::MissingToken => {
-                (StatusCode::UNAUTHORIZED, sfgw_personality::messages::unauthorized())
-            }
-            AuthError::InvalidSession => {
-                (StatusCode::UNAUTHORIZED, sfgw_personality::messages::unauthorized())
-            }
+            AuthError::MissingToken => (
+                StatusCode::UNAUTHORIZED,
+                sfgw_personality::messages::unauthorized(),
+            ),
+            AuthError::InvalidSession => (
+                StatusCode::UNAUTHORIZED,
+                sfgw_personality::messages::unauthorized(),
+            ),
             AuthError::InternalError(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
             }

@@ -24,7 +24,6 @@ use std::time::Duration;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
-
 use crate::middleware::AuthUser;
 use crate::ratelimit::RateLimiter;
 
@@ -300,24 +299,24 @@ async fn personality_get(_auth: AuthUser) -> Json<Value> {
     Json(json!({ "active": active.name(), "personalities": all }))
 }
 
-async fn personality_set(
-    _auth: AuthUser,
-    Json(body): Json<Value>,
-) -> impl IntoResponse {
+async fn personality_set(_auth: AuthUser, Json(body): Json<Value>) -> impl IntoResponse {
     let name = match body.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(json!({ "error": "missing field: name" })),
-            )
+            );
         }
     };
 
     match sfgw_personality::Personality::from_name(name) {
         Some(p) => {
             sfgw_personality::set(p);
-            (StatusCode::OK, Json(json!({ "ok": true, "active": p.name() })))
+            (
+                StatusCode::OK,
+                Json(json!({ "ok": true, "active": p.name() })),
+            )
         }
         None => (
             StatusCode::UNPROCESSABLE_ENTITY,

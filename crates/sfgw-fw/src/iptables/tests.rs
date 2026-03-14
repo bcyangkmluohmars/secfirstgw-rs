@@ -785,27 +785,115 @@ fn debug_udm_ruleset_with_db_rules() {
 
     // Simulate DB default rules (subset — the ones that resolve with 3 zones)
     let rules = vec![
-        FirewallRule { id: Some(1), chain: "forward".into(), priority: 50,
-            detail: RuleDetail { action: Action::Accept, protocol: "any".into(), source: "iif:@mgmt_ifaces".into(), destination: "any".into(), port: None, comment: Some("MGMT to any".into()), vlan: None, rate_limit: None }, enabled: true },
-        FirewallRule { id: Some(2), chain: "forward".into(), priority: 100,
-            detail: RuleDetail { action: Action::Accept, protocol: "any".into(), source: "iif:@lan_ifaces".into(), destination: "oif:@wan_ifaces".into(), port: None, comment: Some("LAN to WAN".into()), vlan: None, rate_limit: None }, enabled: true },
-        FirewallRule { id: Some(3), chain: "forward".into(), priority: 400,
-            detail: RuleDetail { action: Action::Drop, protocol: "any".into(), source: "iif:@wan_ifaces".into(), destination: "any".into(), port: None, comment: Some("default deny inbound".into()), vlan: None, rate_limit: None }, enabled: true },
-        FirewallRule { id: Some(4), chain: "input".into(), priority: 31,
-            detail: RuleDetail { action: Action::Accept, protocol: "tcp".into(), source: "iif:@mgmt_ifaces".into(), destination: "any".into(), port: Some("22".into()), comment: Some("SSH from MGMT".into()), vlan: None, rate_limit: None }, enabled: true },
-        FirewallRule { id: Some(6), chain: "input".into(), priority: 60,
-            detail: RuleDetail { action: Action::Accept, protocol: "tcp".into(), source: "iif:@mgmt_ifaces".into(), destination: "any".into(), port: Some("443".into()), comment: Some("HTTPS from MGMT".into()), vlan: None, rate_limit: None }, enabled: true },
-        FirewallRule { id: Some(7), chain: "input".into(), priority: 900,
-            detail: RuleDetail { action: Action::Drop, protocol: "any".into(), source: "iif:@wan_ifaces".into(), destination: "any".into(), port: None, comment: Some("drop all WAN input".into()), vlan: None, rate_limit: None }, enabled: true },
+        FirewallRule {
+            id: Some(1),
+            chain: "forward".into(),
+            priority: 50,
+            detail: RuleDetail {
+                action: Action::Accept,
+                protocol: "any".into(),
+                source: "iif:@mgmt_ifaces".into(),
+                destination: "any".into(),
+                port: None,
+                comment: Some("MGMT to any".into()),
+                vlan: None,
+                rate_limit: None,
+            },
+            enabled: true,
+        },
+        FirewallRule {
+            id: Some(2),
+            chain: "forward".into(),
+            priority: 100,
+            detail: RuleDetail {
+                action: Action::Accept,
+                protocol: "any".into(),
+                source: "iif:@lan_ifaces".into(),
+                destination: "oif:@wan_ifaces".into(),
+                port: None,
+                comment: Some("LAN to WAN".into()),
+                vlan: None,
+                rate_limit: None,
+            },
+            enabled: true,
+        },
+        FirewallRule {
+            id: Some(3),
+            chain: "forward".into(),
+            priority: 400,
+            detail: RuleDetail {
+                action: Action::Drop,
+                protocol: "any".into(),
+                source: "iif:@wan_ifaces".into(),
+                destination: "any".into(),
+                port: None,
+                comment: Some("default deny inbound".into()),
+                vlan: None,
+                rate_limit: None,
+            },
+            enabled: true,
+        },
+        FirewallRule {
+            id: Some(4),
+            chain: "input".into(),
+            priority: 31,
+            detail: RuleDetail {
+                action: Action::Accept,
+                protocol: "tcp".into(),
+                source: "iif:@mgmt_ifaces".into(),
+                destination: "any".into(),
+                port: Some("22".into()),
+                comment: Some("SSH from MGMT".into()),
+                vlan: None,
+                rate_limit: None,
+            },
+            enabled: true,
+        },
+        FirewallRule {
+            id: Some(6),
+            chain: "input".into(),
+            priority: 60,
+            detail: RuleDetail {
+                action: Action::Accept,
+                protocol: "tcp".into(),
+                source: "iif:@mgmt_ifaces".into(),
+                destination: "any".into(),
+                port: Some("443".into()),
+                comment: Some("HTTPS from MGMT".into()),
+                vlan: None,
+                rate_limit: None,
+            },
+            enabled: true,
+        },
+        FirewallRule {
+            id: Some(7),
+            chain: "input".into(),
+            priority: 900,
+            detail: RuleDetail {
+                action: Action::Drop,
+                protocol: "any".into(),
+                source: "iif:@wan_ifaces".into(),
+                destination: "any".into(),
+                port: None,
+                comment: Some("drop all WAN input".into()),
+                vlan: None,
+                rate_limit: None,
+            },
+            enabled: true,
+        },
     ];
 
     let config = generate_zone_ruleset(&zones, &rules, &FirewallPolicy::default(), &[]);
     eprintln!("\n=== GENERATED UDM RULESET ===\n{config}\n=== END ===\n");
 
     // MUST have SSH accept on br-mgmt
-    assert!(config.contains("-i br-mgmt") && config.contains("--dport 22") && config.contains("ACCEPT"),
-        "MGMT SSH must be allowed");
+    assert!(
+        config.contains("-i br-mgmt") && config.contains("--dport 22") && config.contains("ACCEPT"),
+        "MGMT SSH must be allowed"
+    );
     // MUST have HTTPS accept on br-mgmt
-    assert!(config.contains("-A SFGW-INPUT -i br-mgmt -p tcp --dport 443 -j ACCEPT"),
-        "MGMT HTTPS must be allowed");
+    assert!(
+        config.contains("-A SFGW-INPUT -i br-mgmt -p tcp --dport 443 -j ACCEPT"),
+        "MGMT HTTPS must be allowed"
+    );
 }
