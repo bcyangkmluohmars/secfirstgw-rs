@@ -1,6 +1,6 @@
 # secfirstgw-rs
 
-> If you know, you know.
+> If you know, you know. If you don't — the firewall will let you know.
 
 A security-focused gateway firmware, written in Rust. Runs on bare metal, VM, or Docker.
 
@@ -16,7 +16,7 @@ A single Rust binary replacing bloated gateway stacks:
 
 - **Firewall & Router** — nftables via netlink, stateful packet inspection
 - **Network Controller** — device adoption, provisioning, monitoring
-- **Multi-Core VPN** — WireGuard (boringtun) + OpenVPN across all cores
+- **Multi-Core VPN** — WireGuard (boringtun) across all cores
 - **DNS & DHCP** — dnsmasq config generation
 - **Encrypted Storage** — LUKS2 FDE with hardware-bound key derivation
 - **Forward-Secret Logs** — daily key rotation, old keys deleted after export
@@ -114,7 +114,7 @@ Prepared networks are pre-configured but disabled. Enable them via the web UI to
 
 ### Default Firewall Policy
 
-26 rules are auto-created on first boot:
+31 rules are auto-created on first boot:
 
 - **NAT**: Masquerade on all WAN interfaces
 - **LAN**: Full internet access, can reach Guest/DMZ
@@ -140,7 +140,7 @@ Every design decision prioritizes security:
 - No trusted proxy headers without validation
 - Encrypted at rest, encrypted in transit, encrypted in logs
 - Minimal attack surface: one binary, one process, one language
-- E2EE API layer: X25519 ECDH + HKDF + AES-256-GCM envelope encryption
+- E2EE API layer: hybrid X25519 + ML-KEM-1024 (FIPS 203) key exchange, HKDF-SHA256, AES-256-GCM
 
 ## Architecture
 

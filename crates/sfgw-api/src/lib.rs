@@ -12,7 +12,7 @@ use axum::{
     Extension, Json, Router,
     extract::{ConnectInfo, Path, Query},
     http::{HeaderMap, Method, StatusCode, header::HeaderName},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
+
 
 use crate::middleware::AuthUser;
 use crate::ratelimit::RateLimiter;
@@ -99,6 +100,11 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
         .route("/api/v1/interfaces/vlan", post(interface_create_vlan))
         .route("/api/v1/auth/me", get(me_handler))
         .route("/api/v1/auth/logout", post(logout_handler))
+        // Personality
+        .route(
+            "/api/v1/personality",
+            get(personality_get).put(personality_set),
+        )
         // User management
         .route("/api/v1/users", get(users_list).post(users_create))
         .route("/api/v1/users/{id}", put(users_update).delete(users_delete))
@@ -195,6 +201,7 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
             .merge(public_routes)
             .merge(protected_routes)
             .layer(cors)
+            .layer(axum::middleware::from_fn(security_headers_middleware))
             .layer(Extension(db))
             .layer(Extension(negotiate_store))
             .layer(Extension(envelope_key_store))
@@ -205,6 +212,7 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
             .merge(public_routes)
             .merge(protected_routes)
             .layer(cors)
+            .layer(axum::middleware::from_fn(security_headers_middleware))
             .layer(Extension(db))
             .layer(Extension(negotiate_store))
             .layer(Extension(envelope_key_store))
@@ -223,6 +231,99 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
         .context("API server error")?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Security headers
+// ---------------------------------------------------------------------------
+
+/// Middleware that adds security headers to every response.
+async fn security_headers_middleware(
+    request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    use axum::http::HeaderValue;
+
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+
+    headers.insert(
+        axum::http::header::STRICT_TRANSPORT_SECURITY,
+        HeaderValue::from_static("max-age=63072000; includeSubDomains"),
+    );
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"),
+    );
+    headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=(), interest-cohort=()"),
+    );
+    // no-store on API responses; static assets could use different caching
+    // but for a gateway admin panel, no-store is safest.
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+
+    response
+}
+
+// ---------------------------------------------------------------------------
+// Personality
+// ---------------------------------------------------------------------------
+
+async fn personality_get(_auth: AuthUser) -> Json<Value> {
+    let active = sfgw_personality::active();
+    let all: Vec<Value> = sfgw_personality::Personality::ALL
+        .iter()
+        .map(|p| {
+            json!({
+                "name": p.name(),
+                "description": p.description(),
+                "active": *p == active,
+            })
+        })
+        .collect();
+    Json(json!({ "active": active.name(), "personalities": all }))
+}
+
+async fn personality_set(
+    _auth: AuthUser,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "missing field: name" })),
+            )
+        }
+    };
+
+    match sfgw_personality::Personality::from_name(name) {
+        Some(p) => {
+            sfgw_personality::set(p);
+            (StatusCode::OK, Json(json!({ "ok": true, "active": p.name() })))
+        }
+        None => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": format!("unknown personality: {name}") })),
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1263,24 +1364,24 @@ async fn logout_handler(
 fn err_response(status: StatusCode, e: impl Into<anyhow::Error>) -> (StatusCode, Json<Value>) {
     let e: anyhow::Error = e.into();
     // Never expose internal error details to clients.
-    // Log the actual error for debugging, return a generic message.
-    let generic_msg = if status.is_server_error() {
+    // Log the actual error for debugging, return a sassy message.
+    let msg: &str = if status.is_server_error() {
         tracing::error!("{e:#}");
         "internal server error"
     } else {
         tracing::warn!("{e:#}");
         match status.as_u16() {
+            401 => sfgw_personality::messages::unauthorized(),
+            403 => sfgw_personality::messages::forbidden(),
+            404 => sfgw_personality::messages::not_found(),
+            429 => sfgw_personality::messages::rate_limited(),
             400 => "bad request",
-            401 => "unauthorized",
-            403 => "forbidden",
-            404 => "not found",
             409 => "conflict",
             422 => "validation error",
-            429 => "too many requests",
             _ => "request error",
         }
     };
-    (status, Json(json!({ "error": generic_msg })))
+    (status, Json(json!({ "error": msg })))
 }
 
 fn internal_err(e: impl Into<anyhow::Error>) -> (StatusCode, Json<Value>) {

@@ -139,9 +139,9 @@ async fn start_services() -> Result<()> {
     sfgw_net::configure(&db, &platform).await?;
 
     // Phase 6: Firewall
-    tracing::info!("loading firewall rules");
+    tracing::info!("applying firewall rules");
     sfgw_fw::create_default_rules(&db).await?;
-    sfgw_fw::load_rules(&db).await?;
+    sfgw_fw::apply_rules(&db).await?;
 
     // Phase 7: DNS/DHCP
     tracing::info!("starting DNS/DHCP");

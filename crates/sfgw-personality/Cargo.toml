@@ -1,0 +1,12 @@
+[package]
+name = "sfgw-personality"
+description = "sassy error messages, honeypot, and other personality traits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rand = "0.8"
+tokio = { workspace = true, features = ["net", "io-util", "macros"] }
+tracing.workspace = true

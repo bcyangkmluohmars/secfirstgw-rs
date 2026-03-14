@@ -13,6 +13,7 @@ sfgw-vpn = { path = "../sfgw-vpn" }
 sfgw-dns = { path = "../sfgw-dns" }
 sfgw-ids = { path = "../sfgw-ids" }
 sfgw-adopt = { path = "../sfgw-adopt" }
+sfgw-personality = { path = "../sfgw-personality" }
 anyhow.workspace = true
 tokio.workspace = true
 axum.workspace = true

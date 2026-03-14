@@ -6,7 +6,7 @@
 //! run in a background tokio task, removing failed WANs and
 //! re-adding them on recovery.
 
-use crate::nft::validate_interface_name;
+use crate::iptables::validate_interface_name;
 use crate::{WanGroup, WanMember, WanMode};
 use anyhow::{Context, Result};
 use std::net::IpAddr;

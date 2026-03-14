@@ -122,6 +122,7 @@ Each crate has a single responsibility. Don't blur the lines. See CLAUDE.md for 
 
 ## What We're Looking For
 
+- **Personalities** — we're always looking for new personalities. If your firewall messages make us laugh, they're in. See `crates/sfgw-personality/src/messages.rs` for the format.
 - **IDS signatures** — new detection patterns for ARP spoofing, DNS tunneling, VLAN hopping
 - **Platform support** — new HAL backends for hardware we don't have
 - **Protocol implementations** — RADIUS, 802.1X, LLDP

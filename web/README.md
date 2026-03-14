@@ -45,7 +45,8 @@ Output in `dist/` — embedded into the Rust binary at compile time via `include
 
 ## Security
 
-- All API communication is end-to-end encrypted (X25519 ECDH + AES-256-GCM)
-- Session keys are derived per-connection via HKDF
+- All API communication is end-to-end encrypted (hybrid X25519 + ML-KEM-1024 key exchange, AES-256-GCM)
+- Post-quantum safe: ML-KEM-1024 (FIPS 203) with X25519 fallback if unavailable
+- Session keys derived via HKDF-SHA256 from combined shared secrets
 - No cookies — token-based authentication
 - CSP headers enforced by the backend

@@ -14,7 +14,7 @@ TARGET="${1:-192.168.1.1}"
 USER="root"
 REMOTE_SRC="/data/sfgw-src"
 REMOTE_BIN="/tmp/sfgw"
-SFGW_PORT="${SFGW_PORT:-8443}"
+SFGW_PORT="${SFGW_PORT:-443}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 
@@ -118,6 +118,42 @@ if pgrep -f '/tmp/sfgw start' >/dev/null; then
     PID=\$(pgrep -f '/tmp/sfgw start')
     MEM=\$(ps -o rss= -p \$PID | awk '{printf "%.1f MB", \$1/1024}')
     echo -e "sfgw running — PID \$PID, \$MEM RAM, port ${SFGW_PORT}"
+
+    # Verify SSH still works after firewall rules applied.
+    sleep 3
+    SSH_OK=0
+    for i in 1 2 3; do
+        if (echo > /dev/tcp/127.0.0.1/22) 2>/dev/null; then
+            SSH_OK=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "\$SSH_OK" -eq 1 ]; then
+        echo "SSH connectivity check passed."
+    else
+        echo "SSH BLOCKED — firewall lockout detected! Killing sfgw..."
+        kill \$PID 2>/dev/null || true
+        sleep 1
+        # Flush SFGW chains to restore connectivity (IPv4 + IPv6).
+        for ipt in iptables ip6tables; do
+            for chain in SFGW-INPUT SFGW-FORWARD SFGW-OUTPUT; do
+                bc="\${chain#SFGW-}"
+                \$ipt -D "\$bc" -j "\$chain" 2>/dev/null || true
+                \$ipt -F "\$chain" 2>/dev/null || true
+                \$ipt -X "\$chain" 2>/dev/null || true
+            done
+        done
+        for chain in SFGW-PREROUTING SFGW-POSTROUTING; do
+            bc="\${chain#SFGW-}"
+            iptables -t nat -D "\$bc" -j "\$chain" 2>/dev/null || true
+            iptables -t nat -F "\$chain" 2>/dev/null || true
+            iptables -t nat -X "\$chain" 2>/dev/null || true
+        done
+        echo "SFGW chains flushed. SSH restored. Check /tmp/sfgw.log for errors."
+        exit 1
+    fi
 else
     echo "FAILED — check /tmp/sfgw.log"
     tail -20 /tmp/sfgw.log

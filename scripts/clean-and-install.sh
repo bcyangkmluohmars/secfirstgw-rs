@@ -174,7 +174,7 @@ backup_existing() {
         fi
 
         # Save current firewall rules
-        nft list ruleset > "${backup_dir}/nftables-backup.conf" 2>/dev/null || true
+        iptables-save > "${backup_dir}/iptables-backup.conf" 2>/dev/null || true
 
         # Save interface config
         ip -j addr > "${backup_dir}/ip-addr.json" 2>/dev/null || true
@@ -198,7 +198,7 @@ install_deps() {
 
     local missing=()
     command -v dnsmasq  >/dev/null 2>&1 || missing+=(dnsmasq)
-    command -v nft      >/dev/null 2>&1 || missing+=(nftables)
+    command -v iptables >/dev/null 2>&1 || missing+=(iptables)
     command -v wg       >/dev/null 2>&1 || missing+=(wireguard-tools)
     command -v ip       >/dev/null 2>&1 || missing+=(iproute2)
 
@@ -464,6 +464,60 @@ start_service() {
     fi
 }
 
+# ─── Post-start SSH connectivity check ────────────────────────────────
+
+verify_ssh_alive() {
+    log "Verifying SSH is still reachable after firewall apply..."
+
+    # Give sfgw a moment to apply firewall rules.
+    sleep 3
+
+    # Try a TCP connect to our own SSH port.
+    # If the firewall locked us out, this will fail.
+    local ok=0
+    for attempt in 1 2 3; do
+        if (echo > /dev/tcp/127.0.0.1/22) 2>/dev/null; then
+            ok=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "${ok}" -eq 1 ]; then
+        log "SSH connectivity check passed."
+    else
+        err "SSH connectivity check FAILED — firewall may have locked out SSH!" \
+            "\n  Emergency rollback: stopping sfgw and restoring previous iptables." \
+            "\n  Run 'iptables-restore < /data/unifi-backup/*/iptables-backup.conf' to restore."
+
+        # Stop sfgw so its firewall rules are no longer active.
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+        else
+            /etc/init.d/${SERVICE_NAME} stop 2>/dev/null || true
+        fi
+
+        # Flush SFGW chains to restore connectivity (IPv4 + IPv6).
+        for ipt in iptables ip6tables; do
+            for chain in SFGW-INPUT SFGW-FORWARD SFGW-OUTPUT; do
+                builtin_chain="${chain#SFGW-}"
+                ${ipt} -D "${builtin_chain}" -j "${chain}" 2>/dev/null || true
+                ${ipt} -F "${chain}" 2>/dev/null || true
+                ${ipt} -X "${chain}" 2>/dev/null || true
+            done
+        done
+        for chain in SFGW-PREROUTING SFGW-POSTROUTING; do
+            builtin_chain="${chain#SFGW-}"
+            iptables -t nat -D "${builtin_chain}" -j "${chain}" 2>/dev/null || true
+            iptables -t nat -F "${chain}" 2>/dev/null || true
+            iptables -t nat -X "${chain}" 2>/dev/null || true
+        done
+
+        warn "SFGW chains flushed. SSH should be restored."
+        exit 1
+    fi
+}
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
 print_summary() {
@@ -504,6 +558,7 @@ main() {
     enable_forwarding
     install_service
     start_service
+    verify_ssh_alive
     print_summary
 }
 

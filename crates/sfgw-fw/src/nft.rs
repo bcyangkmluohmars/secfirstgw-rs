@@ -191,6 +191,10 @@ pub fn generate_ruleset(rules: &[FirewallRule], policy: &FirewallPolicy) -> Stri
 
     writeln!(out).unwrap();
 
+    // Close table definition — rules follow after via `add rule`.
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
     // ── Default secure rules (always present) ───────────────────────
     emit_default_rules(&mut out);
 
@@ -201,9 +205,6 @@ pub fn generate_ruleset(rules: &[FirewallRule], policy: &FirewallPolicy) -> Stri
         // User rules from DB.
         emit_user_rules(&mut out, rules);
     }
-
-    // Close table.
-    writeln!(out, "}}").unwrap();
 
     out
 }
@@ -220,21 +221,15 @@ pub fn generate_ruleset_with_forwards(
         return out;
     }
 
-    // We need to inject DNAT rules inside the table before the closing brace.
-    // Remove the trailing "}\n" and append, then re-close.
-    if out.ends_with("}\n") {
-        out.truncate(out.len() - 2);
-    }
-
+    // Append DNAT rules after the table definition (add rule syntax).
     writeln!(out).unwrap();
-    writeln!(out, "    # ── Port forwarding (DNAT) ──").unwrap();
+    writeln!(out, "# ── Port forwarding (DNAT) ──").unwrap();
     for fwd in forwards.iter().filter(|f| f.enabled) {
         if let Err(e) = emit_port_forward(&mut out, fwd, None) {
             tracing::error!("skipping invalid port forward: {e}");
         }
     }
 
-    writeln!(out, "}}").unwrap();
     out
 }
 
@@ -258,13 +253,19 @@ pub async fn apply_ruleset(config: &str) -> Result<()> {
         .await
         .context("failed to execute nft")?;
 
-    // Clean up temp file (best-effort).
-    let _ = fs::remove_file(tmp_path).await;
-
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("nft -f failed (exit {}): {}", output.status, stderr.trim());
+        // Keep config file for debugging on failure.
+        tracing::error!(path = tmp_path, "nft config kept for debugging");
+        anyhow::bail!(
+            "nft -f failed (exit {}): {}",
+            output.status,
+            stderr.trim()
+        );
     }
+
+    // Clean up temp file on success.
+    let _ = fs::remove_file(tmp_path).await;
 
     tracing::info!("nftables ruleset applied atomically");
     Ok(())
@@ -357,6 +358,15 @@ pub fn generate_zone_ruleset(
 
     writeln!(out).unwrap();
 
+    // Close table definition — chains and sets are defined, rules follow after.
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    // ── Rules are emitted AFTER the table block ─────────────────────
+    // In nft -f files, `add rule` statements must be outside the table
+    // definition block. The table/chains/sets are declared first, then
+    // rules are appended via `add rule`.
+
     // ── Default secure rules (conntrack, loopback, ICMP) ────────────
     emit_default_rules(&mut out);
 
@@ -392,14 +402,13 @@ pub fn generate_zone_ruleset(
 
     // ── User-defined rules from DB ──────────────────────────────────
     if !rules.is_empty() {
-        writeln!(out, "    # ── User-defined rules ──").unwrap();
+        writeln!(out, "# ── User-defined rules ──").unwrap();
         for rule in rules {
             emit_single_rule(&mut out, rule);
         }
         writeln!(out).unwrap();
     }
 
-    writeln!(out, "}}").unwrap();
     out
 }
 
@@ -907,19 +916,11 @@ fn emit_single_rule_validated(out: &mut String, rule: &FirewallRule) -> Result<(
         parts.push(format!("vlan id {vlan_id}"));
     }
 
-    // Protocol matching.
-    let proto = detail.protocol.to_lowercase();
-    if proto != "any" && proto != "all" {
-        validate_protocol(&proto)?;
-        parts.push(proto.clone());
-    }
-
-    // Source.
+    // Source interface (iifname) — must come before protocol in nft syntax.
     let src = detail.source.to_lowercase();
     if src != "any" && src != "0.0.0.0/0" {
         if let Some(iface) = src.strip_prefix("iif:") {
             if let Some(set_name) = iface.strip_prefix('@') {
-                // Named set reference (e.g. "@lan_ifaces") — validated as alphanumeric + underscore.
                 validate_set_name(set_name)?;
                 parts.push(format!("iifname @{set_name}"));
             } else {
@@ -932,12 +933,11 @@ fn emit_single_rule_validated(out: &mut String, rule: &FirewallRule) -> Result<(
         }
     }
 
-    // Destination.
+    // Destination interface (oifname) — must come before protocol in nft syntax.
     let dst = detail.destination.to_lowercase();
     if dst != "any" && dst != "0.0.0.0/0" {
         if let Some(iface) = dst.strip_prefix("oif:") {
             if let Some(set_name) = iface.strip_prefix('@') {
-                // Named set reference (e.g. "@wan_ifaces") — validated as alphanumeric + underscore.
                 validate_set_name(set_name)?;
                 parts.push(format!("oifname @{set_name}"));
             } else {
@@ -950,13 +950,19 @@ fn emit_single_rule_validated(out: &mut String, rule: &FirewallRule) -> Result<(
         }
     }
 
+    // Protocol + port — protocol must come right before dport in nft syntax.
+    let proto = detail.protocol.to_lowercase();
+    if proto != "any" && proto != "all" {
+        validate_protocol(&proto)?;
+        parts.push(proto.clone());
+    }
+
     // Port (only valid for tcp/udp/sctp).
     if let Some(ref port) = detail.port
         && !port.is_empty()
         && port != "any"
     {
         validate_port(port)?;
-        // Only add dport if we have a protocol that supports it.
         if matches!(proto.as_str(), "tcp" | "udp" | "sctp") {
             parts.push(format!("dport {port}"));
         }

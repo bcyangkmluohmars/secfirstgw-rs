@@ -15,6 +15,7 @@ members = [
     "crates/sfgw-log",
     "crates/sfgw-adopt",
     "crates/sfgw-ids",
+    "crates/sfgw-personality",
     "crates/sfgw-cli",
 ]
 

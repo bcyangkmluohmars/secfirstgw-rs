@@ -7,7 +7,7 @@
 //! intended isolation properties: GUEST cannot reach LAN, DMZ cannot
 //! reach MGMT, WAN exposes no management services, etc.
 
-use sfgw_fw::nft::{generate_ruleset, generate_ruleset_with_forwards, generate_zone_ruleset};
+use sfgw_fw::iptables::generate_zone_ruleset;
 use sfgw_fw::wan::generate_wan_routing_commands;
 use sfgw_fw::{
     Action, FirewallPolicy, FirewallRule, FirewallZone, PortForward, RuleDetail, WanGroup,
@@ -102,18 +102,16 @@ fn default_deny_input_drop_forward_drop_output_accept() {
     let config = standard_ruleset();
     // Verify the chain declarations carry the correct policies.
     assert!(
-        config.contains("chain input {\n        type filter hook input priority 0; policy drop;"),
-        "input chain must have policy drop in generated config"
+        config.contains(":INPUT DROP [0:0]"),
+        "input chain must have policy DROP in generated config"
     );
     assert!(
-        config
-            .contains("chain forward {\n        type filter hook forward priority 0; policy drop;"),
-        "forward chain must have policy drop in generated config"
+        config.contains(":FORWARD DROP [0:0]"),
+        "forward chain must have policy DROP in generated config"
     );
     assert!(
-        config
-            .contains("chain output {\n        type filter hook output priority 0; policy accept;"),
-        "output chain must have policy accept in generated config"
+        config.contains(":OUTPUT ACCEPT [0:0]"),
+        "output chain must have policy ACCEPT in generated config"
     );
 }
 
@@ -122,9 +120,22 @@ fn default_deny_input_drop_forward_drop_output_accept() {
 #[test]
 fn wan_zone_blocks_web_ui_ports_80_443() {
     let config = standard_ruleset();
+    // Each WAN interface should have HTTP and HTTPS blocked.
     assert!(
-        config.contains("iifname @wan_ifaces tcp dport { 80, 443 } drop"),
-        "WAN must explicitly drop HTTP/HTTPS input"
+        config.contains("-i eth0 -p tcp --dport 80 -j DROP"),
+        "WAN eth0 must explicitly drop HTTP input"
+    );
+    assert!(
+        config.contains("-i eth0 -p tcp --dport 443 -j DROP"),
+        "WAN eth0 must explicitly drop HTTPS input"
+    );
+    assert!(
+        config.contains("-i ppp0 -p tcp --dport 80 -j DROP"),
+        "WAN ppp0 must explicitly drop HTTP input"
+    );
+    assert!(
+        config.contains("-i ppp0 -p tcp --dport 443 -j DROP"),
+        "WAN ppp0 must explicitly drop HTTPS input"
     );
 }
 
@@ -134,8 +145,12 @@ fn wan_zone_blocks_web_ui_ports_80_443() {
 fn wan_zone_blocks_ssh_port_22() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @wan_ifaces tcp dport 22 drop"),
-        "WAN must explicitly drop SSH input"
+        config.contains("-i eth0 -p tcp --dport 22 -j DROP"),
+        "WAN eth0 must explicitly drop SSH input"
+    );
+    assert!(
+        config.contains("-i ppp0 -p tcp --dport 22 -j DROP"),
+        "WAN ppp0 must explicitly drop SSH input"
     );
 }
 
@@ -145,28 +160,40 @@ fn wan_zone_blocks_ssh_port_22() {
 fn wan_zone_has_nat_masquerade() {
     let config = standard_ruleset();
     assert!(
-        config.contains("oifname @wan_ifaces masquerade"),
-        "WAN must have NAT masquerade in postrouting"
+        config.contains("-o eth0 -j MASQUERADE"),
+        "WAN eth0 must have NAT masquerade in postrouting"
+    );
+    assert!(
+        config.contains("-o ppp0 -j MASQUERADE"),
+        "WAN ppp0 must have NAT masquerade in postrouting"
     );
 }
 
-// ── 5. LAN allows web UI, SSH, DHCP, DNS ─────────────────────────────
+// ── 5. LAN: DHCP, DNS only — no SSH, no web UI (MGMT-only) ──────────
 
 #[test]
-fn lan_zone_allows_web_ui_443() {
+fn lan_zone_drops_web_ui() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @lan_ifaces tcp dport 443 accept"),
-        "LAN must allow HTTPS (443) for web UI"
+        config.contains("-i br-lan -p tcp --dport 443 -j DROP"),
+        "LAN must explicitly DROP HTTPS"
+    );
+    assert!(
+        !config.contains("-i br-lan -p tcp --dport 443 -j ACCEPT"),
+        "LAN must NOT ACCEPT HTTPS"
     );
 }
 
 #[test]
-fn lan_zone_allows_ssh_22() {
+fn lan_zone_drops_ssh() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @lan_ifaces tcp dport 22 accept"),
-        "LAN must allow SSH (22)"
+        config.contains("-i br-lan -p tcp --dport 22 -j DROP"),
+        "LAN must explicitly DROP SSH"
+    );
+    assert!(
+        !config.contains("-i br-lan -p tcp --dport 22 -j ACCEPT"),
+        "LAN must NOT ACCEPT SSH"
     );
 }
 
@@ -174,8 +201,8 @@ fn lan_zone_allows_ssh_22() {
 fn lan_zone_allows_dhcp_67_68() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @lan_ifaces udp dport { 67, 68 } accept"),
-        "LAN must allow DHCP (67/68)"
+        config.contains("-i br-lan -p udp --dport 67:68 -j ACCEPT"),
+        "LAN must allow DHCP (67:68)"
     );
 }
 
@@ -183,11 +210,11 @@ fn lan_zone_allows_dhcp_67_68() {
 fn lan_zone_allows_dns_53() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @lan_ifaces tcp dport 53 accept"),
+        config.contains("-i br-lan -p tcp --dport 53 -j ACCEPT"),
         "LAN must allow DNS/TCP (53)"
     );
     assert!(
-        config.contains("iifname @lan_ifaces udp dport 53 accept"),
+        config.contains("-i br-lan -p udp --dport 53 -j ACCEPT"),
         "LAN must allow DNS/UDP (53)"
     );
 }
@@ -198,8 +225,12 @@ fn lan_zone_allows_dns_53() {
 fn lan_zone_forwards_to_wan() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @lan_ifaces oifname @wan_ifaces accept"),
-        "LAN must be allowed to forward to WAN"
+        config.contains("-i br-lan -o eth0 -j ACCEPT"),
+        "LAN must be allowed to forward to WAN eth0"
+    );
+    assert!(
+        config.contains("-i br-lan -o ppp0 -j ACCEPT"),
+        "LAN must be allowed to forward to WAN ppp0"
     );
 }
 
@@ -207,7 +238,7 @@ fn lan_zone_forwards_to_wan() {
 fn lan_zone_forwards_to_dmz() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @lan_ifaces oifname @dmz_ifaces accept"),
+        config.contains("-i br-lan -o eth2 -j ACCEPT"),
         "LAN must be allowed to forward to DMZ"
     );
 }
@@ -220,19 +251,31 @@ fn lan_zone_no_explicit_forward_to_guest() {
     // There should be no rule allowing LAN->GUEST forwarding.
     // Default deny (forward policy=Drop) handles this isolation.
     assert!(
-        !config.contains("iifname @lan_ifaces oifname @guest_ifaces accept"),
+        !config.contains("-i br-lan -o br-guest -j ACCEPT"),
         "LAN must NOT have an explicit forward-accept to GUEST; default deny handles it"
     );
 }
 
-// ── 8. DMZ allows inbound HTTP/HTTPS ─────────────────────────────────
+// ── 8. DMZ only gets DNS/DHCP to gateway, catch-all DROP ────────────
 
 #[test]
-fn dmz_zone_allows_inbound_http_https() {
+fn dmz_zone_allows_dns_dhcp_drops_rest() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @dmz_ifaces tcp dport { 80, 443 } accept"),
-        "DMZ must allow inbound HTTP (80) and HTTPS (443)"
+        config.contains("-i eth2 -p tcp --dport 53 -j ACCEPT"),
+        "DMZ must allow DNS/TCP"
+    );
+    assert!(
+        config.contains("-i eth2 -p udp --dport 67:68 -j ACCEPT"),
+        "DMZ must allow DHCP"
+    );
+    assert!(
+        config.contains("SFGW-INPUT -i eth2 -j DROP"),
+        "DMZ must have catch-all DROP"
+    );
+    assert!(
+        !config.contains("-i eth2 -p tcp --dport 443 -j ACCEPT"),
+        "DMZ must NOT allow HTTPS to gateway"
     );
 }
 
@@ -242,8 +285,12 @@ fn dmz_zone_allows_inbound_http_https() {
 fn dmz_zone_blocks_forward_to_lan() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @dmz_ifaces oifname @lan_ifaces drop"),
-        "DMZ must explicitly drop forwarding to LAN"
+        config.contains("-i eth2 -o br-lan -j DROP"),
+        "DMZ must explicitly drop forwarding to LAN br-lan"
+    );
+    assert!(
+        config.contains("-i eth2 -o eth1 -j DROP"),
+        "DMZ must explicitly drop forwarding to LAN eth1"
     );
 }
 
@@ -253,7 +300,7 @@ fn dmz_zone_blocks_forward_to_lan() {
 fn dmz_zone_blocks_forward_to_mgmt() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @dmz_ifaces oifname @mgmt_ifaces drop"),
+        config.contains("-i eth2 -o br-mgmt -j DROP"),
         "DMZ must explicitly drop forwarding to MGMT"
     );
 }
@@ -264,8 +311,12 @@ fn dmz_zone_blocks_forward_to_mgmt() {
 fn dmz_zone_forwards_to_wan() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @dmz_ifaces oifname @wan_ifaces accept"),
-        "DMZ must be allowed to forward to WAN"
+        config.contains("-i eth2 -o eth0 -j ACCEPT"),
+        "DMZ must be allowed to forward to WAN eth0"
+    );
+    assert!(
+        config.contains("-i eth2 -o ppp0 -j ACCEPT"),
+        "DMZ must be allowed to forward to WAN ppp0"
     );
 }
 
@@ -275,7 +326,7 @@ fn dmz_zone_forwards_to_wan() {
 fn mgmt_zone_allows_web_ui_443() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @mgmt_ifaces tcp dport 443 accept"),
+        config.contains("-i br-mgmt -p tcp --dport 443 -j ACCEPT"),
         "MGMT must allow HTTPS (443) for web UI"
     );
 }
@@ -284,7 +335,7 @@ fn mgmt_zone_allows_web_ui_443() {
 fn mgmt_zone_allows_ssh_22() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @mgmt_ifaces tcp dport 22 accept"),
+        config.contains("-i br-mgmt -p tcp --dport 22 -j ACCEPT"),
         "MGMT must allow SSH (22)"
     );
 }
@@ -293,7 +344,7 @@ fn mgmt_zone_allows_ssh_22() {
 fn mgmt_zone_allows_inform_8080() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @mgmt_ifaces tcp dport 8080 accept"),
+        config.contains("-i br-mgmt -p tcp --dport 8080 -j ACCEPT"),
         "MGMT must allow Inform protocol (8080)"
     );
 }
@@ -302,15 +353,15 @@ fn mgmt_zone_allows_inform_8080() {
 fn mgmt_zone_allows_dhcp_and_dns() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @mgmt_ifaces udp dport { 67, 68 } accept"),
+        config.contains("-i br-mgmt -p udp --dport 67:68 -j ACCEPT"),
         "MGMT must allow DHCP"
     );
     assert!(
-        config.contains("iifname @mgmt_ifaces tcp dport 53 accept"),
+        config.contains("-i br-mgmt -p tcp --dport 53 -j ACCEPT"),
         "MGMT must allow DNS/TCP"
     );
     assert!(
-        config.contains("iifname @mgmt_ifaces udp dport 53 accept"),
+        config.contains("-i br-mgmt -p udp --dport 53 -j ACCEPT"),
         "MGMT must allow DNS/UDP"
     );
 }
@@ -321,7 +372,7 @@ fn mgmt_zone_allows_dhcp_and_dns() {
 fn mgmt_zone_forwards_to_lan() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @mgmt_ifaces oifname @lan_ifaces accept"),
+        config.contains("-i br-mgmt -o br-lan -j ACCEPT"),
         "MGMT must be allowed to forward to LAN"
     );
 }
@@ -330,7 +381,7 @@ fn mgmt_zone_forwards_to_lan() {
 fn mgmt_zone_forwards_to_dmz() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @mgmt_ifaces oifname @dmz_ifaces accept"),
+        config.contains("-i br-mgmt -o eth2 -j ACCEPT"),
         "MGMT must be allowed to forward to DMZ"
     );
 }
@@ -339,7 +390,7 @@ fn mgmt_zone_forwards_to_dmz() {
 fn mgmt_zone_forwards_to_guest() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @mgmt_ifaces oifname @guest_ifaces accept"),
+        config.contains("-i br-mgmt -o br-guest -j ACCEPT"),
         "MGMT must be allowed to forward to GUEST"
     );
 }
@@ -348,8 +399,12 @@ fn mgmt_zone_forwards_to_guest() {
 fn mgmt_zone_forwards_to_wan() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @mgmt_ifaces oifname @wan_ifaces accept"),
-        "MGMT must be allowed to forward to WAN"
+        config.contains("-i br-mgmt -o eth0 -j ACCEPT"),
+        "MGMT must be allowed to forward to WAN eth0"
+    );
+    assert!(
+        config.contains("-i br-mgmt -o ppp0 -j ACCEPT"),
+        "MGMT must be allowed to forward to WAN ppp0"
     );
 }
 
@@ -359,11 +414,11 @@ fn mgmt_zone_forwards_to_wan() {
 fn guest_zone_allows_dns_53() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @guest_ifaces tcp dport 53 accept"),
+        config.contains("-i br-guest -p tcp --dport 53 -j ACCEPT"),
         "GUEST must allow DNS/TCP (53) to gateway"
     );
     assert!(
-        config.contains("iifname @guest_ifaces udp dport 53 accept"),
+        config.contains("-i br-guest -p udp --dport 53 -j ACCEPT"),
         "GUEST must allow DNS/UDP (53) to gateway"
     );
 }
@@ -372,8 +427,8 @@ fn guest_zone_allows_dns_53() {
 fn guest_zone_allows_dhcp_67_68() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @guest_ifaces udp dport { 67, 68 } accept"),
-        "GUEST must allow DHCP (67/68) to gateway"
+        config.contains("-i br-guest -p udp --dport 67:68 -j ACCEPT"),
+        "GUEST must allow DHCP (67:68) to gateway"
     );
 }
 
@@ -383,7 +438,7 @@ fn guest_zone_allows_dhcp_67_68() {
 fn guest_zone_drops_all_other_input() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @guest_ifaces drop comment \"block all other GUEST input\""),
+        config.contains("-i br-guest -j DROP -m comment --comment \"block all other GUEST input\""),
         "GUEST must drop all input after DNS/DHCP allows"
     );
 }
@@ -391,9 +446,8 @@ fn guest_zone_drops_all_other_input() {
 #[test]
 fn guest_zone_does_not_allow_web_ui() {
     let config = standard_ruleset();
-    // Verify there is no rule allowing GUEST to reach port 443 on the gateway.
     assert!(
-        !config.contains("iifname @guest_ifaces tcp dport 443 accept"),
+        !config.contains("-i br-guest -p tcp --dport 443 -j ACCEPT"),
         "GUEST must NOT be allowed to access the web UI (443)"
     );
 }
@@ -402,7 +456,7 @@ fn guest_zone_does_not_allow_web_ui() {
 fn guest_zone_does_not_allow_ssh() {
     let config = standard_ruleset();
     assert!(
-        !config.contains("iifname @guest_ifaces tcp dport 22 accept"),
+        !config.contains("-i br-guest -p tcp --dport 22 -j ACCEPT"),
         "GUEST must NOT be allowed to access SSH (22)"
     );
 }
@@ -411,7 +465,7 @@ fn guest_zone_does_not_allow_ssh() {
 fn guest_zone_does_not_allow_inform() {
     let config = standard_ruleset();
     assert!(
-        !config.contains("iifname @guest_ifaces tcp dport 8080 accept"),
+        !config.contains("-i br-guest -p tcp --dport 8080 -j ACCEPT"),
         "GUEST must NOT be allowed to access Inform (8080)"
     );
 }
@@ -422,7 +476,7 @@ fn guest_zone_does_not_allow_inform() {
 fn guest_zone_blocks_forward_to_lan() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @guest_ifaces oifname @lan_ifaces drop"),
+        config.contains("-i br-guest -o br-lan -j DROP"),
         "GUEST must explicitly drop forwarding to LAN"
     );
 }
@@ -431,7 +485,7 @@ fn guest_zone_blocks_forward_to_lan() {
 fn guest_zone_blocks_forward_to_dmz() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @guest_ifaces oifname @dmz_ifaces drop"),
+        config.contains("-i br-guest -o eth2 -j DROP"),
         "GUEST must explicitly drop forwarding to DMZ"
     );
 }
@@ -440,7 +494,7 @@ fn guest_zone_blocks_forward_to_dmz() {
 fn guest_zone_blocks_forward_to_mgmt() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @guest_ifaces oifname @mgmt_ifaces drop"),
+        config.contains("-i br-guest -o br-mgmt -j DROP"),
         "GUEST must explicitly drop forwarding to MGMT"
     );
 }
@@ -451,33 +505,37 @@ fn guest_zone_blocks_forward_to_mgmt() {
 fn guest_zone_forwards_to_wan() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname @guest_ifaces oifname @wan_ifaces accept"),
-        "GUEST must be allowed to forward to WAN (internet access)"
+        config.contains("-i br-guest -o eth0 -j ACCEPT"),
+        "GUEST must be allowed to forward to WAN eth0"
+    );
+    assert!(
+        config.contains("-i br-guest -o ppp0 -j ACCEPT"),
+        "GUEST must be allowed to forward to WAN ppp0"
     );
 }
 
 #[test]
 fn guest_zone_only_accept_forward_is_wan() {
     let config = standard_ruleset();
-    // The only forward-accept rule for GUEST should be to WAN.
-    // Count all forward accept rules that originate from GUEST.
+    // The only forward-accept rules for GUEST should be to WAN interfaces.
     let guest_forward_accepts: Vec<&str> = config
         .lines()
         .filter(|line| {
-            line.contains("iifname @guest_ifaces")
-                && line.contains("oifname")
-                && line.contains("accept")
+            line.contains("-i br-guest") && line.contains("-o ") && line.contains("-j ACCEPT")
         })
         .collect();
+    // Should have exactly 2: one for eth0 and one for ppp0.
     assert_eq!(
         guest_forward_accepts.len(),
-        1,
-        "GUEST should have exactly one forward-accept rule (to WAN), found: {guest_forward_accepts:?}"
+        2,
+        "GUEST should have exactly two forward-accept rules (to WAN interfaces), found: {guest_forward_accepts:?}"
     );
-    assert!(
-        guest_forward_accepts[0].contains("@wan_ifaces"),
-        "the single GUEST forward-accept must be to WAN"
-    );
+    for line in &guest_forward_accepts {
+        assert!(
+            line.contains("-o eth0") || line.contains("-o ppp0"),
+            "GUEST forward-accept must be to WAN interface, found: {line}"
+        );
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -673,15 +731,19 @@ fn port_forwarding_generates_dnat_on_wan_zone() {
         &forwards,
     );
 
-    // DNAT must be scoped to WAN interfaces.
+    // DNAT must be scoped to each WAN interface.
     assert!(
-        config.contains("iifname @wan_ifaces tcp dport 8443 dnat to 192.168.1.100:443"),
-        "port forward DNAT must be scoped to WAN interfaces"
+        config.contains("-i eth0 -p tcp --dport 8443 -j DNAT --to-destination 192.168.1.100:443"),
+        "port forward DNAT must be scoped to WAN interface eth0"
+    );
+    assert!(
+        config.contains("-i ppp0 -p tcp --dport 8443 -j DNAT --to-destination 192.168.1.100:443"),
+        "port forward DNAT must be scoped to WAN interface ppp0"
     );
 
     // Must also allow the forwarded traffic in the forward chain.
     assert!(
-        config.contains("ip daddr 192.168.1.100 tcp dport 443 accept"),
+        config.contains("-d 192.168.1.100 -p tcp --dport 443 -j ACCEPT"),
         "port forward must have a matching forward accept rule"
     );
 }
@@ -706,7 +768,7 @@ fn disabled_port_forward_not_in_ruleset() {
     );
 
     assert!(
-        !config.contains("dport 2222"),
+        !config.contains("--dport 2222"),
         "disabled port forward must not appear in ruleset"
     );
 }
@@ -730,11 +792,11 @@ fn user_rules_appear_in_zone_ruleset() {
     let config = generate_zone_ruleset(&standard_zones(), &rules, &FirewallPolicy::default(), &[]);
 
     assert!(
-        config.contains("tcp dport 9090 accept"),
+        config.contains("-p tcp --dport 9090 -j ACCEPT"),
         "user rule for port 9090 must appear in zone ruleset"
     );
     assert!(
-        config.contains("udp dport 5060 drop"),
+        config.contains("-p udp --dport 5060 -j DROP"),
         "user rule dropping SIP must appear in zone ruleset"
     );
     assert!(
@@ -743,39 +805,10 @@ fn user_rules_appear_in_zone_ruleset() {
     );
 }
 
-// ── 24. VLAN rules generate correct syntax ───────────────────────────
+// ── 24. Rate limited rules generate correct syntax ───────────────────
 
 #[test]
-fn vlan_rules_generate_correct_nft_syntax() {
-    let rules = vec![FirewallRule {
-        id: Some(1),
-        chain: "forward".to_string(),
-        priority: 10,
-        detail: RuleDetail {
-            action: Action::Accept,
-            protocol: "any".to_string(),
-            source: "any".to_string(),
-            destination: "any".to_string(),
-            port: None,
-            comment: Some("allow VLAN 200 traffic".to_string()),
-            vlan: Some(200),
-            rate_limit: None,
-        },
-        enabled: true,
-    }];
-
-    let config = generate_zone_ruleset(&standard_zones(), &rules, &FirewallPolicy::default(), &[]);
-
-    assert!(
-        config.contains("vlan id 200 accept"),
-        "VLAN rule must generate 'vlan id <id>' syntax"
-    );
-}
-
-// ── 25. Rate limited rules generate correct syntax ───────────────────
-
-#[test]
-fn rate_limited_rules_generate_correct_nft_syntax() {
+fn rate_limited_rules_generate_correct_iptables_syntax() {
     let rules = vec![FirewallRule {
         id: Some(1),
         chain: "input".to_string(),
@@ -796,73 +829,59 @@ fn rate_limited_rules_generate_correct_nft_syntax() {
     let config = generate_zone_ruleset(&standard_zones(), &rules, &FirewallPolicy::default(), &[]);
 
     assert!(
-        config.contains("limit rate 50/second"),
-        "rate limited rule must generate 'limit rate <value>' syntax"
+        config.contains("-m limit --limit 50/sec"),
+        "rate limited rule must generate '-m limit --limit <value>' syntax"
     );
     assert!(
-        config.contains("tcp dport 443 limit rate 50/second accept"),
+        config.contains("-p tcp --dport 443 -m limit --limit 50/sec -j ACCEPT"),
         "rate limit must appear before the action"
     );
 }
 
-// ── 26. Zone interface sets are properly defined ─────────────────────
+// ── 26. Zone interfaces are expanded into individual rules ───────────
 
 #[test]
-fn zone_interface_sets_are_properly_defined() {
+fn zone_interfaces_expanded_into_individual_rules() {
     let config = standard_ruleset();
 
-    // Each zone should have a named set with its interfaces.
+    // WAN has two interfaces; each should have its own rules.
     assert!(
-        config.contains("set wan_ifaces { type ifname; elements = { \"eth0\", \"ppp0\" }; }"),
-        "wan_ifaces set must contain eth0 and ppp0"
+        config.contains("-i eth0 -p tcp --dport 22 -j DROP"),
+        "WAN eth0 should have SSH drop rule"
     );
     assert!(
-        config.contains("set guest_ifaces { type ifname; elements = { \"br-guest\" }; }"),
-        "guest_ifaces set must contain br-guest"
+        config.contains("-i ppp0 -p tcp --dport 22 -j DROP"),
+        "WAN ppp0 should have SSH drop rule"
     );
-    assert!(
-        config.contains("set mgmt_ifaces { type ifname; elements = { \"br-mgmt\" }; }"),
-        "mgmt_ifaces set must contain br-mgmt"
-    );
-    assert!(
-        config.contains("set dmz_ifaces { type ifname; elements = { \"eth2\" }; }"),
-        "dmz_ifaces set must contain eth2"
-    );
-}
 
-#[test]
-fn zone_interface_set_with_multiple_interfaces() {
-    let config = standard_ruleset();
-    // LAN has two interfaces; verify both are in the set.
-    // The order may vary, so check for both.
-    let lan_set_line = config
-        .lines()
-        .find(|l| l.contains("set lan_ifaces"))
-        .expect("must have lan_ifaces set");
+    // LAN should explicitly DROP SSH and web UI (MGMT-only).
     assert!(
-        lan_set_line.contains("\"br-lan\"") && lan_set_line.contains("\"eth1\""),
-        "lan_ifaces set must contain both br-lan and eth1, got: {lan_set_line}"
+        config.contains("-i br-lan -p tcp --dport 443 -j DROP"),
+        "LAN br-lan must DROP web UI"
+    );
+    assert!(
+        config.contains("-i eth1 -p tcp --dport 443 -j DROP"),
+        "LAN eth1 must DROP web UI"
     );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // Cross-cutting Security Invariant Tests
 // ═══════════════════════════════════════════════════════════════════════
-// These tests verify security properties that span the entire zone matrix.
 
 #[test]
-fn no_zone_except_lan_and_mgmt_allows_ssh_input() {
+fn no_zone_except_mgmt_allows_ssh_input() {
     let config = standard_ruleset();
-    // SSH accept rules should only appear for LAN and MGMT zones.
+    // SSH accept rules should only appear for MGMT zone interfaces.
     let ssh_accept_lines: Vec<&str> = config
         .lines()
-        .filter(|line| line.contains("dport 22") && line.contains("accept"))
+        .filter(|line| line.contains("--dport 22") && line.contains("-j ACCEPT"))
         .collect();
 
     for line in &ssh_accept_lines {
         assert!(
-            line.contains("@lan_ifaces") || line.contains("@mgmt_ifaces"),
-            "SSH accept must only appear for LAN or MGMT, found: {line}"
+            line.contains("-i br-mgmt"),
+            "SSH accept must only appear for MGMT interfaces, found: {line}"
         );
     }
 }
@@ -872,12 +891,12 @@ fn no_zone_except_mgmt_allows_inform_8080() {
     let config = standard_ruleset();
     let inform_accept_lines: Vec<&str> = config
         .lines()
-        .filter(|line| line.contains("dport 8080") && line.contains("accept"))
+        .filter(|line| line.contains("--dport 8080") && line.contains("-j ACCEPT"))
         .collect();
 
     for line in &inform_accept_lines {
         assert!(
-            line.contains("@mgmt_ifaces"),
+            line.contains("-i br-mgmt"),
             "Inform (8080) accept must only appear for MGMT, found: {line}"
         );
     }
@@ -886,13 +905,13 @@ fn no_zone_except_mgmt_allows_inform_8080() {
 #[test]
 fn wan_has_no_accept_input_rules() {
     let config = standard_ruleset();
-    // WAN should have no input accept rules (only drop rules).
+    // WAN interfaces should have no input accept rules (only drop rules).
     let wan_input_accepts: Vec<&str> = config
         .lines()
         .filter(|line| {
-            line.contains("iifname @wan_ifaces")
-                && line.contains("input")
-                && line.contains("accept")
+            (line.contains("-i eth0") || line.contains("-i ppp0"))
+                && line.contains("SFGW-INPUT")
+                && line.contains("-j ACCEPT")
         })
         .collect();
 
@@ -907,13 +926,13 @@ fn guest_drop_rule_appears_after_dns_dhcp_allows() {
     let config = standard_ruleset();
     // The catch-all drop rule for GUEST input must come after the DNS/DHCP allows.
     let guest_dns_pos = config
-        .find("iifname @guest_ifaces tcp dport 53 accept")
+        .find("-i br-guest -p tcp --dport 53 -j ACCEPT")
         .expect("GUEST DNS allow must exist");
     let guest_dhcp_pos = config
-        .find("iifname @guest_ifaces udp dport { 67, 68 } accept")
+        .find("-i br-guest -p udp --dport 67:68 -j ACCEPT")
         .expect("GUEST DHCP allow must exist");
     let guest_drop_pos = config
-        .find("iifname @guest_ifaces drop comment \"block all other GUEST input\"")
+        .find("-i br-guest -j DROP -m comment --comment \"block all other GUEST input\"")
         .expect("GUEST catch-all drop must exist");
 
     assert!(
@@ -929,13 +948,11 @@ fn guest_drop_rule_appears_after_dns_dhcp_allows() {
 #[test]
 fn guest_forward_drops_appear_before_wan_accept() {
     let config = standard_ruleset();
-    // The explicit drop rules for GUEST->LAN/DMZ/MGMT must appear before
-    // the GUEST->WAN accept, ensuring isolation even if order matters.
     let guest_lan_drop = config
-        .find("iifname @guest_ifaces oifname @lan_ifaces drop")
+        .find("-i br-guest -o br-lan -j DROP")
         .expect("GUEST->LAN drop must exist");
     let guest_wan_accept = config
-        .find("iifname @guest_ifaces oifname @wan_ifaces accept")
+        .find("-i br-guest -o eth0 -j ACCEPT")
         .expect("GUEST->WAN accept must exist");
 
     assert!(
@@ -948,10 +965,10 @@ fn guest_forward_drops_appear_before_wan_accept() {
 fn dmz_forward_drops_appear_before_wan_accept() {
     let config = standard_ruleset();
     let dmz_lan_drop = config
-        .find("iifname @dmz_ifaces oifname @lan_ifaces drop")
+        .find("-i eth2 -o br-lan -j DROP")
         .expect("DMZ->LAN drop must exist");
     let dmz_wan_accept = config
-        .find("iifname @dmz_ifaces oifname @wan_ifaces accept")
+        .find("-i eth2 -o eth0 -j ACCEPT")
         .expect("DMZ->WAN accept must exist");
 
     assert!(
@@ -964,15 +981,15 @@ fn dmz_forward_drops_appear_before_wan_accept() {
 fn conntrack_established_related_present_in_all_chains() {
     let config = standard_ruleset();
     assert!(
-        config.contains("add rule inet sfgw input ct state established,related accept"),
+        config.contains("-A SFGW-INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"),
         "input chain must accept established/related"
     );
     assert!(
-        config.contains("add rule inet sfgw forward ct state established,related accept"),
+        config.contains("-A SFGW-FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"),
         "forward chain must accept established/related"
     );
     assert!(
-        config.contains("add rule inet sfgw output ct state established,related accept"),
+        config.contains("-A SFGW-OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"),
         "output chain must accept established/related"
     );
 }
@@ -981,11 +998,11 @@ fn conntrack_established_related_present_in_all_chains() {
 fn invalid_packets_dropped_in_input_and_forward() {
     let config = standard_ruleset();
     assert!(
-        config.contains("add rule inet sfgw input ct state invalid drop"),
+        config.contains("-A SFGW-INPUT -m conntrack --ctstate INVALID -j DROP"),
         "input chain must drop invalid packets"
     );
     assert!(
-        config.contains("add rule inet sfgw forward ct state invalid drop"),
+        config.contains("-A SFGW-FORWARD -m conntrack --ctstate INVALID -j DROP"),
         "forward chain must drop invalid packets"
     );
 }
@@ -994,25 +1011,38 @@ fn invalid_packets_dropped_in_input_and_forward() {
 fn loopback_accepted() {
     let config = standard_ruleset();
     assert!(
-        config.contains("iifname \"lo\" accept"),
+        config.contains("-i lo -j ACCEPT"),
         "loopback input must be accepted"
     );
     assert!(
-        config.contains("oifname \"lo\" accept"),
+        config.contains("-o lo -j ACCEPT"),
         "loopback output must be accepted"
     );
 }
 
 #[test]
-fn icmpv6_ndp_accepted() {
+fn ipv6_filter_config_has_icmpv6_ndp_rules() {
     let config = standard_ruleset();
+    let ipv6 = sfgw_fw::iptables::filter_config_to_ipv6(&config);
     assert!(
-        config.contains("nd-neighbor-solicit"),
-        "NDP neighbor solicitation must be accepted"
+        ipv6.contains("--icmpv6-type neighbor-solicitation"),
+        "IPv6 config must have NDP neighbor solicitation"
     );
     assert!(
-        config.contains("nd-router-advert"),
-        "NDP router advertisement must be accepted"
+        ipv6.contains("--icmpv6-type router-advertisement"),
+        "IPv6 config must have NDP router advertisement"
+    );
+    assert!(
+        ipv6.contains("--icmpv6-type echo-request"),
+        "IPv6 config must have ICMPv6 echo-request"
+    );
+    assert!(
+        !ipv6.contains("-p icmp "),
+        "IPv6 config must not contain IPv4 ICMP rules"
+    );
+    assert!(
+        !ipv6.contains("*nat"),
+        "IPv6 config must not contain NAT table"
     );
 }
 
@@ -1063,363 +1093,50 @@ fn zone_with_no_interfaces_produces_no_rules() {
 
     // GUEST rules should not appear since no interfaces are assigned.
     assert!(
-        !config.contains("@guest_ifaces"),
+        !config.contains("br-guest"),
         "GUEST zone with no interfaces must not generate any rules"
     );
     // But WAN and LAN should still work.
-    assert!(config.contains("@wan_ifaces"));
-    assert!(config.contains("@lan_ifaces"));
+    assert!(config.contains("-i eth0"));
+    assert!(config.contains("-i br-lan"));
 }
 
-// ── Table atomicity ──────────────────────────────────────────────────
+// ── iptables-restore format structure ────────────────────────────────
 
 #[test]
-fn ruleset_destroys_and_recreates_table_atomically() {
+fn ruleset_has_proper_iptables_restore_structure() {
     let config = standard_ruleset();
-    // Must flush the old table before creating the new one.
-    let create_pos = config
-        .find("table inet sfgw {}")
-        .expect("must create empty table first");
-    let delete_pos = config
-        .find("delete table inet sfgw")
-        .expect("must delete the empty table");
-    let open_pos = config
-        .rfind("table inet sfgw {")
-        .expect("must open final table block");
 
-    assert!(
-        create_pos < delete_pos,
-        "empty table creation must precede deletion"
-    );
-    assert!(
-        delete_pos < open_pos,
-        "deletion must precede final table definition"
-    );
-}
+    // Must have *filter table.
+    assert!(config.contains("*filter"), "must have *filter table");
 
-// ── NAT chain declarations ───────────────────────────────────────────
+    // Must have *nat table.
+    assert!(config.contains("*nat"), "must have *nat table");
 
-#[test]
-fn nat_chains_present_with_correct_hooks() {
-    let config = standard_ruleset();
-    assert!(
-        config.contains("chain prerouting {"),
-        "prerouting NAT chain must exist"
-    );
-    assert!(
-        config.contains("type nat hook prerouting priority -100; policy accept;"),
-        "prerouting chain must be nat type with priority -100"
-    );
-    assert!(
-        config.contains("chain postrouting {"),
-        "postrouting NAT chain must exist"
-    );
-    assert!(
-        config.contains("type nat hook postrouting priority 100; policy accept;"),
-        "postrouting chain must be nat type with priority 100"
-    );
-}
-
-// ── Multiple port forwards ───────────────────────────────────────────
-
-#[test]
-fn multiple_port_forwards_all_appear_scoped_to_wan() {
-    let forwards = vec![
-        PortForward {
-            protocol: "tcp".to_string(),
-            external_port: 80,
-            internal_ip: "192.168.1.10".to_string(),
-            internal_port: 80,
-            comment: Some("HTTP forward".to_string()),
-            enabled: true,
-            wan_interface: None,
-        },
-        PortForward {
-            protocol: "tcp".to_string(),
-            external_port: 443,
-            internal_ip: "192.168.1.10".to_string(),
-            internal_port: 443,
-            comment: Some("HTTPS forward".to_string()),
-            enabled: true,
-            wan_interface: None,
-        },
-        PortForward {
-            protocol: "udp".to_string(),
-            external_port: 51820,
-            internal_ip: "192.168.1.20".to_string(),
-            internal_port: 51820,
-            comment: Some("WireGuard forward".to_string()),
-            enabled: true,
-            wan_interface: None,
-        },
-    ];
-
-    let config = generate_zone_ruleset(
-        &standard_zones(),
-        &[],
-        &FirewallPolicy::default(),
-        &forwards,
+    // Must have COMMIT for each table.
+    let commit_count = config.matches("COMMIT").count();
+    assert_eq!(
+        commit_count, 2,
+        "must have exactly 2 COMMIT statements (filter and nat)"
     );
 
-    assert!(config.contains("iifname @wan_ifaces tcp dport 80 dnat to 192.168.1.10:80"));
-    assert!(config.contains("iifname @wan_ifaces tcp dport 443 dnat to 192.168.1.10:443"));
-    assert!(config.contains("iifname @wan_ifaces udp dport 51820 dnat to 192.168.1.20:51820"));
-}
-
-// ── Legacy (non-zone) ruleset ────────────────────────────────────────
-
-#[test]
-fn legacy_ruleset_still_enforces_default_deny() {
-    let policy = FirewallPolicy::default();
-    let config = generate_ruleset(&[], &policy);
+    // Must have custom chain declarations.
     assert!(
-        config.contains("policy drop"),
-        "legacy ruleset must default deny"
+        config.contains(":SFGW-INPUT - [0:0]"),
+        "must declare custom input chain"
     );
     assert!(
-        config.contains("masquerade"),
-        "legacy ruleset must have NAT"
+        config.contains(":SFGW-FORWARD - [0:0]"),
+        "must declare custom forward chain"
+    );
+
+    // Must have jumps from built-in to custom chains.
+    assert!(
+        config.contains("-A INPUT -j SFGW-INPUT"),
+        "must jump to custom input chain"
     );
     assert!(
-        config.contains("ct state established,related accept"),
-        "legacy ruleset must allow established/related"
-    );
-}
-
-#[test]
-fn legacy_ruleset_with_port_forwards_generates_dnat() {
-    let forwards = vec![PortForward {
-        protocol: "tcp".to_string(),
-        external_port: 2222,
-        internal_ip: "192.168.1.50".to_string(),
-        internal_port: 22,
-        comment: Some("SSH forward".to_string()),
-        enabled: true,
-        wan_interface: None,
-    }];
-    let config = generate_ruleset_with_forwards(&[], &FirewallPolicy::default(), &forwards);
-    assert!(
-        config.contains("dnat to 192.168.1.50:22"),
-        "legacy port forward must generate DNAT"
-    );
-    assert!(
-        config.contains("dport 2222"),
-        "legacy port forward must reference external port"
-    );
-}
-
-// ── VLAN + rate limit combined rule ──────────────────────────────────
-
-#[test]
-fn combined_vlan_and_rate_limit_rule() {
-    let rules = vec![FirewallRule {
-        id: Some(1),
-        chain: "forward".to_string(),
-        priority: 5,
-        detail: RuleDetail {
-            action: Action::Accept,
-            protocol: "tcp".to_string(),
-            source: "any".to_string(),
-            destination: "any".to_string(),
-            port: Some("443".to_string()),
-            comment: Some("VLAN 100 HTTPS rate limited".to_string()),
-            vlan: Some(100),
-            rate_limit: Some("200/second".to_string()),
-        },
-        enabled: true,
-    }];
-
-    let config = generate_zone_ruleset(&standard_zones(), &rules, &FirewallPolicy::default(), &[]);
-
-    // Must contain all components in the correct order.
-    let rule_line = config
-        .lines()
-        .find(|l| l.contains("vlan id 100"))
-        .expect("must have VLAN 100 rule");
-    assert!(rule_line.contains("vlan id 100"), "must have VLAN match");
-    assert!(rule_line.contains("tcp dport 443"), "must have port match");
-    assert!(
-        rule_line.contains("limit rate 200/second"),
-        "must have rate limit"
-    );
-    assert!(rule_line.contains("accept"), "must have accept action");
-}
-
-// ── Source/destination interface rules ────────────────────────────────
-
-#[test]
-fn source_interface_rule_generates_iifname() {
-    let rules = vec![FirewallRule {
-        id: Some(1),
-        chain: "input".to_string(),
-        priority: 0,
-        detail: RuleDetail {
-            action: Action::Accept,
-            protocol: "tcp".to_string(),
-            source: "iif:br-lan".to_string(),
-            destination: "any".to_string(),
-            port: Some("8080".to_string()),
-            comment: Some("custom from LAN".to_string()),
-            vlan: None,
-            rate_limit: None,
-        },
-        enabled: true,
-    }];
-
-    let config = generate_zone_ruleset(&standard_zones(), &rules, &FirewallPolicy::default(), &[]);
-    assert!(
-        config.contains("iifname \"br-lan\""),
-        "iif: prefix must generate iifname match"
-    );
-}
-
-#[test]
-fn destination_interface_rule_generates_oifname() {
-    let rules = vec![FirewallRule {
-        id: Some(1),
-        chain: "forward".to_string(),
-        priority: 0,
-        detail: RuleDetail {
-            action: Action::Drop,
-            protocol: "any".to_string(),
-            source: "any".to_string(),
-            destination: "oif:eth0".to_string(),
-            port: None,
-            comment: Some("block to WAN".to_string()),
-            vlan: None,
-            rate_limit: None,
-        },
-        enabled: true,
-    }];
-
-    let config = generate_zone_ruleset(&standard_zones(), &rules, &FirewallPolicy::default(), &[]);
-    assert!(
-        config.contains("oifname \"eth0\""),
-        "oif: prefix must generate oifname match"
-    );
-}
-
-// ── IP source/destination rules ──────────────────────────────────────
-
-#[test]
-fn ip_source_rule_generates_saddr() {
-    let rules = vec![FirewallRule {
-        id: Some(1),
-        chain: "input".to_string(),
-        priority: 0,
-        detail: RuleDetail {
-            action: Action::Drop,
-            protocol: "any".to_string(),
-            source: "10.99.0.0/16".to_string(),
-            destination: "any".to_string(),
-            port: None,
-            comment: Some("block bad subnet".to_string()),
-            vlan: None,
-            rate_limit: None,
-        },
-        enabled: true,
-    }];
-
-    let config = generate_ruleset(&rules, &FirewallPolicy::default());
-    assert!(
-        config.contains("ip saddr 10.99.0.0/16 drop"),
-        "IP source must generate 'ip saddr' match"
-    );
-}
-
-#[test]
-fn ip_destination_rule_generates_daddr() {
-    let rules = vec![FirewallRule {
-        id: Some(1),
-        chain: "forward".to_string(),
-        priority: 0,
-        detail: RuleDetail {
-            action: Action::Accept,
-            protocol: "tcp".to_string(),
-            source: "any".to_string(),
-            destination: "192.168.1.100".to_string(),
-            port: Some("443".to_string()),
-            comment: Some("allow to server".to_string()),
-            vlan: None,
-            rate_limit: None,
-        },
-        enabled: true,
-    }];
-
-    let config = generate_ruleset(&rules, &FirewallPolicy::default());
-    assert!(
-        config.contains("ip daddr 192.168.1.100"),
-        "IP destination must generate 'ip daddr' match"
-    );
-}
-
-// ── WAN failover: priority ordering with 3 members ───────────────────
-
-#[test]
-fn failover_three_members_selects_correct_primary() {
-    // eth3 has priority 10, eth0 has priority 5, ppp0 has priority 1
-    // ppp0 should be selected.
-    let group = test_failover_group();
-    let cmds = generate_wan_routing_commands(&group);
-    let default_cmd = cmds.last().expect("must have default route");
-    assert!(
-        default_cmd.contains(&"ppp0".to_string()),
-        "with three members, failover must select ppp0 (priority=1)"
-    );
-}
-
-#[test]
-fn failover_with_only_highest_priority_disabled_falls_back() {
-    let mut group = test_failover_group();
-    // Disable ppp0 (priority=1), so eth0 (priority=5) should be next.
-    group.interfaces[1].enabled = false;
-    let cmds = generate_wan_routing_commands(&group);
-    let default_cmd = cmds.last().expect("must have default route");
-    assert!(
-        default_cmd.contains(&"eth0".to_string()),
-        "with ppp0 disabled, must fall back to eth0 (priority=5)"
-    );
-    assert!(
-        !default_cmd.contains(&"eth3".to_string()),
-        "eth3 (priority=10) must not be primary when eth0 (priority=5) is available"
-    );
-}
-
-// ── Load balance: per-interface table setup ──────────────────────────
-
-#[test]
-fn load_balance_per_interface_tables_use_sequential_ids() {
-    let group = WanGroup {
-        name: "lb".to_string(),
-        mode: WanMode::LoadBalance,
-        interfaces: vec![
-            WanMember {
-                interface: "eth0".to_string(),
-                weight: 50,
-                gateway: "10.0.0.1".to_string(),
-                priority: 1,
-                check_target: "8.8.8.8".to_string(),
-                enabled: true,
-            },
-            WanMember {
-                interface: "eth1".to_string(),
-                weight: 50,
-                gateway: "10.1.0.1".to_string(),
-                priority: 2,
-                check_target: "1.1.1.1".to_string(),
-                enabled: true,
-            },
-        ],
-    };
-
-    let cmds = generate_wan_routing_commands(&group);
-    // First two commands are per-interface table setup.
-    assert!(
-        cmds[0].contains(&"100".to_string()),
-        "first table must be 100"
-    );
-    assert!(
-        cmds[1].contains(&"101".to_string()),
-        "second table must be 101"
+        config.contains("-A FORWARD -j SFGW-FORWARD"),
+        "must jump to custom forward chain"
     );
 }

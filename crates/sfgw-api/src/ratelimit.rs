@@ -93,7 +93,7 @@ pub async fn rate_limit_middleware(
         Ok(()) => next.run(request).await,
         Err(retry_after) => {
             let body = axum::Json(json!({
-                "error": "rate limit exceeded",
+                "error": sfgw_personality::messages::rate_limited(),
                 "retry_after_secs": retry_after,
             }));
             (

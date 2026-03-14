@@ -406,6 +406,10 @@ export const api = {
   getDeviceConfig: (mac: string) => request<unknown>(`/api/v1/devices/${encodeURIComponent(mac)}/config`),
   pushDeviceConfig: (mac: string, config: unknown) => request<{ sequence: number }>(`/api/v1/devices/${encodeURIComponent(mac)}/config`, { method: 'PUT', body: config }),
 
+  // Personality
+  getPersonality: () => request<{ active: string; personalities: { name: string; description: string; active: boolean }[] }>('/api/v1/personality'),
+  setPersonality: (name: string) => request<{ ok: boolean; active: string }>('/api/v1/personality', { method: 'PUT', body: { name } }),
+
   // WAN
   getWanConfigs: () => request<{ configs: WanPortConfig[] }>('/api/v1/wan'),
   getWanConfig: (iface: string) => request<{ config: WanPortConfig }>(`/api/v1/wan/${encodeURIComponent(iface)}`),

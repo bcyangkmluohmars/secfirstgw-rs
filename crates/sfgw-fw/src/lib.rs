@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #![deny(unsafe_code)]
 
-//! Firewall management — nftables rule generation and CRUD via DB.
+//! Firewall management — iptables rule generation and CRUD via DB.
 //!
 //! Security-first defaults: DROP input, DROP forward, ACCEPT output.
-//! All rule application is atomic via `nft -f`.
+//! All rule application is atomic via `iptables-restore`.
 //!
 //! Zone-based security model: WAN, LAN, DMZ, MGMT, GUEST.
 
-pub mod nft;
+pub mod iptables;
 pub mod wan;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ── Error types ─────────────────────────────────────────────────────
 
@@ -40,9 +40,9 @@ pub enum FwError {
     #[error("invalid JSON in rule id={id}: {json}")]
     InvalidRuleJson { id: i64, json: String },
 
-    /// nftables command failed.
-    #[error("nft command failed: {0}")]
-    NftFailed(String),
+    /// iptables command failed.
+    #[error("iptables command failed: {0}")]
+    IptablesFailed(String),
 
     /// WAN routing command failed.
     #[error("WAN routing error: {0}")]
@@ -425,11 +425,11 @@ pub async fn toggle_rule(db: &sfgw_db::Db, id: i64, enabled: bool) -> Result<(),
     Ok(())
 }
 
-/// Load rules, generate nftables config, and atomically apply it.
+/// Load rules, generate iptables config, and atomically apply it.
 /// This is the main entry point — call after any rule change.
 ///
 /// Now zone-aware: loads interface zones from the DB and generates
-/// zone-based nftables rules instead of hardcoded interface names.
+/// zone-based iptables rules instead of hardcoded interface names.
 pub async fn apply_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
     let rules = load_enabled_rules(db).await?;
     let zones = load_interface_zones(db).await?;
@@ -438,28 +438,36 @@ pub async fn apply_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
 
     let config = if zones.is_empty() {
         // Fallback to legacy generation when no zones are configured.
-        nft::generate_ruleset(&rules, &policy)
+        iptables::generate_ruleset(&rules, &policy)
     } else {
-        nft::generate_zone_ruleset(&zones, &rules, &policy, &[])
+        iptables::generate_zone_ruleset(&zones, &rules, &policy, &[])
     };
 
-    nft::apply_ruleset(&config).await?;
+    iptables::apply_ruleset(&config).await?;
 
     // Apply WAN routing if groups are configured.
     if !wan_groups.is_empty() {
         wan::apply_wan_routing(&wan_groups).await?;
     }
 
-    tracing::info!("firewall rules applied successfully (zone-aware)");
+    tracing::info!("iptables rules applied successfully (zone-aware)");
     Ok(())
 }
 
 // ── Zone DB functions ───────────────────────────────────────────────
 
-/// Load interface-to-zone assignments from the `interfaces` table,
-/// grouping by the `role` column.
+/// Load interface-to-zone assignments for firewall rule generation.
+///
+/// For bridged zones (LAN, MGMT, DMZ, GUEST), iptables sees traffic on
+/// the bridge interface (e.g. `br-lan`), not on individual switch ports.
+/// So we use `br-{zone}` as the interface when a network entry exists.
+///
+/// For WAN, the raw interface names (eth8, eth9) are used directly since
+/// WAN interfaces are not bridged.
 pub async fn load_interface_zones(db: &sfgw_db::Db) -> Result<Vec<ZonePolicy>, FwError> {
     let conn = db.lock().await;
+
+    // Load raw interface-to-role mappings for WAN (unbridged).
     let mut stmt = conn
         .prepare("SELECT name, role FROM interfaces WHERE enabled = 1 ORDER BY role, name")
         .context("failed to prepare interfaces query")?;
@@ -476,11 +484,34 @@ pub async fn load_interface_zones(db: &sfgw_db::Db) -> Result<Vec<ZonePolicy>, F
         zone_map.entry(role).or_default().push(name);
     }
 
+    // Load enabled networks — bridged zones use br-{zone} as their interface.
+    let mut net_stmt = conn
+        .prepare("SELECT zone FROM networks WHERE enabled = 1")
+        .context("failed to prepare networks query")?;
+
+    let net_rows = net_stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .context("failed to query networks")?;
+
+    let mut bridged_zones: HashSet<String> = HashSet::new();
+    for row in net_rows {
+        let zone = row.context("failed to read networks row")?;
+        bridged_zones.insert(zone);
+    }
+
     let zones = zone_map
         .into_iter()
-        .map(|(role, interfaces)| ZonePolicy {
-            zone: FirewallZone::from_role(&role),
-            interfaces,
+        .map(|(role, interfaces)| {
+            // For bridged zones, replace individual port interfaces with the bridge.
+            let effective_ifaces = if role != "wan" && role != "loopback" && bridged_zones.contains(&role) {
+                vec![format!("br-{role}")]
+            } else {
+                interfaces
+            };
+            ZonePolicy {
+                zone: FirewallZone::from_role(&role),
+                interfaces: effective_ifaces,
+            }
         })
         .collect();
 
@@ -533,7 +564,7 @@ pub async fn save_wan_groups(db: &sfgw_db::Db, groups: &[WanGroup]) -> Result<()
 /// - NAT masquerade on WAN egress
 ///
 /// Connection tracking (established/related) and ICMP are handled by
-/// `nft::emit_default_rules()` which is always applied regardless of
+/// `iptables::emit_default_rules()` which is always applied regardless of
 /// DB content, so they are not duplicated here.
 pub async fn create_default_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
     // Only insert defaults when the table is empty (first boot).
@@ -676,17 +707,7 @@ fn build_default_rules() -> Vec<FirewallRule> {
 
     // ── Input chain (traffic TO the gateway) ────────────────────────
 
-    // SSH from LAN.
-    rules.push(input_rule(
-        30,
-        "tcp",
-        "iif:@lan_ifaces",
-        Some("22"),
-        Action::Accept,
-        Some("SSH from LAN"),
-    ));
-
-    // SSH from MGMT.
+    // SSH from MGMT only (management access).
     rules.push(input_rule(
         31,
         "tcp",
@@ -781,7 +802,7 @@ fn build_default_rules() -> Vec<FirewallRule> {
         50,
         "udp",
         "any",
-        Some("67-68"),
+        Some("67:68"),
         Action::Accept,
         Some("DHCP from any"),
     ));

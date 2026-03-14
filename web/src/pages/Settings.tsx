@@ -24,6 +24,8 @@ export default function Settings() {
   const [showCreateUser, setShowCreateUser] = useState(false)
   const [showChangePassword, setShowChangePassword] = useState<UserInfo | null>(null)
   const [showEditUser, setShowEditUser] = useState<UserInfo | null>(null)
+  const [personality, setPersonality] = useState<string>('')
+  const [personalities, setPersonalities] = useState<{ name: string; description: string; active: boolean }[]>([])
   const [newUser, setNewUser] = useState({ username: '', password: '', confirmPassword: '', role: 'admin' })
   const [newPassword, setNewPassword] = useState({ password: '', confirmPassword: '' })
   const [editRole, setEditRole] = useState('')
@@ -31,14 +33,17 @@ export default function Settings() {
 
   const load = useCallback(async () => {
     try {
-      const [sysRes, meRes, usersRes] = await Promise.all([
+      const [sysRes, meRes, usersRes, persRes] = await Promise.all([
         api.getSystem(),
         api.getMe(),
         api.getUsers(),
+        api.getPersonality(),
       ])
       setSystem(sysRes as SystemInfo)
       setCurrentUser(meRes.user)
       setUsers(usersRes.users ?? [])
+      setPersonality(persRes.active)
+      setPersonalities(persRes.personalities)
     } catch (e: unknown) { toast.error((e as Error).message) }
     finally { setLoading(false) }
   }, [toast])
@@ -89,6 +94,15 @@ export default function Settings() {
     } catch (e: unknown) { toast.error((e as Error).message) }
   }
 
+  const handleSetPersonality = async (name: string) => {
+    try {
+      const res = await api.setPersonality(name)
+      setPersonality(res.active)
+      setPersonalities(prev => prev.map(p => ({ ...p, active: p.name === res.active })))
+      toast.success(`Personality: ${res.active}`)
+    } catch (e: unknown) { toast.error((e as Error).message) }
+  }
+
   if (loading) return <Spinner label="Loading settings..." />
 
   const isAdmin = currentUser?.role === 'admin'
@@ -112,6 +126,34 @@ export default function Settings() {
               <span className="w-32 text-sm text-navy-400 shrink-0">{String(label)}</span>
               <span className="text-sm font-mono text-gray-200">{String(value)}</span>
             </div>
+          ))}
+        </div>
+      </Card>
+
+      {/* Personality */}
+      <Card title="Personality">
+        <p className="text-xs text-navy-400 mb-4">
+          Controls the style of error messages, rate-limit responses, honeypot replies, and IDS alerts.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {personalities.map((p) => (
+            <button
+              key={p.name}
+              onClick={() => handleSetPersonality(p.name)}
+              className={`text-left rounded-lg border p-3 transition-all ${
+                p.name === personality
+                  ? 'border-emerald-500/50 bg-emerald-500/10'
+                  : 'border-navy-700/50 bg-navy-900/30 hover:border-navy-600/50 hover:bg-navy-800/30'
+              }`}
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-sm font-mono font-medium text-gray-200">{p.name}</span>
+                {p.name === personality && (
+                  <Badge variant="success">active</Badge>
+                )}
+              </div>
+              <span className="text-xs text-navy-400">{p.description}</span>
+            </button>
           ))}
         </div>
       </Card>
