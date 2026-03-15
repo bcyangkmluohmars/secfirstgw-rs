@@ -106,10 +106,11 @@ Plans:
   3. Ports with pvid=1 (void) are visually distinct — dark/inactive appearance distinguishable from active ports at a glance
   4. On a UDM Pro, the switch panel renders the actual UDM Pro port layout (board-specific addon); on VM/Docker it renders a generic port grid
   5. Saving a port config through the UI causes the switch and firewall to reconfigure without a full page reload
-**Plans**: TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] 05-01: TBD
+- [ ] 05-01-PLAN.md — API types + switch panel PVID-based coloring with tagged VLAN dots and void port styling
+- [ ] 05-02-PLAN.md — Port config panel: PVID selector + tagged VLAN checklist with live save
 
 ---
 
@@ -123,7 +124,7 @@ Plans:
 | 2. Switch ASIC | 1/1 | ✓ Complete | 2026-03-15 |
 | 3. Network Enforcement | 1/1 | ✓ Complete | 2026-03-15 |
 | 4. API | 1/1 | ✓ Complete | 2026-03-15 |
-| 5. Web UI | 0/? | Not started | - |
+| 5. Web UI | 0/2 | In progress | - |
 
 ---
 *Roadmap created: 2026-03-15 for milestone v0.1.0*
