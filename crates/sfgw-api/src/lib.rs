@@ -21,6 +21,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -29,7 +30,10 @@ use crate::middleware::AuthUser;
 use crate::ratelimit::RateLimiter;
 
 /// Start the axum web API and serve the UI over TLS 1.3.
-pub async fn serve(db: &sfgw_db::Db, event_tx: events::EventTx) -> Result<()> {
+/// Shared system stats handle for the status endpoint.
+pub type SysStats = Arc<sfgw_hal::SystemStats>;
+
+pub async fn serve(db: &sfgw_db::Db, event_tx: events::EventTx, sys_stats: &SysStats) -> Result<()> {
     let listen_addr: SocketAddr = std::env::var("SFGW_LISTEN_ADDR")
         .unwrap_or_else(|_| "[::]:443".to_string())
         .parse()
@@ -38,6 +42,7 @@ pub async fn serve(db: &sfgw_db::Db, event_tx: events::EventTx) -> Result<()> {
     let db = db.clone();
     let negotiate_store = e2ee::new_negotiate_store();
     let envelope_key_store = e2ee::new_envelope_key_store();
+    let sys_stats = sys_stats.clone();
 
     // ----- Rate limiters -----
     // Auth mutations (login, session, setup POST): 10 requests per minute per IP.
@@ -223,6 +228,7 @@ pub async fn serve(db: &sfgw_db::Db, event_tx: events::EventTx) -> Result<()> {
             .layer(Extension(db))
             .layer(Extension(negotiate_store))
             .layer(Extension(envelope_key_store))
+            .layer(Extension(sys_stats.clone()))
             .layer(tower_http::trace::TraceLayer::new_for_http())
             .fallback_service(serve_dir)
     } else {
@@ -236,6 +242,7 @@ pub async fn serve(db: &sfgw_db::Db, event_tx: events::EventTx) -> Result<()> {
             .layer(Extension(db))
             .layer(Extension(negotiate_store))
             .layer(Extension(envelope_key_store))
+            .layer(Extension(sys_stats.clone()))
             .layer(tower_http::trace::TraceLayer::new_for_http())
     };
 
@@ -832,14 +839,20 @@ fn read_arch() -> &'static str {
     std::env::consts::ARCH
 }
 
+
 // ---------------------------------------------------------------------------
 // Protected handlers
 // ---------------------------------------------------------------------------
 
-async fn status_handler(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) -> Json<Value> {
+async fn status_handler(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Extension(stats): Extension<SysStats>,
+) -> Json<Value> {
     let uptime = read_uptime_secs() as u64;
     let (load1, load5, load15) = read_loadavg();
     let mem = read_meminfo();
+    let cpu_percent = stats.cpu();
 
     // Check actual service state rather than hardcoding
     let fw_status = {
@@ -930,9 +943,13 @@ async fn status_handler(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) 
 
     let net_io = sfgw_net::read_net_io();
 
+    let cpu_count = read_cpu_count();
+
     Json(json!({
         "status": "ok",
         "uptime_secs": uptime,
+        "cpu_count": cpu_count,
+        "cpu_percent": cpu_percent,
         "load_average": [load1, load5, load15],
         "memory": {
             "total_mb": mem.total_mb,

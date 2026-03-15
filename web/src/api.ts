@@ -16,7 +16,17 @@ interface ApiOptions {
   skipE2EE?: boolean;
 }
 
-async function request<T>(path: string, opts: ApiOptions = {}): Promise<T> {
+// E2EE re-negotiate callback — set by crypto.ts to break circular import
+let _renegotiateFn: (() => Promise<boolean>) | null = null;
+
+export function setRenegotiateFn(fn: () => Promise<boolean>): void {
+  _renegotiateFn = fn;
+}
+
+// Guard against concurrent re-negotiate storms
+let renegotiating: Promise<boolean> | null = null;
+
+async function request<T>(path: string, opts: ApiOptions = {}, _retry = false): Promise<T> {
   const { method = 'GET', body, headers = {}, skipE2EE = false } = opts;
 
   const token = localStorage.getItem('token');
@@ -49,6 +59,16 @@ async function request<T>(path: string, opts: ApiOptions = {}): Promise<T> {
   });
 
   if (res.status === 401) {
+    // E2EE key lost (server restart) but DB session still valid — re-negotiate once
+    if (!_retry && token && !skipE2EE && _renegotiateFn) {
+      if (!renegotiating) {
+        renegotiating = _renegotiateFn().finally(() => { renegotiating = null; });
+      }
+      const ok = await renegotiating;
+      if (ok) {
+        return request(path, opts, true);
+      }
+    }
     localStorage.removeItem('token');
     throw new ApiError(401, 'unauthorized');
   }
@@ -109,6 +129,8 @@ export interface NetIoStats {
 export interface SystemStatus {
   status: string;
   uptime_secs: number;
+  cpu_count: number;
+  cpu_percent: number;
   load_average: [number, number, number];
   memory: { total_mb: number; used_mb: number; free_mb: number };
   network: NetIoStats;

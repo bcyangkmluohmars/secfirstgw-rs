@@ -2,6 +2,8 @@
 #![deny(unsafe_code)]
 
 use std::fmt;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 /// Errors from the hardware abstraction layer.
 #[derive(Debug, thiserror::Error)]
@@ -453,6 +455,143 @@ pub fn detect_board() -> Option<BoardInfo> {
         ports,
         switch,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Shared system stats — sampled by a background thread, read by API + display
+// ---------------------------------------------------------------------------
+
+/// Shared system stats updated by a periodic sampler thread.
+/// All values are atomically readable from any thread without locking.
+pub struct SystemStats {
+    /// CPU busy percentage (0-100), sampled from /proc/stat delta.
+    pub cpu_percent: AtomicU32,
+    /// Memory usage percentage (0-100), from /proc/meminfo.
+    pub mem_percent: AtomicU32,
+    /// System uptime in seconds, from /proc/uptime.
+    pub uptime_secs: AtomicU32,
+}
+
+impl SystemStats {
+    /// Create a new zeroed stats instance.
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            cpu_percent: AtomicU32::new(0),
+            mem_percent: AtomicU32::new(0),
+            uptime_secs: AtomicU32::new(0),
+        })
+    }
+
+    pub fn cpu(&self) -> u32 {
+        self.cpu_percent.load(Ordering::Relaxed)
+    }
+
+    pub fn mem(&self) -> u32 {
+        self.mem_percent.load(Ordering::Relaxed)
+    }
+
+    pub fn uptime(&self) -> u32 {
+        self.uptime_secs.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for SystemStats {
+    fn default() -> Self {
+        Self {
+            cpu_percent: AtomicU32::new(0),
+            mem_percent: AtomicU32::new(0),
+            uptime_secs: AtomicU32::new(0),
+        }
+    }
+}
+
+/// Spawn a background thread that samples /proc/stat, /proc/meminfo, and
+/// /proc/uptime every `interval` and stores the results in `stats`.
+///
+/// Uses a plain `std::thread` (not tokio) so it works from both async and
+/// sync contexts (e.g. the LCM display thread).
+pub fn spawn_stats_sampler(stats: &Arc<SystemStats>, interval: std::time::Duration) {
+    let stats = Arc::clone(stats);
+    std::thread::Builder::new()
+        .name("sys-stats".to_string())
+        .spawn(move || {
+            let mut prev_idle: u64 = 0;
+            let mut prev_total: u64 = 0;
+
+            loop {
+                // CPU from /proc/stat
+                if let Some((idle, total)) = read_proc_stat() {
+                    let d_total = total.saturating_sub(prev_total);
+                    let d_idle = idle.saturating_sub(prev_idle);
+                    if d_total > 0 && prev_total > 0 {
+                        let pct = ((d_total - d_idle) * 100 / d_total) as u32;
+                        stats.cpu_percent.store(pct, Ordering::Relaxed);
+                    }
+                    prev_idle = idle;
+                    prev_total = total;
+                }
+
+                // Memory from /proc/meminfo
+                stats
+                    .mem_percent
+                    .store(read_proc_meminfo_percent(), Ordering::Relaxed);
+
+                // Uptime from /proc/uptime
+                stats
+                    .uptime_secs
+                    .store(read_proc_uptime(), Ordering::Relaxed);
+
+                std::thread::sleep(interval);
+            }
+        })
+        .expect("failed to spawn sys-stats thread");
+}
+
+fn read_proc_stat() -> Option<(u64, u64)> {
+    let content = std::fs::read_to_string("/proc/stat").ok()?;
+    let line = content.lines().next()?;
+    let parts: Vec<u64> = line
+        .split_whitespace()
+        .skip(1) // skip "cpu"
+        .take(7)
+        .filter_map(|v| v.parse().ok())
+        .collect();
+    if parts.len() < 5 {
+        return None;
+    }
+    let idle = parts[3] + parts[4]; // idle + iowait
+    let total: u64 = parts.iter().sum();
+    Some((idle, total))
+}
+
+fn read_proc_meminfo_percent() -> u32 {
+    let content = match std::fs::read_to_string("/proc/meminfo") {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    let field = |name: &str| -> u64 {
+        content
+            .lines()
+            .find(|l| l.starts_with(name))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    };
+    let total = field("MemTotal:");
+    let available = field("MemAvailable:");
+    if total == 0 {
+        return 0;
+    }
+    ((total.saturating_sub(available)) * 100 / total) as u32
+}
+
+fn read_proc_uptime() -> u32 {
+    std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|s| s.split_whitespace().next().map(String::from))
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0) as u32
 }
 
 #[cfg(test)]

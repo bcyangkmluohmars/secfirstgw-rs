@@ -322,6 +322,11 @@ pub async fn e2ee_layer(request: Request<Body>, next: Next) -> Response<Body> {
             }
             None => {
                 // Key not in memory (server restarted or session has no E2EE) — client must re-negotiate
+                tracing::warn!(
+                    token_prefix = &token[..token.len().min(8)],
+                    store_size = store.len(),
+                    "E2EE envelope key not found — client must re-negotiate"
+                );
                 return (
                     StatusCode::UNAUTHORIZED,
                     "E2EE session expired, please re-negotiate",

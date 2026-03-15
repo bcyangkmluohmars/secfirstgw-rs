@@ -236,10 +236,14 @@ pub fn auto_detect(platform: &sfgw_hal::Platform) -> DisplayConfig {
 /// ```
 /// use sfgw_display::{init, DisplayConfig};
 ///
-/// let display = init(&DisplayConfig::None).unwrap();
+/// let stats = sfgw_hal::SystemStats::new();
+/// let display = init(&DisplayConfig::None, &stats).unwrap();
 /// assert!(display.is_none());
 /// ```
-pub fn init(config: &DisplayConfig) -> Result<Option<Box<dyn Display>>, DisplayError> {
+pub fn init(
+    config: &DisplayConfig,
+    sys_stats: &std::sync::Arc<sfgw_hal::SystemStats>,
+) -> Result<Option<Box<dyn Display>>, DisplayError> {
     match config {
         DisplayConfig::None => {
             tracing::info!("display: disabled");
@@ -270,7 +274,7 @@ pub fn init(config: &DisplayConfig) -> Result<Option<Box<dyn Display>>, DisplayE
             let display = ulcmd::init(Path::new(socket_path))?;
             Ok(Some(Box::new(display)))
         }
-        DisplayConfig::Lcm { board_id, mac } => match lcm::init_for_board(board_id, mac)? {
+        DisplayConfig::Lcm { board_id, mac } => match lcm::init_for_board(board_id, mac, sys_stats)? {
             Some(display) => Ok(Some(Box::new(display))),
             None => {
                 tracing::warn!(board_id, "LCM display not supported for this board");
@@ -402,7 +406,8 @@ mod tests {
 
     #[test]
     fn init_none_returns_none() {
-        let result = init(&DisplayConfig::None).expect("init None");
+        let stats = sfgw_hal::SystemStats::new();
+        let result = init(&DisplayConfig::None, &stats).expect("init None");
         assert!(result.is_none());
     }
 

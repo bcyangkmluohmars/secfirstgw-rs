@@ -15,8 +15,18 @@ import Settings from './pages/Settings'
 import Logs from './pages/Logs'
 import Login from './pages/Login'
 import Setup from './pages/Setup'
-import { api, isAuthenticated, clearToken } from './api'
+import { api, isAuthenticated, clearToken, setRenegotiateFn } from './api'
 import { initSession } from './crypto'
+
+// Wire up E2EE re-negotiate callback (breaks circular import between api↔crypto)
+setRenegotiateFn(async () => {
+  try {
+    const result = await initSession()
+    return result.authenticated
+  } catch {
+    return false
+  }
+})
 import { BootContext, type BootStatus } from './boot'
 import { ToastProvider } from './hooks/useToast'
 import { StatusProvider } from './hooks/useStatus'

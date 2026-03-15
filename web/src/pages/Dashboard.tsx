@@ -180,7 +180,8 @@ export default function Dashboard() {
 
   const ramPercent = status.memory.total_mb > 0
     ? (status.memory.used_mb / status.memory.total_mb) * 100 : 0
-  const cpuPercent = Math.min((status.load_average[0] / 8) * 100, 100)
+  const cores = status.cpu_count || 4
+  const cpuPercent = status.cpu_percent ?? Math.min((status.load_average[0] / cores) * 100, 100)
   const netIfaces = status.network?.interfaces ?? []
 
   return (
@@ -223,9 +224,9 @@ export default function Dashboard() {
             value={<span className="font-mono">{status.load_average[0].toFixed(2)}</span>}
             subtitle={`${status.load_average[0].toFixed(2)} / ${status.load_average[1].toFixed(2)} / ${status.load_average[2].toFixed(2)}`}
             icon={<svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg>}
-            accentColor={status.load_average[0] > 4 ? '#f87171' : status.load_average[0] > 2 ? '#fbbf24' : '#34d399'}
+            accentColor={status.load_average[0] > cores * 2 ? '#f87171' : status.load_average[0] > cores ? '#fbbf24' : '#34d399'}
           >
-            <Sparkline data={loadHistory} width={180} height={32} color={status.load_average[0] > 4 ? '#f87171' : '#34d399'} strokeWidth={1.5} />
+            <Sparkline data={loadHistory} width={180} height={32} color={status.load_average[0] > cores * 2 ? '#f87171' : '#34d399'} strokeWidth={1.5} />
           </StatCard>
 
           <StatCard
@@ -312,11 +313,11 @@ export default function Dashboard() {
           <div className="flex items-center justify-around py-2">
             <MiniGauge
               value={status.load_average[0]}
-              max={8}
+              max={cores}
               label="CPU Load"
               unit="avg"
-              thresholds={{ warn: 25, error: 50 }}
-              subtitle={`${status.load_average[0].toFixed(2)} / 8 cores`}
+              thresholds={{ warn: 75, error: 100 }}
+              subtitle={`${status.load_average[0].toFixed(2)} / ${cores} cores`}
             />
             <div className="w-px h-20 bg-navy-800/50" />
             <MiniGauge

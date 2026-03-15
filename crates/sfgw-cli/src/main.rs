@@ -4,6 +4,48 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+// ---------------------------------------------------------------------------
+// systemd notify / watchdog
+// ---------------------------------------------------------------------------
+
+/// Send a message to the systemd notify socket (if $NOTIFY_SOCKET is set).
+fn sd_notify(msg: &str) {
+    if let Ok(path) = std::env::var("NOTIFY_SOCKET") {
+        // Abstract socket names start with @, convert to \0 for Linux
+        let addr = if let Some(stripped) = path.strip_prefix('@') {
+            format!("\0{stripped}")
+        } else {
+            path
+        };
+        if let Ok(sock) = std::os::unix::net::UnixDatagram::unbound() {
+            let _ = sock.send_to(msg.as_bytes(), &addr);
+        }
+    }
+}
+
+/// Spawn a background task that pings the systemd watchdog at half the
+/// configured interval.  Does nothing if $WATCHDOG_USEC is not set.
+fn spawn_watchdog() {
+    let usec: u64 = match std::env::var("WATCHDOG_USEC")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        Some(v) if v > 0 => v,
+        _ => return, // no watchdog configured
+    };
+
+    // Ping at half the deadline (systemd recommendation)
+    let interval = std::time::Duration::from_micros(usec / 2);
+
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        loop {
+            tick.tick().await;
+            sd_notify("WATCHDOG=1");
+        }
+    });
+}
+
 #[derive(Parser)]
 #[command(name = "sfgw", about = "secfirstgw — Security First Gateway")]
 struct Cli {
@@ -171,11 +213,15 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
     tracing::info!("starting IDS engine");
     sfgw_ids::start(&db, sfgw_ids::IdsRole::Gateway).await?;
 
-    // Phase 12: Display (auto-detect: native LCM, character LCD, framebuffer, or none)
-    // LCM driver spawns its own background thread for periodic stats updates.
+    // Phase 12: System stats sampler (shared between API + display)
+    let sys_stats = sfgw_hal::SystemStats::new();
+    sfgw_hal::spawn_stats_sampler(&sys_stats, std::time::Duration::from_secs(2));
+    tracing::info!("system stats sampler started");
+
+    // Phase 13: Display (auto-detect: native LCM, character LCD, framebuffer, or none)
     tracing::info!("initializing display");
     let display_config = sfgw_display::auto_detect(&platform);
-    let _display = match sfgw_display::init(&display_config) {
+    let _display = match sfgw_display::init(&display_config, &sys_stats) {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!("display unavailable: {e}");
@@ -183,9 +229,13 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
         }
     };
 
-    // Phase 13: API server (blocks)
+    // Signal systemd that we're fully ready, then start watchdog pings
+    sd_notify("READY=1");
+    spawn_watchdog();
+
+    // Phase 14: API server (blocks)
     tracing::info!("starting API server");
-    sfgw_api::serve(&db, event_tx).await?;
+    sfgw_api::serve(&db, event_tx, &sys_stats).await?;
 
     Ok(())
 }

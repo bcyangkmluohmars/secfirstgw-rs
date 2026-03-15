@@ -302,10 +302,10 @@ impl LcmDisplay {
     }
 
     /// Push current system stats to the MCU.
-    pub fn update_stats(&self) -> Result<(), DisplayError> {
-        let cpu = read_cpu_percent();
-        let mem = read_mem_percent();
-        let uptime = read_uptime_secs();
+    pub fn update_stats(&self, stats: &sfgw_hal::SystemStats) -> Result<(), DisplayError> {
+        let cpu = stats.cpu();
+        let mem = stats.mem();
+        let uptime = stats.uptime();
         let fan_rpm = self
             .config
             .fan_sensor
@@ -368,7 +368,7 @@ impl LcmDisplay {
 
     /// Spawn a background thread that pushes system stats to the MCU
     /// every 3 seconds. Non-critical — errors are logged and retried.
-    fn spawn_stats_loop(&self) {
+    fn spawn_stats_loop(&self, sys_stats: Arc<sfgw_hal::SystemStats>) {
         let port = Arc::clone(&self.port);
         let config = self.config.clone();
 
@@ -381,11 +381,10 @@ impl LcmDisplay {
                 let display = LcmDisplay { port, config };
 
                 loop {
-                    if let Err(e) = display.update_stats() {
+                    if let Err(e) = display.update_stats(&sys_stats) {
                         tracing::debug!("lcm: stats update failed: {e}");
                     }
-                    // Sleep 3 seconds between updates (CPU sampling takes ~200ms)
-                    std::thread::sleep(Duration::from_millis(2800));
+                    std::thread::sleep(Duration::from_secs(3));
                 }
             })
             .ok(); // Non-critical — if thread spawn fails, display just won't update
@@ -424,7 +423,11 @@ impl Display for LcmDisplay {
 ///
 /// Returns `None` if the board is not supported or the serial device
 /// is not present.
-pub fn init_for_board(board_id: &str, mac: &str) -> Result<Option<LcmDisplay>, DisplayError> {
+pub fn init_for_board(
+    board_id: &str,
+    mac: &str,
+    sys_stats: &Arc<sfgw_hal::SystemStats>,
+) -> Result<Option<LcmDisplay>, DisplayError> {
     let config = match board_id {
         // UDM Pro — verified, protocol fully reversed
         "ea15" => LcmBoardConfig::udm_pro(mac),
@@ -460,7 +463,7 @@ pub fn init_for_board(board_id: &str, mac: &str) -> Result<Option<LcmDisplay>, D
     }
 
     // Spawn background thread for periodic stats updates
-    display.spawn_stats_loop();
+    display.spawn_stats_loop(Arc::clone(sys_stats));
 
     Ok(Some(display))
 }
@@ -567,84 +570,6 @@ fn read_uptime_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Read memory usage percentage from `/proc/meminfo`.
-fn read_mem_percent() -> u32 {
-    let content = match std::fs::read_to_string("/proc/meminfo") {
-        Ok(c) => c,
-        Err(_) => return 0,
-    };
-
-    let mut total: u64 = 0;
-    let mut available: u64 = 0;
-
-    for line in content.lines() {
-        if let Some(val) = line.strip_prefix("MemTotal:") {
-            total = val
-                .split_whitespace()
-                .next()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-        } else if let Some(val) = line.strip_prefix("MemAvailable:") {
-            available = val
-                .split_whitespace()
-                .next()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-        }
-    }
-
-    if total == 0 {
-        return 0;
-    }
-
-    ((total.saturating_sub(available)) * 100 / total) as u32
-}
-
-/// Sample CPU usage over a short interval.
-///
-/// This reads `/proc/stat` twice with a 200ms gap and computes the
-/// percentage of non-idle time. Returns 0 on any error.
-fn read_cpu_percent() -> u32 {
-    fn read_stat() -> Option<(u64, u64)> {
-        let content = std::fs::read_to_string("/proc/stat").ok()?;
-        let line = content.lines().next()?;
-        let parts: Vec<u64> = line
-            .split_whitespace()
-            .skip(1) // skip "cpu"
-            .take(7)
-            .filter_map(|v| v.parse().ok())
-            .collect();
-
-        if parts.len() < 5 {
-            return None;
-        }
-
-        let idle = parts[3] + parts[4]; // idle + iowait
-        let total: u64 = parts.iter().sum();
-        Some((idle, total))
-    }
-
-    let (idle1, total1) = match read_stat() {
-        Some(v) => v,
-        None => return 0,
-    };
-
-    std::thread::sleep(Duration::from_millis(200));
-
-    let (idle2, total2) = match read_stat() {
-        Some(v) => v,
-        None => return 0,
-    };
-
-    let total_diff = total2.saturating_sub(total1);
-    let idle_diff = idle2.saturating_sub(idle1);
-
-    if total_diff == 0 {
-        return 0;
-    }
-
-    (100 * (total_diff - idle_diff) / total_diff) as u32
-}
 
 #[cfg(test)]
 mod tests {
@@ -655,13 +580,6 @@ mod tests {
         let a = next_id();
         let b = next_id();
         assert!(b > a);
-    }
-
-    #[test]
-    fn read_mem_percent_returns_valid() {
-        // On any Linux system this should return 0-100
-        let mem = read_mem_percent();
-        assert!(mem <= 100, "mem percent {mem} out of range");
     }
 
     #[test]
@@ -682,7 +600,8 @@ mod tests {
 
     #[test]
     fn init_for_unknown_board_returns_none() {
-        let result = init_for_board("ffff", "00:00:00:00:00:00").unwrap();
+        let stats = sfgw_hal::SystemStats::new();
+        let result = init_for_board("ffff", "00:00:00:00:00:00", &stats).unwrap();
         assert!(result.is_none());
     }
 
