@@ -88,10 +88,10 @@ Plans:
   2. `PUT /api/ports/{id}` with a new PVID and tagged VLAN list persists to DB and triggers switch/firewall reconfiguration
   3. `GET /api/zones/{id}` returns the list of VLAN IDs owned by that zone
   4. `GET /api/interfaces` returns `pvid` and `tagged_vlans` per interface — role field absent from response
-**Plans**: TBD
+**Plans:** 1 plan
 
 Plans:
-- [ ] 04-01: TBD
+- [ ] 04-01-PLAN.md — Port config endpoints (GET/PUT with reconfig trigger) and zone endpoints (list + detail)
 
 ---
 
@@ -122,7 +122,7 @@ Plans:
 | 1. Data Model | 2/2 | ✓ Complete | 2026-03-15 |
 | 2. Switch ASIC | 1/1 | ✓ Complete | 2026-03-15 |
 | 3. Network Enforcement | 1/1 | ✓ Complete | 2026-03-15 |
-| 4. API | 0/? | Not started | - |
+| 4. API | 0/1 | Not started | - |
 | 5. Web UI | 0/? | Not started | - |
 
 ---
