@@ -54,10 +54,10 @@ Plans:
   2. The MGMT port (eth7) has pvid=3000 in hardware with no LAN VLANs forwarded on it
   3. VLAN 1 is programmed on the switch with no bridge interface attached — traffic on it goes nowhere
   4. On VM or Docker (no board detected), switch ASIC code does not run and no error is produced
-**Plans**: TBD
+**Plans:** 1 plan
 
 Plans:
-- [ ] 02-01: TBD
+- [ ] 02-01-PLAN.md — Rewrite switch ASIC programming: per-port VLAN computation from DB, VLAN 1 catch-all sink, MGMT isolation
 
 ---
 
@@ -120,7 +120,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Data Model | 2/2 | ✓ Complete | 2026-03-15 |
-| 2. Switch ASIC | 0/? | Not started | - |
+| 2. Switch ASIC | 0/1 | Not started | - |
 | 3. Network Enforcement | 0/? | Not started | - |
 | 4. API | 0/? | Not started | - |
 | 5. Web UI | 0/? | Not started | - |
