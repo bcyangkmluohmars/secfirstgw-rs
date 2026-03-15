@@ -82,8 +82,8 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
     for iface in &interfaces {
         let ips_json = serde_json::to_string(&iface.ips).context("failed to serialize IPs")?;
 
-        let tagged_json =
-            serde_json::to_string(&iface.tagged_vlans).context("failed to serialize tagged_vlans")?;
+        let tagged_json = serde_json::to_string(&iface.tagged_vlans)
+            .context("failed to serialize tagged_vlans")?;
 
         // Update live state (mac, ips, mtu, is_up) on every boot.
         // PVID and tagged_vlans are only set on first discovery — never overwritten on
@@ -259,13 +259,13 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
     // Apply all enabled WAN configs (start DHCP clients, PPPoE, set static routes, etc.)
     let wan_configs = wan::list_wan_configs(db).await.unwrap_or_default();
     for wc in &wan_configs {
-        if wc.enabled {
-            if let Err(e) = wan::apply_wan_config(wc).await {
-                tracing::warn!(
-                    interface = %wc.interface,
-                    "failed to apply WAN config at boot: {e}"
-                );
-            }
+        if wc.enabled
+            && let Err(e) = wan::apply_wan_config(wc).await
+        {
+            tracing::warn!(
+                interface = %wc.interface,
+                "failed to apply WAN config at boot: {e}"
+            );
         }
     }
 
@@ -660,19 +660,23 @@ fn hex_to_ipv6(hex: &str) -> Option<String> {
 /// Returns 0 for loopback/VPN/container/virtual interfaces (not internal VLAN ports),
 /// 0 for the first physical interface (likely WAN), and 10 (LAN) for everything else.
 fn guess_pvid(name: &str) -> u16 {
-    if name == "lo" {
-        0 // Loopback: not a VLAN port
-    } else if name.starts_with("wg") || name.starts_with("tun") || name.starts_with("tap") {
-        0 // VPN tunnels: not a VLAN port
-    } else if name.starts_with("docker") || name.starts_with("br-") || name.starts_with("veth") {
-        0 // Container interfaces: not a VLAN port
+    if name == "lo"
+        || name.starts_with("wg")
+        || name.starts_with("tun")
+        || name.starts_with("tap")
+        || name.starts_with("docker")
+        || name.starts_with("br-")
+        || name.starts_with("veth")
+        || name.starts_with("virbr")
+        || name.starts_with("eth0")
+        || name.starts_with("ens")
+        || name.starts_with("enp")
+    {
+        // Non-VLAN interfaces (loopback, VPN, containers, virtual bridges)
+        // and first physical interface (typically WAN): pvid=0
+        0
     } else if name.starts_with("wl") || name.starts_with("wlan") {
         10 // WiFi: LAN by default
-    } else if name.starts_with("virbr") {
-        0 // Virtual bridge: not a VLAN port
-    } else if name.starts_with("eth0") || name.starts_with("ens") || name.starts_with("enp") {
-        // First physical interface is typically WAN; pvid=0 signals "not internal VLAN"
-        0
     } else {
         // eth1+, en*, and anything else defaults to LAN
         10
@@ -965,10 +969,17 @@ mod tests {
             let total: i64 = conn
                 .query_row("SELECT COUNT(*) FROM networks", [], |r| r.get(0))
                 .expect("networks table should exist");
-            assert_eq!(total, 1, "fresh DB should have only the void entry from migration 005");
+            assert_eq!(
+                total, 1,
+                "fresh DB should have only the void entry from migration 005"
+            );
 
             let non_void: i64 = conn
-                .query_row("SELECT COUNT(*) FROM networks WHERE zone != 'void'", [], |r| r.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM networks WHERE zone != 'void'",
+                    [],
+                    |r| r.get(0),
+                )
                 .expect("non-void count query failed");
             assert_eq!(non_void, 0, "fresh DB should have no user-visible networks");
         }
@@ -1033,19 +1044,26 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM networks", [], |r| r.get(0))
             .expect("count query failed");
-        assert_eq!(count, 5, "should have 5 total networks (1 void from migration + 4 seeded)");
+        assert_eq!(
+            count, 5,
+            "should have 5 total networks (1 void from migration + 4 seeded)"
+        );
 
         // Verify Void VLAN 1 exists and is disabled (inserted by migration 005)
         let void_vlan: i32 = conn
-            .query_row("SELECT vlan_id FROM networks WHERE zone = 'void'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT vlan_id FROM networks WHERE zone = 'void'",
+                [],
+                |r| r.get(0),
+            )
             .expect("Void network should exist");
         assert_eq!(void_vlan, 1, "Void should have VLAN 1");
         let void_enabled: i32 = conn
-            .query_row("SELECT enabled FROM networks WHERE zone = 'void'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT enabled FROM networks WHERE zone = 'void'",
+                [],
+                |r| r.get(0),
+            )
             .expect("Void enabled should be readable");
         assert_eq!(void_enabled, 0, "Void should be disabled");
 
@@ -1112,14 +1130,26 @@ mod tests {
 
         // CustomLAN should keep its custom subnet (not overwritten)
         let lan_subnet: String = conn
-            .query_row("SELECT subnet FROM networks WHERE zone = 'lan'", [], |r| r.get(0))
+            .query_row("SELECT subnet FROM networks WHERE zone = 'lan'", [], |r| {
+                r.get(0)
+            })
             .expect("LAN should exist");
-        assert_eq!(lan_subnet, "10.10.0.0/24", "custom LAN subnet must not be overwritten");
+        assert_eq!(
+            lan_subnet, "10.10.0.0/24",
+            "custom LAN subnet must not be overwritten"
+        );
 
         // Missing defaults should have been backfilled
         let total: i64 = conn
-            .query_row("SELECT COUNT(*) FROM networks WHERE zone != 'void'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM networks WHERE zone != 'void'",
+                [],
+                |r| r.get(0),
+            )
             .expect("count query failed");
-        assert_eq!(total, 4, "should have 4 non-void networks (custom LAN + 3 backfilled defaults)");
+        assert_eq!(
+            total, 4,
+            "should have 4 non-void networks (custom LAN + 3 backfilled defaults)"
+        );
     }
 }

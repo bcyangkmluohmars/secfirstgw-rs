@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tracing_subscriber::Layer;
 
 /// Maximum events buffered per client before they start dropping.
@@ -78,10 +78,10 @@ impl futures_core::Stream for EventStream {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         // Phase 1: drain history buffer first
-        if let Some(event) = self.history.pop_front() {
-            if let Ok(json) = serde_json::to_string(&event) {
-                return Poll::Ready(Some(Ok(Event::default().data(json))));
-            }
+        if let Some(event) = self.history.pop_front()
+            && let Ok(json) = serde_json::to_string(&event)
+        {
+            return Poll::Ready(Some(Ok(Event::default().data(json))));
         }
 
         // Phase 2: live events from broadcast channel

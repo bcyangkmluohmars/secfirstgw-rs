@@ -152,13 +152,20 @@ impl BoardInfo {
     /// Returns interface names assigned to WAN by default.
     #[must_use]
     pub fn wan_ifaces(&self) -> Vec<&'static str> {
-        self.ports.iter().filter(|p| p.default_zone == "wan").map(|p| p.iface).collect()
+        self.ports
+            .iter()
+            .filter(|p| p.default_zone == "wan")
+            .map(|p| p.iface)
+            .collect()
     }
 
     /// Returns the MGMT interface name, if any.
     #[must_use]
     pub fn mgmt_iface(&self) -> Option<&'static str> {
-        self.ports.iter().find(|p| p.default_zone == "mgmt").map(|p| p.iface)
+        self.ports
+            .iter()
+            .find(|p| p.default_zone == "mgmt")
+            .map(|p| p.iface)
     }
 }
 
@@ -225,41 +232,171 @@ static UDM_SWITCH: SwitchAsic = SwitchAsic {
 
 // UDM Pro / SE port definitions
 static UDMPRO_PORTS: &[PortDef] = &[
-    PortDef { label: "1", iface: "eth0", connector: Connector::Rj45, default_zone: "lan" },
-    PortDef { label: "2", iface: "eth1", connector: Connector::Rj45, default_zone: "lan" },
-    PortDef { label: "3", iface: "eth2", connector: Connector::Rj45, default_zone: "lan" },
-    PortDef { label: "4", iface: "eth3", connector: Connector::Rj45, default_zone: "lan" },
-    PortDef { label: "5", iface: "eth4", connector: Connector::Rj45, default_zone: "lan" },
-    PortDef { label: "6", iface: "eth5", connector: Connector::Rj45, default_zone: "lan" },
-    PortDef { label: "7", iface: "eth6", connector: Connector::Rj45, default_zone: "lan" },
-    PortDef { label: "8", iface: "eth7", connector: Connector::Rj45, default_zone: "mgmt" },
-    PortDef { label: "WAN", iface: "eth8", connector: Connector::Rj45, default_zone: "wan" },
-    PortDef { label: "WAN2", iface: "eth9", connector: Connector::SfpPlus, default_zone: "wan" },
-    PortDef { label: "SFP+", iface: "eth10", connector: Connector::SfpPlus, default_zone: "lan" },
+    PortDef {
+        label: "1",
+        iface: "eth0",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "2",
+        iface: "eth1",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "3",
+        iface: "eth2",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "4",
+        iface: "eth3",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "5",
+        iface: "eth4",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "6",
+        iface: "eth5",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "7",
+        iface: "eth6",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "8",
+        iface: "eth7",
+        connector: Connector::Rj45,
+        default_zone: "mgmt",
+    },
+    PortDef {
+        label: "WAN",
+        iface: "eth8",
+        connector: Connector::Rj45,
+        default_zone: "wan",
+    },
+    PortDef {
+        label: "WAN2",
+        iface: "eth9",
+        connector: Connector::SfpPlus,
+        default_zone: "wan",
+    },
+    PortDef {
+        label: "SFP+",
+        iface: "eth10",
+        connector: Connector::SfpPlus,
+        default_zone: "lan",
+    },
 ];
 
 static UDM_PORTS: &[PortDef] = &[
-    PortDef { label: "1", iface: "eth0", connector: Connector::Rj45, default_zone: "lan" },
-    PortDef { label: "2", iface: "eth1", connector: Connector::Rj45, default_zone: "lan" },
-    PortDef { label: "3", iface: "eth2", connector: Connector::Rj45, default_zone: "lan" },
-    PortDef { label: "4", iface: "eth3", connector: Connector::Rj45, default_zone: "lan" },
-    PortDef { label: "WAN", iface: "eth4", connector: Connector::Rj45, default_zone: "wan" },
-    PortDef { label: "WAN2", iface: "eth5", connector: Connector::Rj45, default_zone: "wan" },
+    PortDef {
+        label: "1",
+        iface: "eth0",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "2",
+        iface: "eth1",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "3",
+        iface: "eth2",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "4",
+        iface: "eth3",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "WAN",
+        iface: "eth4",
+        connector: Connector::Rj45,
+        default_zone: "wan",
+    },
+    PortDef {
+        label: "WAN2",
+        iface: "eth5",
+        connector: Connector::Rj45,
+        default_zone: "wan",
+    },
 ];
 
 static USG3P_PORTS: &[PortDef] = &[
-    PortDef { label: "WAN", iface: "eth0", connector: Connector::Rj45, default_zone: "wan" },
-    PortDef { label: "LAN", iface: "eth1", connector: Connector::Rj45, default_zone: "lan" },
-    PortDef { label: "VOIP", iface: "eth2", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef {
+        label: "WAN",
+        iface: "eth0",
+        connector: Connector::Rj45,
+        default_zone: "wan",
+    },
+    PortDef {
+        label: "LAN",
+        iface: "eth1",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "VOIP",
+        iface: "eth2",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
 ];
 
 static USG_PRO4_PORTS: &[PortDef] = &[
-    PortDef { label: "WAN", iface: "eth0", connector: Connector::Rj45, default_zone: "wan" },
-    PortDef { label: "LAN", iface: "eth1", connector: Connector::Rj45, default_zone: "lan" },
-    PortDef { label: "WAN2", iface: "eth2", connector: Connector::Rj45, default_zone: "wan" },
-    PortDef { label: "LAN2", iface: "eth3", connector: Connector::Rj45, default_zone: "lan" },
-    PortDef { label: "SFP1", iface: "eth4", connector: Connector::SfpPlus, default_zone: "lan" },
-    PortDef { label: "SFP2", iface: "eth5", connector: Connector::SfpPlus, default_zone: "lan" },
+    PortDef {
+        label: "WAN",
+        iface: "eth0",
+        connector: Connector::Rj45,
+        default_zone: "wan",
+    },
+    PortDef {
+        label: "LAN",
+        iface: "eth1",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "WAN2",
+        iface: "eth2",
+        connector: Connector::Rj45,
+        default_zone: "wan",
+    },
+    PortDef {
+        label: "LAN2",
+        iface: "eth3",
+        connector: Connector::Rj45,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "SFP1",
+        iface: "eth4",
+        connector: Connector::SfpPlus,
+        default_zone: "lan",
+    },
+    PortDef {
+        label: "SFP2",
+        iface: "eth5",
+        connector: Connector::SfpPlus,
+        default_zone: "lan",
+    },
 ];
 
 /// Detect the Ubiquiti board model by reading `/proc/ubnthal/board` and
@@ -276,11 +413,35 @@ pub fn detect_board() -> Option<BoardInfo> {
         .map(|v| v.trim().to_string())?;
 
     let (model, short_name, port_count, ports, switch) = match board_id.as_str() {
-        "ea15" => ("UniFi Dream Machine Pro", "UDM Pro", 11, UDMPRO_PORTS, Some(&UDMPRO_SWITCH)),
-        "ea22" => ("UniFi Dream Machine SE", "UDM SE", 11, UDMPRO_PORTS, Some(&UDMPRO_SWITCH)),
-        "ea21" => ("UniFi Dream Machine", "UDM", 6, UDM_PORTS, Some(&UDM_SWITCH)),
+        "ea15" => (
+            "UniFi Dream Machine Pro",
+            "UDM Pro",
+            11,
+            UDMPRO_PORTS,
+            Some(&UDMPRO_SWITCH),
+        ),
+        "ea22" => (
+            "UniFi Dream Machine SE",
+            "UDM SE",
+            11,
+            UDMPRO_PORTS,
+            Some(&UDMPRO_SWITCH),
+        ),
+        "ea21" => (
+            "UniFi Dream Machine",
+            "UDM",
+            6,
+            UDM_PORTS,
+            Some(&UDM_SWITCH),
+        ),
         "e610" => ("UniFi Security Gateway 3P", "USG 3P", 3, USG3P_PORTS, None),
-        "e612" => ("UniFi Security Gateway Pro 4", "USG Pro 4", 6, USG_PRO4_PORTS, None),
+        "e612" => (
+            "UniFi Security Gateway Pro 4",
+            "USG Pro 4",
+            6,
+            USG_PRO4_PORTS,
+            None,
+        ),
         _ => return None,
     };
 

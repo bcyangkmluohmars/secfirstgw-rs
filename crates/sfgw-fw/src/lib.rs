@@ -549,12 +549,11 @@ pub async fn load_interface_zones(db: &sfgw_db::Db) -> Result<Vec<ZonePolicy>, F
 
     for (zone_name, (vlan_id, ifaces)) in internal_map {
         // For bridged zones, replace individual port interfaces with the bridge.
-        let effective_ifaces =
-            if zone_name != "void" && bridged_zones.contains(&zone_name) {
-                vec![format!("br-{zone_name}")]
-            } else {
-                ifaces
-            };
+        let effective_ifaces = if zone_name != "void" && bridged_zones.contains(&zone_name) {
+            vec![format!("br-{zone_name}")]
+        } else {
+            ifaces
+        };
 
         // Skip void zone — VLAN 1 is DROP-only, not a routable zone.
         if zone_name == "void" {
@@ -577,7 +576,10 @@ pub async fn load_interface_zones(db: &sfgw_db::Db) -> Result<Vec<ZonePolicy>, F
         });
     }
 
-    tracing::info!("loaded {} zone policies from database (PVID-based)", zones.len());
+    tracing::info!(
+        "loaded {} zone policies from database (PVID-based)",
+        zones.len()
+    );
     Ok(zones)
 }
 

@@ -1259,10 +1259,7 @@ async fn interface_create_vlan(
     };
     // pvid for the new VLAN sub-interface defaults to the VLAN ID itself
     // (the sub-interface carries exactly that VLAN as its native VLAN).
-    let pvid = body
-        .get("pvid")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(vlan_id);
+    let pvid = body.get("pvid").and_then(|v| v.as_i64()).unwrap_or(vlan_id);
     if pvid != 0 && !(1..=4094).contains(&pvid) {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1346,7 +1343,9 @@ async fn interface_delete(
     if !name.contains('.') {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({ "error": "cannot delete physical interfaces, only VLAN sub-interfaces (name must contain a dot)" })),
+            Json(
+                json!({ "error": "cannot delete physical interfaces, only VLAN sub-interfaces (name must contain a dot)" }),
+            ),
         );
     }
 
@@ -2344,10 +2343,7 @@ async fn users_change_password(
 /// This is defense-in-depth: queries are parameterized so SQL injection is not
 /// possible, but we still reject clearly malformed names before touching the DB.
 fn is_valid_port_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.contains('.')
-        && !name.contains('/')
-        && !name.contains('\\')
+    !name.is_empty() && !name.contains('.') && !name.contains('/') && !name.contains('\\')
 }
 
 /// GET /api/v1/ports/{name}
@@ -2469,7 +2465,9 @@ async fn port_update_handler(
                         None => {
                             return (
                                 StatusCode::UNPROCESSABLE_ENTITY,
-                                Json(json!({ "error": "tagged_vlans must be an array of integers" })),
+                                Json(
+                                    json!({ "error": "tagged_vlans must be an array of integers" }),
+                                ),
                             );
                         }
                     }
@@ -2639,18 +2637,17 @@ async fn zone_get_handler(
 
     // Find interfaces with pvid matching this zone's vlan_id
     let interfaces: Vec<String> = if let Some(vid) = vlan_id {
-        let mut stmt = match conn.prepare(
-            "SELECT name FROM interfaces WHERE pvid = ?1 ORDER BY name",
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("zone_get_handler interface query prepare error: {e}");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "internal server error" })),
-                );
-            }
-        };
+        let mut stmt =
+            match conn.prepare("SELECT name FROM interfaces WHERE pvid = ?1 ORDER BY name") {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("zone_get_handler interface query prepare error: {e}");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "internal server error" })),
+                    );
+                }
+            };
         match stmt.query_map(rusqlite::params![vid], |row| row.get::<_, String>(0)) {
             Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
             Err(e) => {
@@ -2765,7 +2762,11 @@ mod tests {
 
         assert_eq!(pvid, 3001, "pvid must be 3001 after update");
         let tagged: Vec<i64> = serde_json::from_str(&tagged_json).expect("json parse failed");
-        assert_eq!(tagged, vec![10, 20], "tagged_vlans must be [10,20] after update");
+        assert_eq!(
+            tagged,
+            vec![10, 20],
+            "tagged_vlans must be [10,20] after update"
+        );
     }
 
     // ── Port PUT validation ───────────────────────────────────────────
@@ -2874,8 +2875,15 @@ mod tests {
             .filter_map(|r| r.ok())
             .collect();
 
-        assert_eq!(iface_names, vec!["eth1", "eth2"], "only eth1 and eth2 should be in LAN zone");
-        assert!(!iface_names.contains(&"eth3".to_string()), "eth3 must not be in LAN zone");
+        assert_eq!(
+            iface_names,
+            vec!["eth1", "eth2"],
+            "only eth1 and eth2 should be in LAN zone"
+        );
+        assert!(
+            !iface_names.contains(&"eth3".to_string()),
+            "eth3 must not be in LAN zone"
+        );
     }
 
     // ── Port name validation ──────────────────────────────────────────

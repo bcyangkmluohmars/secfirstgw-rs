@@ -50,8 +50,7 @@ use crate::{Display, DisplayError, StatusInfo};
 const SERIAL_DEVICE: &str = "/dev/ttyACM0";
 
 /// Symlink path used by udev for the Ubiquiti LCD UART.
-const SERIAL_DEVICE_BY_ID: &str =
-    "/dev/serial/by-id/usb-Ubiquiti_Inc._Ulcd_application-if00";
+const SERIAL_DEVICE_BY_ID: &str = "/dev/serial/by-id/usb-Ubiquiti_Inc._Ulcd_application-if00";
 
 /// Baud rate for the UDM Pro MCU serial protocol.
 const BAUD_RATE: u32 = 115_200;
@@ -166,9 +165,10 @@ struct SerialPort {
 impl LcmDisplay {
     /// Send a JSON message to the MCU and return the first response.
     fn send(&self, payload: &serde_json::Value) -> Result<serde_json::Value, DisplayError> {
-        let mut port = self.port.lock().map_err(|e| {
-            DisplayError::Internal(anyhow::anyhow!("serial lock poisoned: {e}"))
-        })?;
+        let mut port = self
+            .port
+            .lock()
+            .map_err(|e| DisplayError::Internal(anyhow::anyhow!("serial lock poisoned: {e}")))?;
 
         let id = next_id();
         let mut msg = payload.clone();
@@ -176,9 +176,8 @@ impl LcmDisplay {
             .ok_or_else(|| DisplayError::Internal(anyhow::anyhow!("payload must be object")))?
             .insert("id".to_string(), serde_json::json!(id));
 
-        let mut line = serde_json::to_string(&msg).map_err(|e| {
-            DisplayError::Internal(anyhow::anyhow!("json serialize: {e}"))
-        })?;
+        let mut line = serde_json::to_string(&msg)
+            .map_err(|e| DisplayError::Internal(anyhow::anyhow!("json serialize: {e}")))?;
         line.push('\n');
 
         // Write to fd
@@ -379,10 +378,7 @@ impl LcmDisplay {
                 // Give the display time to settle after init
                 std::thread::sleep(Duration::from_secs(3));
 
-                let display = LcmDisplay {
-                    port,
-                    config,
-                };
+                let display = LcmDisplay { port, config };
 
                 loop {
                     if let Err(e) = display.update_stats() {
@@ -496,9 +492,8 @@ fn open_serial(config: &LcmBoardConfig) -> Result<LcmDisplay, DisplayError> {
     configure_serial(&owned_fd)?;
 
     // Create a dup'd fd for the reader so read and write are independent
-    let reader_fd = nix::unistd::dup(fd).map_err(|e| {
-        DisplayError::Internal(anyhow::anyhow!("dup serial fd: {e}"))
-    })?;
+    let reader_fd = nix::unistd::dup(fd)
+        .map_err(|e| DisplayError::Internal(anyhow::anyhow!("dup serial fd: {e}")))?;
 
     // SAFETY: reader_fd is valid, just created by dup.
     #[allow(unsafe_code)]
@@ -522,9 +517,8 @@ fn configure_serial(fd: &std::os::fd::OwnedFd) -> Result<(), DisplayError> {
     use std::os::fd::AsFd;
 
     let borrowed = fd.as_fd();
-    let mut termios = termios::tcgetattr(borrowed).map_err(|e| {
-        DisplayError::Internal(anyhow::anyhow!("tcgetattr: {e}"))
-    })?;
+    let mut termios = termios::tcgetattr(borrowed)
+        .map_err(|e| DisplayError::Internal(anyhow::anyhow!("tcgetattr: {e}")))?;
 
     // Raw mode — no echo, no signals, no canonical processing
     termios::cfmakeraw(&mut termios);
@@ -535,22 +529,19 @@ fn configure_serial(fd: &std::os::fd::OwnedFd) -> Result<(), DisplayError> {
         9600 => BaudRate::B9600,
         _ => BaudRate::B115200,
     };
-    termios::cfsetspeed(&mut termios, baud).map_err(|e| {
-        DisplayError::Internal(anyhow::anyhow!("cfsetspeed: {e}"))
-    })?;
+    termios::cfsetspeed(&mut termios, baud)
+        .map_err(|e| DisplayError::Internal(anyhow::anyhow!("cfsetspeed: {e}")))?;
 
     // VMIN=0, VTIME=10 (1 second timeout for reads)
     termios.control_chars[nix::sys::termios::SpecialCharacterIndices::VMIN as usize] = 0;
     termios.control_chars[nix::sys::termios::SpecialCharacterIndices::VTIME as usize] = 10;
 
-    termios::tcsetattr(borrowed, SetArg::TCSANOW, &termios).map_err(|e| {
-        DisplayError::Internal(anyhow::anyhow!("tcsetattr: {e}"))
-    })?;
+    termios::tcsetattr(borrowed, SetArg::TCSANOW, &termios)
+        .map_err(|e| DisplayError::Internal(anyhow::anyhow!("tcsetattr: {e}")))?;
 
     // Drain any pending data
-    termios::tcflush(borrowed, termios::FlushArg::TCIOFLUSH).map_err(|e| {
-        DisplayError::Internal(anyhow::anyhow!("tcflush: {e}"))
-    })?;
+    termios::tcflush(borrowed, termios::FlushArg::TCIOFLUSH)
+        .map_err(|e| DisplayError::Internal(anyhow::anyhow!("tcflush: {e}")))?;
 
     Ok(())
 }
@@ -588,11 +579,15 @@ fn read_mem_percent() -> u32 {
 
     for line in content.lines() {
         if let Some(val) = line.strip_prefix("MemTotal:") {
-            total = val.trim().split_whitespace().next()
+            total = val
+                .split_whitespace()
+                .next()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
         } else if let Some(val) = line.strip_prefix("MemAvailable:") {
-            available = val.trim().split_whitespace().next()
+            available = val
+                .split_whitespace()
+                .next()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
         }

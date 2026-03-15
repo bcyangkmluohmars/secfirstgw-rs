@@ -348,11 +348,9 @@ mod tests {
         .expect("insert with explicit pvid should succeed — column must exist");
 
         let pvid: i64 = conn
-            .query_row(
-                "SELECT pvid FROM interfaces WHERE name = 'eth0'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT pvid FROM interfaces WHERE name = 'eth0'", [], |r| {
+                r.get(0)
+            })
             .expect("pvid should be readable from interfaces table");
 
         assert_eq!(pvid, 10, "pvid should be 10 as inserted");
@@ -366,11 +364,9 @@ mod tests {
             .expect("open_in_memory should succeed");
         let conn = db.lock().await;
 
-        let result = conn.query_row(
-            "SELECT role FROM interfaces LIMIT 1",
-            [],
-            |r| r.get::<_, String>(0),
-        );
+        let result = conn.query_row("SELECT role FROM interfaces LIMIT 1", [], |r| {
+            r.get::<_, String>(0)
+        });
 
         assert!(
             result.is_err(),
@@ -430,29 +426,26 @@ mod tests {
 
         // Verify interfaces.pvid = 10
         let pvid: i64 = conn
-            .query_row(
-                "SELECT pvid FROM interfaces WHERE name = 'eth0'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT pvid FROM interfaces WHERE name = 'eth0'", [], |r| {
+                r.get(0)
+            })
             .expect("pvid should exist after migration 005");
         assert_eq!(pvid, 10, "lan interface should get pvid=10");
 
         // Verify role column is gone
-        let role_result = conn.query_row(
-            "SELECT role FROM interfaces LIMIT 1",
-            [],
-            |r| r.get::<_, String>(0),
+        let role_result = conn.query_row("SELECT role FROM interfaces LIMIT 1", [], |r| {
+            r.get::<_, String>(0)
+        });
+        assert!(
+            role_result.is_err(),
+            "role column must not exist after migration 005"
         );
-        assert!(role_result.is_err(), "role column must not exist after migration 005");
 
         // Verify LAN network vlan_id updated to 10
         let vlan_id: i64 = conn
-            .query_row(
-                "SELECT vlan_id FROM networks WHERE zone = 'lan'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT vlan_id FROM networks WHERE zone = 'lan'", [], |r| {
+                r.get(0)
+            })
             .expect("LAN network row should still exist");
         assert_eq!(vlan_id, 10, "LAN network vlan_id should be updated to 10");
     }
@@ -515,13 +508,14 @@ mod tests {
             .expect("migration 005 should apply cleanly");
 
         let pvid: i64 = conn
-            .query_row(
-                "SELECT pvid FROM interfaces WHERE name = 'eth0'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT pvid FROM interfaces WHERE name = 'eth0'", [], |r| {
+                r.get(0)
+            })
             .expect("pvid must exist after migration 005");
 
-        assert_eq!(pvid, 0, "WAN interface must get pvid=0 (not an internal VLAN port)");
+        assert_eq!(
+            pvid, 0,
+            "WAN interface must get pvid=0 (not an internal VLAN port)"
+        );
     }
 }

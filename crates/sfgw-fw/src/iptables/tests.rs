@@ -914,29 +914,38 @@ fn test_vlan1_void_drop_rules() {
 
     // eth0.1 and ppp0.1 are the WAN VLAN 1 sub-interfaces.
     assert!(
-        config.contains("-A SFGW-INPUT -i eth0.1 -j DROP -m comment --comment \"VLAN 1 void DROP\""),
+        config
+            .contains("-A SFGW-INPUT -i eth0.1 -j DROP -m comment --comment \"VLAN 1 void DROP\""),
         "VLAN 1 DROP missing on eth0 INPUT"
     );
     assert!(
-        config.contains("-A SFGW-FORWARD -i eth0.1 -j DROP -m comment --comment \"VLAN 1 void DROP\""),
+        config.contains(
+            "-A SFGW-FORWARD -i eth0.1 -j DROP -m comment --comment \"VLAN 1 void DROP\""
+        ),
         "VLAN 1 DROP missing on eth0 FORWARD"
     );
     assert!(
-        config.contains("-A SFGW-INPUT -i ppp0.1 -j DROP -m comment --comment \"VLAN 1 void DROP\""),
+        config
+            .contains("-A SFGW-INPUT -i ppp0.1 -j DROP -m comment --comment \"VLAN 1 void DROP\""),
         "VLAN 1 DROP missing on ppp0 INPUT"
     );
     assert!(
-        config.contains("-A SFGW-FORWARD -i ppp0.1 -j DROP -m comment --comment \"VLAN 1 void DROP\""),
+        config.contains(
+            "-A SFGW-FORWARD -i ppp0.1 -j DROP -m comment --comment \"VLAN 1 void DROP\""
+        ),
         "VLAN 1 DROP missing on ppp0 FORWARD"
     );
 
     // br-void defense-in-depth.
     assert!(
-        config.contains("-A SFGW-INPUT -i br-void -j DROP -m comment --comment \"VLAN 1 void DROP\""),
+        config
+            .contains("-A SFGW-INPUT -i br-void -j DROP -m comment --comment \"VLAN 1 void DROP\""),
         "VLAN 1 void DROP missing for br-void INPUT"
     );
     assert!(
-        config.contains("-A SFGW-FORWARD -i br-void -j DROP -m comment --comment \"VLAN 1 void DROP\""),
+        config.contains(
+            "-A SFGW-FORWARD -i br-void -j DROP -m comment --comment \"VLAN 1 void DROP\""
+        ),
         "VLAN 1 void DROP missing for br-void FORWARD"
     );
 }
@@ -948,33 +957,45 @@ fn test_internal_vlans_blocked_on_wan() {
 
     // VLAN 10 (LAN) must not appear on eth0 or ppp0.
     assert!(
-        config.contains("-A SFGW-INPUT -i eth0.10 -j DROP -m comment --comment \"no internal VLAN on WAN\""),
+        config.contains(
+            "-A SFGW-INPUT -i eth0.10 -j DROP -m comment --comment \"no internal VLAN on WAN\""
+        ),
         "LAN VLAN 10 not blocked on eth0 INPUT"
     );
     assert!(
-        config.contains("-A SFGW-FORWARD -i eth0.10 -j DROP -m comment --comment \"no internal VLAN on WAN\""),
+        config.contains(
+            "-A SFGW-FORWARD -i eth0.10 -j DROP -m comment --comment \"no internal VLAN on WAN\""
+        ),
         "LAN VLAN 10 not blocked on eth0 FORWARD"
     );
     assert!(
-        config.contains("-A SFGW-INPUT -i ppp0.10 -j DROP -m comment --comment \"no internal VLAN on WAN\""),
+        config.contains(
+            "-A SFGW-INPUT -i ppp0.10 -j DROP -m comment --comment \"no internal VLAN on WAN\""
+        ),
         "LAN VLAN 10 not blocked on ppp0 INPUT"
     );
 
     // VLAN 3000 (MGMT) must be blocked on WAN.
     assert!(
-        config.contains("-A SFGW-INPUT -i eth0.3000 -j DROP -m comment --comment \"no internal VLAN on WAN\""),
+        config.contains(
+            "-A SFGW-INPUT -i eth0.3000 -j DROP -m comment --comment \"no internal VLAN on WAN\""
+        ),
         "MGMT VLAN 3000 not blocked on eth0"
     );
 
     // VLAN 3001 (GUEST) must be blocked on WAN.
     assert!(
-        config.contains("-A SFGW-INPUT -i eth0.3001 -j DROP -m comment --comment \"no internal VLAN on WAN\""),
+        config.contains(
+            "-A SFGW-INPUT -i eth0.3001 -j DROP -m comment --comment \"no internal VLAN on WAN\""
+        ),
         "GUEST VLAN 3001 not blocked on eth0"
     );
 
     // VLAN 3002 (DMZ) must be blocked on WAN.
     assert!(
-        config.contains("-A SFGW-INPUT -i eth0.3002 -j DROP -m comment --comment \"no internal VLAN on WAN\""),
+        config.contains(
+            "-A SFGW-INPUT -i eth0.3002 -j DROP -m comment --comment \"no internal VLAN on WAN\""
+        ),
         "DMZ VLAN 3002 not blocked on eth0"
     );
 }
@@ -996,7 +1017,8 @@ fn test_lan_zone_uses_vlan10_bridge() {
         "LAN zone must NOT reference br-1 (VLAN 1 bridge)"
     );
     assert!(
-        !config.contains("-i br-void ") || config.contains("-j DROP -m comment --comment \"VLAN 1 void DROP\""),
+        !config.contains("-i br-void ")
+            || config.contains("-j DROP -m comment --comment \"VLAN 1 void DROP\""),
         "br-void may only appear in DROP rules"
     );
 
@@ -1016,20 +1038,51 @@ fn test_lan_zone_uses_vlan10_bridge() {
 fn test_zone_policy_has_vlan_id() {
     let zones = test_zones();
 
-    let wan = zones.iter().find(|z| z.zone == crate::FirewallZone::Wan).unwrap();
+    let wan = zones
+        .iter()
+        .find(|z| z.zone == crate::FirewallZone::Wan)
+        .unwrap();
     assert_eq!(wan.vlan_id, None, "WAN zone must have vlan_id: None");
 
-    let lan = zones.iter().find(|z| z.zone == crate::FirewallZone::Lan).unwrap();
-    assert_eq!(lan.vlan_id, Some(10), "LAN zone must have vlan_id: Some(10)");
+    let lan = zones
+        .iter()
+        .find(|z| z.zone == crate::FirewallZone::Lan)
+        .unwrap();
+    assert_eq!(
+        lan.vlan_id,
+        Some(10),
+        "LAN zone must have vlan_id: Some(10)"
+    );
 
-    let mgmt = zones.iter().find(|z| z.zone == crate::FirewallZone::Mgmt).unwrap();
-    assert_eq!(mgmt.vlan_id, Some(3000), "MGMT zone must have vlan_id: Some(3000)");
+    let mgmt = zones
+        .iter()
+        .find(|z| z.zone == crate::FirewallZone::Mgmt)
+        .unwrap();
+    assert_eq!(
+        mgmt.vlan_id,
+        Some(3000),
+        "MGMT zone must have vlan_id: Some(3000)"
+    );
 
-    let guest = zones.iter().find(|z| z.zone == crate::FirewallZone::Guest).unwrap();
-    assert_eq!(guest.vlan_id, Some(3001), "GUEST zone must have vlan_id: Some(3001)");
+    let guest = zones
+        .iter()
+        .find(|z| z.zone == crate::FirewallZone::Guest)
+        .unwrap();
+    assert_eq!(
+        guest.vlan_id,
+        Some(3001),
+        "GUEST zone must have vlan_id: Some(3001)"
+    );
 
-    let dmz = zones.iter().find(|z| z.zone == crate::FirewallZone::Dmz).unwrap();
-    assert_eq!(dmz.vlan_id, Some(3002), "DMZ zone must have vlan_id: Some(3002)");
+    let dmz = zones
+        .iter()
+        .find(|z| z.zone == crate::FirewallZone::Dmz)
+        .unwrap();
+    assert_eq!(
+        dmz.vlan_id,
+        Some(3002),
+        "DMZ zone must have vlan_id: Some(3002)"
+    );
 }
 
 /// VLAN isolation rules appear BEFORE zone-specific rules in the generated ruleset.
@@ -1037,8 +1090,12 @@ fn test_zone_policy_has_vlan_id() {
 fn test_vlan_isolation_rules_appear_before_zone_rules() {
     let config = generate_zone_ruleset(&test_zones(), &[], &FirewallPolicy::default(), &[]);
 
-    let void_drop_pos = config.find("VLAN 1 void DROP").expect("VLAN 1 void DROP must be present");
-    let wan_zone_rules_pos = config.find("WAN zone rules").expect("WAN zone rules section must be present");
+    let void_drop_pos = config
+        .find("VLAN 1 void DROP")
+        .expect("VLAN 1 void DROP must be present");
+    let wan_zone_rules_pos = config
+        .find("WAN zone rules")
+        .expect("WAN zone rules section must be present");
 
     assert!(
         void_drop_pos < wan_zone_rules_pos,

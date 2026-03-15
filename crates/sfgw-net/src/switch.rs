@@ -189,7 +189,11 @@ async fn load_port_vlan_config(db: &sfgw_db::Db) -> Result<Vec<PortVlanConfig>> 
         let (name, pvid_raw, tagged_json) = row.context("failed to read port VLAN config row")?;
         let pvid = pvid_raw.clamp(1, u16::MAX as i32) as u16;
         let tagged_vlans: Vec<u16> = serde_json::from_str(&tagged_json).unwrap_or_default();
-        ports.push(PortVlanConfig { name, pvid, tagged_vlans });
+        ports.push(PortVlanConfig {
+            name,
+            pvid,
+            tagged_vlans,
+        });
     }
 
     Ok(ports)
@@ -240,23 +244,35 @@ fn compute_vlan_port_map(
         };
 
         // PVID VLAN → untagged
-        map.entry(port_cfg.pvid).or_default().push(PortMember { port: switch_port, tagged: false });
+        map.entry(port_cfg.pvid).or_default().push(PortMember {
+            port: switch_port,
+            tagged: false,
+        });
 
         // Tagged VLANs → tagged
         for &vid in &port_cfg.tagged_vlans {
-            map.entry(vid).or_default().push(PortMember { port: switch_port, tagged: true });
+            map.entry(vid).or_default().push(PortMember {
+                port: switch_port,
+                tagged: true,
+            });
         }
     }
 
     // Add CPU port as tagged to every VLAN we've collected so far.
     for members in map.values_mut() {
-        members.push(PortMember { port: sw.cpu_port, tagged: true });
+        members.push(PortMember {
+            port: sw.cpu_port,
+            tagged: true,
+        });
     }
 
     // Add internal ports as tagged to every VLAN.
     for members in map.values_mut() {
         for &ip in &sw.internal_ports {
-            members.push(PortMember { port: ip, tagged: true });
+            members.push(PortMember {
+                port: ip,
+                tagged: true,
+            });
         }
     }
 
@@ -267,14 +283,26 @@ fn compute_vlan_port_map(
         let mut vlan1_members: Vec<PortMember> = sw
             .lan_ports
             .iter()
-            .map(|&p| PortMember { port: p, tagged: true })
+            .map(|&p| PortMember {
+                port: p,
+                tagged: true,
+            })
             .collect();
         if let Some(mp) = sw.mgmt_port {
-            vlan1_members.push(PortMember { port: mp, tagged: true });
+            vlan1_members.push(PortMember {
+                port: mp,
+                tagged: true,
+            });
         }
-        vlan1_members.push(PortMember { port: sw.cpu_port, tagged: true });
+        vlan1_members.push(PortMember {
+            port: sw.cpu_port,
+            tagged: true,
+        });
         for &ip in &sw.internal_ports {
-            vlan1_members.push(PortMember { port: ip, tagged: true });
+            vlan1_members.push(PortMember {
+                port: ip,
+                tagged: true,
+            });
         }
         vlan1_members
     });
@@ -289,7 +317,13 @@ fn compute_vlan_port_map(
 fn format_port_string(members: &[PortMember]) -> String {
     members
         .iter()
-        .map(|m| if m.tagged { format!("{}t", m.port) } else { format!("{}", m.port) })
+        .map(|m| {
+            if m.tagged {
+                format!("{}t", m.port)
+            } else {
+                format!("{}", m.port)
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -548,19 +582,18 @@ pub async fn verify_switch_config(db: &sfgw_db::Db) -> bool {
     // Compare expected vs actual PVIDs
     let mut drifted = false;
     for port_cfg in &port_configs {
-        if let Some(switch_port) = iface_to_switch_port(&port_cfg.name, &switch_layout) {
-            if let Some(actual_pvid) = swconfig_get_pvid(&switch_layout.device, switch_port) {
-                if actual_pvid != port_cfg.pvid {
-                    tracing::warn!(
-                        port = switch_port,
-                        iface = %port_cfg.name,
-                        expected = port_cfg.pvid,
-                        actual = actual_pvid,
-                        "switch ASIC PVID drift detected"
-                    );
-                    drifted = true;
-                }
-            }
+        if let Some(switch_port) = iface_to_switch_port(&port_cfg.name, &switch_layout)
+            && let Some(actual_pvid) = swconfig_get_pvid(&switch_layout.device, switch_port)
+            && actual_pvid != port_cfg.pvid
+        {
+            tracing::warn!(
+                port = switch_port,
+                iface = %port_cfg.name,
+                expected = port_cfg.pvid,
+                actual = actual_pvid,
+                "switch ASIC PVID drift detected"
+            );
+            drifted = true;
         }
     }
 
@@ -608,7 +641,10 @@ pub async fn verify_switch_config(db: &sfgw_db::Db) -> bool {
 pub async fn watchdog_loop(db: sfgw_db::Db) {
     let interval = std::time::Duration::from_secs(10);
     let mut timer = tokio::time::interval(interval);
-    tracing::info!("switch ASIC watchdog started ({}s interval)", interval.as_secs());
+    tracing::info!(
+        "switch ASIC watchdog started ({}s interval)",
+        interval.as_secs()
+    );
     loop {
         timer.tick().await;
         verify_switch_config(&db).await;
@@ -836,10 +872,22 @@ mod tests {
     #[test]
     fn test_format_port_string() {
         let members = vec![
-            PortMember { port: 0, tagged: false },
-            PortMember { port: 1, tagged: false },
-            PortMember { port: 7, tagged: true },
-            PortMember { port: 8, tagged: true },
+            PortMember {
+                port: 0,
+                tagged: false,
+            },
+            PortMember {
+                port: 1,
+                tagged: false,
+            },
+            PortMember {
+                port: 7,
+                tagged: true,
+            },
+            PortMember {
+                port: 8,
+                tagged: true,
+            },
         ];
         assert_eq!(format_port_string(&members), "0 1 7t 8t");
     }
@@ -847,9 +895,18 @@ mod tests {
     #[test]
     fn test_format_port_string_all_tagged() {
         let members = vec![
-            PortMember { port: 0, tagged: true },
-            PortMember { port: 7, tagged: true },
-            PortMember { port: 8, tagged: true },
+            PortMember {
+                port: 0,
+                tagged: true,
+            },
+            PortMember {
+                port: 7,
+                tagged: true,
+            },
+            PortMember {
+                port: 8,
+                tagged: true,
+            },
         ];
         assert_eq!(format_port_string(&members), "0t 7t 8t");
     }
@@ -880,19 +937,40 @@ mod tests {
         let vlan10 = map.get(&10).expect("VLAN 10 should exist");
         for port in 0u8..=6 {
             assert!(
-                vlan10.contains(&PortMember { port, tagged: false }),
+                vlan10.contains(&PortMember {
+                    port,
+                    tagged: false
+                }),
                 "port {port} should be untagged in VLAN 10"
             );
         }
-        assert!(vlan10.contains(&PortMember { port: 8, tagged: true }), "CPU port in VLAN 10");
-        assert!(vlan10.contains(&PortMember { port: 9, tagged: true }), "internal port in VLAN 10");
+        assert!(
+            vlan10.contains(&PortMember {
+                port: 8,
+                tagged: true
+            }),
+            "CPU port in VLAN 10"
+        );
+        assert!(
+            vlan10.contains(&PortMember {
+                port: 9,
+                tagged: true
+            }),
+            "internal port in VLAN 10"
+        );
         // MGMT port 7 must NOT be in VLAN 10
         assert!(
-            !vlan10.contains(&PortMember { port: 7, tagged: false }),
+            !vlan10.contains(&PortMember {
+                port: 7,
+                tagged: false
+            }),
             "MGMT port must not be untagged in VLAN 10"
         );
         assert!(
-            !vlan10.contains(&PortMember { port: 7, tagged: true }),
+            !vlan10.contains(&PortMember {
+                port: 7,
+                tagged: true
+            }),
             "MGMT port must not be tagged in VLAN 10"
         );
 
@@ -900,15 +978,32 @@ mod tests {
         // Ports 0–6 must NOT be in VLAN 3000 (they don't have 3000 in tagged_vlans)
         let vlan3000 = map.get(&3000).expect("VLAN 3000 should exist");
         assert!(
-            vlan3000.contains(&PortMember { port: 7, tagged: false }),
+            vlan3000.contains(&PortMember {
+                port: 7,
+                tagged: false
+            }),
             "MGMT port 7 should be untagged in VLAN 3000"
         );
-        assert!(vlan3000.contains(&PortMember { port: 8, tagged: true }), "CPU in VLAN 3000");
-        assert!(vlan3000.contains(&PortMember { port: 9, tagged: true }), "internal in VLAN 3000");
+        assert!(
+            vlan3000.contains(&PortMember {
+                port: 8,
+                tagged: true
+            }),
+            "CPU in VLAN 3000"
+        );
+        assert!(
+            vlan3000.contains(&PortMember {
+                port: 9,
+                tagged: true
+            }),
+            "internal in VLAN 3000"
+        );
         for port in 0u8..=6 {
             assert!(
-                !vlan3000.contains(&PortMember { port, tagged: false })
-                    && !vlan3000.contains(&PortMember { port, tagged: true }),
+                !vlan3000.contains(&PortMember {
+                    port,
+                    tagged: false
+                }) && !vlan3000.contains(&PortMember { port, tagged: true }),
                 "LAN port {port} must not be in VLAN 3000"
             );
         }
@@ -938,18 +1033,33 @@ mod tests {
 
         // VLAN 10: port 0 untagged
         let vlan10 = map.get(&10).expect("VLAN 10 should exist");
-        assert!(vlan10.contains(&PortMember { port: 0, tagged: false }));
+        assert!(vlan10.contains(&PortMember {
+            port: 0,
+            tagged: false
+        }));
         // CPU and internal always tagged
-        assert!(vlan10.contains(&PortMember { port: 8, tagged: true }));
-        assert!(vlan10.contains(&PortMember { port: 9, tagged: true }));
+        assert!(vlan10.contains(&PortMember {
+            port: 8,
+            tagged: true
+        }));
+        assert!(vlan10.contains(&PortMember {
+            port: 9,
+            tagged: true
+        }));
 
         // VLAN 3000: port 0 tagged
         let vlan3000 = map.get(&3000).expect("VLAN 3000 should exist");
-        assert!(vlan3000.contains(&PortMember { port: 0, tagged: true }));
+        assert!(vlan3000.contains(&PortMember {
+            port: 0,
+            tagged: true
+        }));
 
         // VLAN 3001: port 0 tagged
         let vlan3001 = map.get(&3001).expect("VLAN 3001 should exist");
-        assert!(vlan3001.contains(&PortMember { port: 0, tagged: true }));
+        assert!(vlan3001.contains(&PortMember {
+            port: 0,
+            tagged: true
+        }));
     }
 
     #[test]
@@ -996,9 +1106,15 @@ mod tests {
         // So they should only appear via cpu_port/internal_ports (always tagged).
         let vlan10 = map.get(&10).unwrap();
         // Port 0 untagged (from config)
-        assert!(vlan10.contains(&PortMember { port: 0, tagged: false }));
+        assert!(vlan10.contains(&PortMember {
+            port: 0,
+            tagged: false
+        }));
         // Port 8 (cpu) tagged — not as a "WAN port"
-        assert!(vlan10.contains(&PortMember { port: 8, tagged: true }));
+        assert!(vlan10.contains(&PortMember {
+            port: 8,
+            tagged: true
+        }));
         // WAN interfaces ethN where N is not in lan_ports/mgmt_port don't appear untagged
         // This is verified implicitly: eth8 → iface_to_switch_port returns None
     }
@@ -1028,7 +1144,10 @@ mod tests {
         let vlan3000 = map.get(&3000).expect("VLAN 3000 must exist");
         // Port 7 must be untagged in VLAN 3000
         assert!(
-            vlan3000.contains(&PortMember { port: 7, tagged: false }),
+            vlan3000.contains(&PortMember {
+                port: 7,
+                tagged: false
+            }),
             "MGMT port 7 must be untagged in VLAN 3000"
         );
         // LAN ports 0–6 must not appear in VLAN 3000
@@ -1056,7 +1175,9 @@ mod tests {
     /// - PVIDs: port 0–6 = 10, port 7 = 3000
     #[tokio::test]
     async fn test_setup_switch_vlans_produces_correct_commands() {
-        let db = sfgw_db::open_in_memory().await.expect("failed to open in-memory db");
+        let db = sfgw_db::open_in_memory()
+            .await
+            .expect("failed to open in-memory db");
         let sw = udm_pro_layout();
 
         // Insert interface rows (simulating what configure() would populate).
@@ -1072,8 +1193,8 @@ mod tests {
                 ("eth5", 10, "[]"),
                 ("eth6", 10, "[]"),
                 ("eth7", 3000, "[]"),
-                ("eth8", 0, "[]"),  // WAN: excluded
-                ("eth9", 0, "[]"),  // WAN: excluded
+                ("eth8", 0, "[]"), // WAN: excluded
+                ("eth9", 0, "[]"), // WAN: excluded
             ];
             for (name, pvid, tagged) in ifaces {
                 conn.execute(
@@ -1086,11 +1207,15 @@ mod tests {
         }
 
         // Load per-port config (WAN excluded by pvid > 0 filter)
-        let port_configs = load_port_vlan_config(&db).await.expect("load_port_vlan_config failed");
+        let port_configs = load_port_vlan_config(&db)
+            .await
+            .expect("load_port_vlan_config failed");
 
         // Verify WAN ports excluded
         assert!(
-            !port_configs.iter().any(|p| p.name == "eth8" || p.name == "eth9"),
+            !port_configs
+                .iter()
+                .any(|p| p.name == "eth8" || p.name == "eth9"),
             "WAN ports must be excluded from port VLAN config"
         );
         assert_eq!(port_configs.len(), 8, "should have 8 non-WAN ports");
@@ -1111,28 +1236,69 @@ mod tests {
         let vlan10 = vlan_map.get(&10).expect("VLAN 10 must exist");
         for port in 0u8..=6 {
             assert!(
-                vlan10.contains(&PortMember { port, tagged: false }),
+                vlan10.contains(&PortMember {
+                    port,
+                    tagged: false
+                }),
                 "port {port} must be untagged in VLAN 10"
             );
         }
-        assert!(vlan10.contains(&PortMember { port: 8, tagged: true }), "CPU in VLAN 10");
-        assert!(vlan10.contains(&PortMember { port: 9, tagged: true }), "internal in VLAN 10");
+        assert!(
+            vlan10.contains(&PortMember {
+                port: 8,
+                tagged: true
+            }),
+            "CPU in VLAN 10"
+        );
+        assert!(
+            vlan10.contains(&PortMember {
+                port: 9,
+                tagged: true
+            }),
+            "internal in VLAN 10"
+        );
         // MGMT port 7 must NOT be in VLAN 10
-        assert!(!vlan10.iter().any(|m| m.port == 7), "port 7 must not be in VLAN 10");
+        assert!(
+            !vlan10.iter().any(|m| m.port == 7),
+            "port 7 must not be in VLAN 10"
+        );
 
         // VLAN 3000: port 7 untagged, CPU(8t), internal(9t)
         let vlan3000 = vlan_map.get(&3000).expect("VLAN 3000 must exist");
-        assert!(vlan3000.contains(&PortMember { port: 7, tagged: false }), "port 7 untagged in VLAN 3000");
-        assert!(vlan3000.contains(&PortMember { port: 8, tagged: true }), "CPU in VLAN 3000");
-        assert!(vlan3000.contains(&PortMember { port: 9, tagged: true }), "internal in VLAN 3000");
+        assert!(
+            vlan3000.contains(&PortMember {
+                port: 7,
+                tagged: false
+            }),
+            "port 7 untagged in VLAN 3000"
+        );
+        assert!(
+            vlan3000.contains(&PortMember {
+                port: 8,
+                tagged: true
+            }),
+            "CPU in VLAN 3000"
+        );
+        assert!(
+            vlan3000.contains(&PortMember {
+                port: 9,
+                tagged: true
+            }),
+            "internal in VLAN 3000"
+        );
         // LAN ports 0–6 must NOT be in VLAN 3000
         for port in 0u8..=6 {
-            assert!(!vlan3000.iter().any(|m| m.port == port), "LAN port {port} must not be in VLAN 3000");
+            assert!(
+                !vlan3000.iter().any(|m| m.port == port),
+                "LAN port {port} must not be in VLAN 3000"
+            );
         }
 
         // PVID verification: each port's pvid must match the config
-        let pvid_map: std::collections::HashMap<&str, u16> =
-            port_configs.iter().map(|p| (p.name.as_str(), p.pvid)).collect();
+        let pvid_map: std::collections::HashMap<&str, u16> = port_configs
+            .iter()
+            .map(|p| (p.name.as_str(), p.pvid))
+            .collect();
 
         for port in 0u8..=6 {
             let iface = format!("eth{port}");
@@ -1165,14 +1331,23 @@ mod tests {
         // VLAN 10: ports 0–3 untagged, CPU(4t)
         let vlan10 = map.get(&10).expect("VLAN 10 should exist");
         for port in 0u8..=3 {
-            assert!(vlan10.contains(&PortMember { port, tagged: false }));
+            assert!(vlan10.contains(&PortMember {
+                port,
+                tagged: false
+            }));
         }
-        assert!(vlan10.contains(&PortMember { port: 4, tagged: true }));
+        assert!(vlan10.contains(&PortMember {
+            port: 4,
+            tagged: true
+        }));
 
         // VLAN 1: all LAN ports + CPU tagged (no MGMT port)
         let vlan1 = map.get(&1).expect("VLAN 1 must exist");
         for port in 0u8..=4 {
-            assert!(vlan1.contains(&PortMember { port, tagged: true }), "port {port} tagged in VLAN 1");
+            assert!(
+                vlan1.contains(&PortMember { port, tagged: true }),
+                "port {port} tagged in VLAN 1"
+            );
         }
     }
 }

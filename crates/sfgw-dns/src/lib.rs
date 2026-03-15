@@ -265,12 +265,14 @@ pub async fn ensure_first_boot_defaults(db: &sfgw_db::Db, wan_gateway: Option<&s
     tracing::info!("first boot detected — seeding DNS/DHCP defaults");
 
     // Load all enabled non-void networks to build DNS bind list and DHCP ranges.
-    let mut networks: Vec<(String, Option<i32>, String, String, String, String, bool)> = Vec::new();
+    // (zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, dhcp_enabled)
+    type NetworkRow = (String, Option<i32>, String, String, String, String, bool);
+    let mut networks: Vec<NetworkRow> = Vec::new();
     {
         let mut stmt = conn
             .prepare(
                 "SELECT zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, dhcp_enabled \
-                 FROM networks WHERE enabled = 1 AND zone != 'void'"
+                 FROM networks WHERE enabled = 1 AND zone != 'void'",
             )
             .map_err(DnsError::Database)?;
         let rows = stmt
@@ -793,10 +795,42 @@ mod tests {
     async fn seed_networks(db: &sfgw_db::Db) {
         let conn = db.lock().await;
         for (name, zone, vlan_id, subnet, gw, ds, de) in &[
-            ("LAN", "lan", 10, "192.168.1.0/24", "192.168.1.1", "192.168.1.100", "192.168.1.254"),
-            ("Management", "mgmt", 3000, "10.0.0.0/24", "10.0.0.1", "10.0.0.100", "10.0.0.254"),
-            ("Guest", "guest", 3001, "192.168.3.0/24", "192.168.3.1", "192.168.3.100", "192.168.3.254"),
-            ("DMZ", "dmz", 3002, "172.16.0.0/24", "172.16.0.1", "172.16.0.100", "172.16.0.254"),
+            (
+                "LAN",
+                "lan",
+                10,
+                "192.168.1.0/24",
+                "192.168.1.1",
+                "192.168.1.100",
+                "192.168.1.254",
+            ),
+            (
+                "Management",
+                "mgmt",
+                3000,
+                "10.0.0.0/24",
+                "10.0.0.1",
+                "10.0.0.100",
+                "10.0.0.254",
+            ),
+            (
+                "Guest",
+                "guest",
+                3001,
+                "192.168.3.0/24",
+                "192.168.3.1",
+                "192.168.3.100",
+                "192.168.3.254",
+            ),
+            (
+                "DMZ",
+                "dmz",
+                3002,
+                "172.16.0.0/24",
+                "172.16.0.1",
+                "172.16.0.100",
+                "172.16.0.254",
+            ),
         ] {
             conn.execute(
                 "INSERT OR IGNORE INTO networks (name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, dhcp_enabled, enabled)
@@ -918,7 +952,9 @@ mod tests {
         assert!(config.contains("interface=br-dmz"));
         // All zone DHCP ranges
         assert!(config.contains("dhcp-range=br-mgmt,10.0.0.100,10.0.0.254,255.255.255.0,12h"));
-        assert!(config.contains("dhcp-range=br-guest,192.168.3.100,192.168.3.254,255.255.255.0,12h"));
+        assert!(
+            config.contains("dhcp-range=br-guest,192.168.3.100,192.168.3.254,255.255.255.0,12h")
+        );
         assert!(config.contains("dhcp-range=br-dmz,172.16.0.100,172.16.0.254,255.255.255.0,12h"));
     }
 }
