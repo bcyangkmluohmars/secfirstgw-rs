@@ -10,27 +10,27 @@ See: .planning/PROJECT.md (updated 2026-03-15)
 ## Current Position
 
 Phase: 1 of 5 (Data Model)
-Plan: 1 of 2 in current phase
-Status: In progress — plan 01 complete, plan 02 pending
-Last activity: 2026-03-15 — Plan 01-01 complete (migration 005, 12/12 tests passing)
+Plan: 2 of 2 in current phase — PHASE COMPLETE
+Status: Phase 01 complete — all plans done
+Last activity: 2026-03-15 — Plan 01-02 complete (Rust code updated for PVID model, all tests pass)
 
-Progress: [█░░░░░░░░░] 10%
+Progress: [██░░░░░░░░] 20%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 1
-- Average duration: ~2 min
-- Total execution time: ~2 min
+- Total plans completed: 2
+- Average duration: ~5.5 min
+- Total execution time: ~11 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01-data-model | 1 | ~2 min | ~2 min |
+| 01-data-model | 2 | ~11 min | ~5.5 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (2 min)
+- Last 5 plans: 01-01 (2 min), 01-02 (9 min)
 - Trend: —
 
 *Updated after each plan completion*
@@ -48,6 +48,10 @@ Decisions logged in PROJECT.md Key Decisions table. Key decisions for current wo
 - New/unconfigured ports default to pvid=10 (LAN) — prevents lockout on fresh installs
 - [01-01] WAN pvid=0 signals "not an internal VLAN port" — value chosen to be obviously invalid in VLAN range
 - [01-01] SQLite rename-create-copy-drop used for DROP COLUMN compat with SQLite < 3.35
+- [01-02] Network seeding guard counts non-void networks: migration 005 always seeds void, so COUNT(*)==0 never fires post-migration
+- [01-02] Void VLAN 1 owned by migration 005, not configure() defaults — migration uses INSERT OR IGNORE
+- [01-02] interface_delete identifies VLAN sub-interfaces by dot in name (not vlan_id IS NOT NULL)
+- [01-02] wan.rs set_wan_config sets pvid=0; remove_wan_config reverts pvid=10
 
 ### Pending Todos
 
@@ -61,5 +65,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-15
-Stopped at: Completed 01-01-PLAN.md — ready for 01-02-PLAN.md
+Stopped at: Completed 01-02-PLAN.md — Phase 01 complete, ready for Phase 02
 Resume file: None
