@@ -9,3 +9,5 @@ Cargo.lock
 /data/
 web/node_modules/
 web/dist/
+.planning/
+analysis/
