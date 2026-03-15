@@ -36,10 +36,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. The LAN zone is associated with VLAN 10 in the `networks` table (not VLAN 1)
   4. Any interface with no explicit config has pvid=10 (LAN zone) after migration
   5. The DB migration runs successfully on an existing v0.0.3 database without data loss to non-role fields
-**Plans**: TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] 01-01: TBD
+- [ ] 01-01-PLAN.md — DB migration 005: role-to-PVID schema change, void VLAN 1, LAN VLAN 10
+- [ ] 01-02-PLAN.md — Rust code updates: sfgw-net structs/queries/seeding, switch.rs, sfgw-api handlers
 
 ---
 
@@ -118,7 +119,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Data Model | 0/? | Not started | - |
+| 1. Data Model | 0/2 | Planned | - |
 | 2. Switch ASIC | 0/? | Not started | - |
 | 3. Network Enforcement | 0/? | Not started | - |
 | 4. API | 0/? | Not started | - |
