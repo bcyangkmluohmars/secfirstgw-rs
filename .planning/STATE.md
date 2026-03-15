@@ -10,9 +10,9 @@ See: .planning/PROJECT.md (updated 2026-03-15)
 ## Current Position
 
 Phase: 5 of 5 (Web UI)
-Plan: 1 of ? in current phase — PLAN COMPLETE
-Status: Phase 05 plan 01 complete — switch panel PVID zone coloring with tagged VLAN dots
-Last activity: 2026-03-15 — Plan 05-01 complete (PortConfig/ZoneInfo types, pvid-based switch panel)
+Plan: 2 of ? in current phase — CHECKPOINT (human-verify)
+Status: Phase 05 plan 02 Task 1 complete — port config panel built, awaiting human verification (Task 2)
+Last activity: 2026-03-15 — Plan 05-02 Task 1 complete (port config panel with PVID selector + tagged VLAN checklist)
 
 Progress: [███████░░░] 70%
 
@@ -68,6 +68,8 @@ Decisions logged in PROJECT.md Key Decisions table. Key decisions for current wo
 - [Phase 04-api]: Zone-interface association uses pvid = vlan_id match (consistent with Phase 3 PVID zone resolution)
 - [05-01] NetworkInterface updated to include pvid/tagged_vlans — /api/v1/interfaces already returns them, no per-port calls needed
 - [05-01] Switch panel uses pvid exclusively for zone resolution; zone cards section still groups by role field
+- [05-02] isPhysicalPort() routes clicks: physical→config panel, bridge/VLAN sub-interface→old edit modal
+- [05-02] pvidOptions includes WAN sentinel (pvid=0) at top; taggedDisabled for WAN/void ports
 
 ### Pending Todos
 
@@ -80,5 +82,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-15
-Stopped at: Completed 05-01-PLAN.md — switch panel PVID zone coloring and tagged VLAN dots
+Stopped at: 05-02-PLAN.md Task 2 checkpoint (human-verify) — port config panel built, awaiting user verification
 Resume file: None
