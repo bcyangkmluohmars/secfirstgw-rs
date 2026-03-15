@@ -177,17 +177,19 @@ fn migrate_legacy_bridges(networks: &[NetworkSetup]) {
 /// Configure VLANs on the hardware switch ASIC via `swconfig`.
 ///
 /// All VLANs are placed on all LAN ports (tagged). Exceptions:
-/// - LAN (VLAN 1): LAN ports untagged, MGMT port excluded
+/// - LAN (VLAN 10): LAN ports untagged, MGMT port excluded
 /// - MGMT port gets its own PVID for untagged MGMT access
 /// - CPU and internal ports: always tagged in every VLAN
+/// - Void zone (VLAN 1): skipped entirely — no switch programming
 ///
 /// Cleans up stale VLANs from previous firmware before applying.
 fn setup_switch_vlans(sw: &SwitchLayout, networks: &[NetworkSetup]) -> Result<()> {
-    // Collect our VLAN IDs
+    // Collect our VLAN IDs (skip void — it must not be programmed on the switch)
     let our_vlans: Vec<i32> = networks
         .iter()
+        .filter(|n| n.zone != "void")
         .map(|n| match &n.zone[..] {
-            "lan" => 1,
+            "lan" => n.vlan_id.unwrap_or(10),
             _ => n.vlan_id.unwrap_or(-1),
         })
         .filter(|v| *v > 0)
@@ -244,8 +246,14 @@ fn setup_switch_vlans(sw: &SwitchLayout, networks: &[NetworkSetup]) -> Result<()
     }
 
     for net in networks {
+        // Void zone is never programmed onto the switch — traffic on VLAN 1 is dropped by fw.
+        if net.zone == "void" {
+            tracing::debug!(zone = "void", "skipping switch VLAN programming for void zone");
+            continue;
+        }
+
         let vid = match &net.zone[..] {
-            "lan" => 1i32,
+            "lan" => net.vlan_id.unwrap_or(10),
             _ => match net.vlan_id {
                 Some(v) => v,
                 None => {
@@ -258,7 +266,7 @@ fn setup_switch_vlans(sw: &SwitchLayout, networks: &[NetworkSetup]) -> Result<()
             },
         };
 
-        let ports_str = build_port_string(vid, sw);
+        let ports_str = build_port_string(vid, &net.zone, sw);
         swconfig_set_vlan_ports(&sw.device, vid, &ports_str)?;
 
         tracing::info!(
@@ -286,19 +294,20 @@ fn setup_switch_vlans(sw: &SwitchLayout, networks: &[NetworkSetup]) -> Result<()
 
 /// Build the swconfig port string for a VLAN.
 ///
-/// - VLAN 1 (LAN): LAN ports untagged, MGMT port excluded
-/// - Other VLANs: all ports tagged (LAN + MGMT)
-/// - CPU and internal ports: always tagged
-fn build_port_string(vlan_id: i32, sw: &SwitchLayout) -> String {
+/// - LAN zone: LAN ports untagged, MGMT port excluded
+/// - All other zones: all LAN + MGMT ports tagged
+/// - CPU and internal ports: always tagged in every VLAN
+fn build_port_string(vlan_id: i32, zone: &str, sw: &SwitchLayout) -> String {
+    let _ = vlan_id; // zone determines tagging, not VLAN number
     let mut parts = Vec::new();
 
-    if vlan_id == 1 {
-        // LAN VLAN: LAN ports untagged, MGMT port excluded
+    if zone == "lan" {
+        // LAN zone: LAN ports untagged, MGMT port excluded
         for &p in &sw.lan_ports {
             parts.push(format!("{p}"));
         }
     } else {
-        // Non-LAN VLANs: all LAN ports tagged
+        // Non-LAN zones: all LAN ports tagged
         for &p in &sw.lan_ports {
             parts.push(format!("{p}t"));
         }
@@ -389,12 +398,16 @@ fn run_swconfig(args: &[&str]) -> Result<()> {
 /// - Gateway IPs are assigned if not already set
 fn setup_bridges(networks: &[NetworkSetup], switch_dev: Option<&str>) -> Result<()> {
     for net in networks {
+        // Void zone creates no bridge — VLAN 1 traffic is dropped by firewall.
+        if net.zone == "void" {
+            tracing::debug!(zone = "void", "skipping bridge for void zone");
+            continue;
+        }
+
         let bridge_name = format!("br-{}", net.zone);
 
-        let vlan_id = match &net.zone[..] {
-            "lan" => Some(1),
-            _ => net.vlan_id,
-        };
+        // All zones use their actual vlan_id from the DB (LAN is now VLAN 10, not 1).
+        let vlan_id = net.vlan_id;
 
         // Create bridge if it doesn't exist (may already exist from migration)
         if !link_exists(&bridge_name) {
@@ -537,35 +550,37 @@ mod tests {
     #[test]
     fn test_build_port_string_lan_udm_pro() {
         let sw = udm_pro_layout();
-        let result = build_port_string(1, &sw);
+        // LAN is now VLAN 10 (not 1). Zone "lan" drives untagged behavior.
+        let result = build_port_string(10, "lan", &sw);
         assert_eq!(result, "0 1 2 3 4 5 6 8t 9t");
     }
 
     #[test]
     fn test_build_port_string_mgmt_vlan_udm_pro() {
         let sw = udm_pro_layout();
-        let result = build_port_string(3000, &sw);
+        let result = build_port_string(3000, "mgmt", &sw);
         assert_eq!(result, "0t 1t 2t 3t 4t 5t 6t 7t 8t 9t");
     }
 
     #[test]
     fn test_build_port_string_guest_vlan_udm_pro() {
         let sw = udm_pro_layout();
-        let result = build_port_string(3001, &sw);
+        let result = build_port_string(3001, "guest", &sw);
         assert_eq!(result, "0t 1t 2t 3t 4t 5t 6t 7t 8t 9t");
     }
 
     #[test]
     fn test_build_port_string_generic_no_mgmt() {
         let sw = generic_layout();
-        let result = build_port_string(1, &sw);
+        // LAN zone on generic layout (no MGMT port)
+        let result = build_port_string(10, "lan", &sw);
         assert_eq!(result, "0 1 2 3 4t");
     }
 
     #[test]
     fn test_build_port_string_generic_tagged() {
         let sw = generic_layout();
-        let result = build_port_string(100, &sw);
+        let result = build_port_string(100, "other", &sw);
         assert_eq!(result, "0t 1t 2t 3t 4t");
     }
 }
