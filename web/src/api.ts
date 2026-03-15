@@ -123,10 +123,38 @@ export interface NetworkInterface {
   is_up: boolean;
   role: string;
   vlan_id: number | null;
+  pvid: number;
+  tagged_vlans: number[];
   enabled: boolean;
   speed: string | null;
   driver: string | null;
   port_type: string | null;
+}
+
+export interface PortConfig {
+  name: string;
+  mac: string;
+  ips: string[];
+  mtu: number;
+  is_up: boolean;
+  pvid: number;
+  tagged_vlans: number[];
+  enabled: boolean;
+  speed: string | null;
+  driver: string | null;
+  port_type: string | null;
+}
+
+export interface ZoneInfo {
+  id: number;
+  name: string;
+  zone: string;
+  vlan_id: number | null;
+  subnet: string | null;
+  gateway: string | null;
+  dhcp_enabled: boolean;
+  enabled: boolean;
+  interfaces?: string[];  // only on zone_get, not zone_list
 }
 
 export interface Device {
@@ -409,6 +437,18 @@ export const api = {
   // Personality
   getPersonality: () => request<{ active: string; personalities: { name: string; description: string; active: boolean }[] }>('/api/v1/personality'),
   setPersonality: (name: string) => request<{ ok: boolean; active: string }>('/api/v1/personality', { method: 'PUT', body: { name } }),
+
+  // Ports (PVID/tagged VLAN config)
+  getPort: (name: string) =>
+    request<PortConfig>(`/api/v1/ports/${encodeURIComponent(name)}`),
+  updatePort: (name: string, body: { pvid?: number; tagged_vlans?: number[] }) =>
+    request<{ ok: boolean }>(`/api/v1/ports/${encodeURIComponent(name)}`, { method: 'PUT', body }),
+
+  // Zones
+  getZones: () =>
+    request<{ zones: ZoneInfo[] }>('/api/v1/zones'),
+  getZone: (zone: string) =>
+    request<ZoneInfo>(`/api/v1/zones/${encodeURIComponent(zone)}`),
 
   // WAN
   getWanConfigs: () => request<{ configs: WanPortConfig[] }>('/api/v1/wan'),
