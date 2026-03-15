@@ -9,29 +9,30 @@ See: .planning/PROJECT.md (updated 2026-03-15)
 
 ## Current Position
 
-Phase: 1 of 5 (Data Model)
-Plan: 2 of 2 in current phase — PHASE COMPLETE
-Status: Phase 01 complete — all plans done
-Last activity: 2026-03-15 — Plan 01-02 complete (Rust code updated for PVID model, all tests pass)
+Phase: 2 of 5 (Switch ASIC)
+Plan: 1 of 1 in current phase — PHASE COMPLETE
+Status: Phase 02 complete — all plans done
+Last activity: 2026-03-15 — Plan 02-01 complete (switch ASIC rewritten to per-port PVID model, 75 tests pass)
 
-Progress: [██░░░░░░░░] 20%
+Progress: [████░░░░░░] 40%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 2
-- Average duration: ~5.5 min
-- Total execution time: ~11 min
+- Total plans completed: 3
+- Average duration: ~9.3 min
+- Total execution time: ~28 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01-data-model | 2 | ~11 min | ~5.5 min |
+| 02-switch-asic | 1 | ~18 min | ~18 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (2 min), 01-02 (9 min)
-- Trend: —
+- Last 5 plans: 01-01 (2 min), 01-02 (9 min), 02-01 (18 min)
+- Trend: increasing (larger plans)
 
 *Updated after each plan completion*
 
@@ -52,6 +53,9 @@ Decisions logged in PROJECT.md Key Decisions table. Key decisions for current wo
 - [01-02] Void VLAN 1 owned by migration 005, not configure() defaults — migration uses INSERT OR IGNORE
 - [01-02] interface_delete identifies VLAN sub-interfaces by dot in name (not vlan_id IS NOT NULL)
 - [01-02] wan.rs set_wan_config sets pvid=0; remove_wan_config reverts pvid=10
+- [02-01] setup_switch_vlans is now async (reads DB directly); WAN excluded at SQL level (WHERE pvid > 0)
+- [02-01] VLAN 1 catch-all sink always programmed on ASIC; no Linux bridge (setup_bridges skips void)
+- [02-01] Stale cleanup covers 3000-3100 range (zone VLANs) in addition to 1-100
 
 ### Pending Todos
 
@@ -59,11 +63,10 @@ None.
 
 ### Blockers/Concerns
 
-- switch.rs currently hardcodes "all VLANs on all ports" — full rewrite required in Phase 2
 - iptables-legacy only on UDM Pro kernel 4.19 — no nf_tables, all FW work in Phase 3 must use iptables
 
 ## Session Continuity
 
 Last session: 2026-03-15
-Stopped at: Completed 01-02-PLAN.md — Phase 01 complete, ready for Phase 02
+Stopped at: Completed 02-01-PLAN.md — Phase 02 complete, ready for Phase 03
 Resume file: None
