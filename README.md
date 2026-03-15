@@ -37,7 +37,7 @@ A single Rust binary replacing bloated gateway stacks:
 
 ## Zone Model
 
-Every interface is assigned a zone. Traffic uses bridge interfaces (`br-lan`, `br-mgmt`, etc.) — never individual switch ports. Default firewall policies enforce strict isolation with catch-all DROP on every zone.
+Every switch port has a **PVID** (Port VLAN ID) that determines its untagged zone, plus optional tagged VLANs for trunk membership. WAN ports (PVID 0) are completely separated from the internal VLAN space. VLAN 1 is a void sink — all traffic dropped, never bridged. Traffic uses bridge interfaces (`br-lan`, `br-mgmt`, etc.) — never individual switch ports. Default firewall policies enforce strict isolation with catch-all DROP on every zone.
 
 | Zone | Purpose |
 |------|---------|
@@ -103,25 +103,26 @@ On Ubiquiti hardware, the board ID (`/proc/ubnthal/board`) is used to auto-assig
 
 UDM Pro / SE port layout:
 ```
-Port 1-7 (eth0-eth6)  → LAN (switch0, untagged VLAN 1)
+Port 1-7 (eth0-eth6)  → LAN (PVID 10, untagged)
 Port 8   (eth7)       → MGMT (PVID 3000, untagged, 10.0.0.0/24)
-Port 9   (eth8)       → WAN1 (RJ45)
-Port 10  (eth9)       → WAN2 (SFP+)
-Port 11  (eth10)      → LAN (SFP+)
+Port 9   (eth8)       → WAN1 (PVID 0, outside VLAN space)
+Port 10  (eth9)       → WAN2 (PVID 0, outside VLAN space)
+Port 11  (eth10)      → LAN (PVID 10, SFP+)
 ```
+
+VLAN 1 is a catch-all void — all switch ports are tagged members, but no bridge is created. Any unclassified traffic lands in VLAN 1 and is dropped.
 
 ### Default Networks
 
 | Network | VLAN | Subnet | DHCP Pool | Status |
 |---------|------|--------|-----------|--------|
-| LAN | 1 (untagged) | 192.168.1.0/24 | .100-.254 | Active |
+| Void | 1 | - | - | Sink (all DROP) |
+| LAN | 10 | 192.168.1.0/24 | .100-.254 | Active |
 | WAN1 | - | DHCP (eth8) | - | Active |
 | WAN2 | - | DHCP (eth9) | - | Active |
 | Management | 3000 | 10.0.0.0/24 | .100-.254 | Active |
-| Guest | 3001 | 192.168.3.0/24 | .100-.254 | Prepared |
-| DMZ | 3002 | 172.16.0.0/24 | .100-.254 | Prepared |
-
-Prepared networks are pre-configured but disabled. Enable them via the web UI to create the VLANs, bridges, and firewall rules automatically.
+| Guest | 3001 | 192.168.3.0/24 | .100-.254 | Active |
+| DMZ | 3002 | 172.16.0.0/24 | .100-.254 | Active |
 
 ### Default Firewall Policy
 
