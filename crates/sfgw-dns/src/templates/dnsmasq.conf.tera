@@ -5,6 +5,10 @@
 # rate limiting, DNS tunnel blocking, query logging for IDS correlation.
 
 # ---------- General ----------
+# Run as root — sfgw manages dnsmasq as a child process with kill_on_drop.
+# Without this, dnsmasq forks to drop privileges and the parent exits,
+# leaving sfgw tracking a zombie PID.
+user=root
 domain-needed
 bogus-priv
 no-resolv
@@ -84,10 +88,10 @@ address=/{{ override.domain }}/{{ override.ip }}
 # ---------- Logging for IDS Correlation ----------
 log-queries
 log-dhcp
-log-facility=/var/log/sfgw/dnsmasq.log
+log-facility=/data/sfgw/dnsmasq.log
 
 # ---------- Lease File ----------
-dhcp-leasefile=/var/lib/misc/dnsmasq.leases
+dhcp-leasefile=/data/sfgw/dnsmasq.leases
 
 # ---------- PID File ----------
 pid-file=/run/sfgw-dnsmasq.pid

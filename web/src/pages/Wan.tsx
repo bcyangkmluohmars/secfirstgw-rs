@@ -286,7 +286,7 @@ export default function Wan() {
   useEffect(() => { load() }, [load])
 
   const configuredIfaces = new Set(configs.map((c) => c.interface))
-  const availableInterfaces = hwInterfaces.filter((i) => !configuredIfaces.has(i.name))
+  const availableInterfaces = hwInterfaces.filter((i) => !configuredIfaces.has(i.name) && i.pvid === 0)
 
   const openCreate = () => {
     setForm({ ...emptyForm, iface: availableInterfaces[0]?.name ?? '' })

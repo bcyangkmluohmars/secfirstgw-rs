@@ -10,13 +10,13 @@ A security-focused gateway firmware, written in Rust. Runs on bare metal, VM, or
 
 Because 180+ services, Java, MongoDB without auth, hardcoded credentials, and single-core VPN at 30 MB/s in 2026 is not acceptable.
 
-**12 MB RAM** on a UDM Pro. Their stack uses 1.8 GB.
+**11 MB RAM** on a UDM Pro. Their stack uses 1.8 GB.
 
 ## What?
 
 A single Rust binary replacing bloated gateway stacks:
 
-- **Firewall & Router** — nftables (modern kernels) + iptables-legacy (UDM Pro / kernel 4.19), dual-stack IPv4/IPv6
+- **Firewall & Router** — iptables-legacy (UDM Pro / kernel 4.19) + nftables (modern kernels), dual-stack IPv4/IPv6
 - **Network Controller** — device adoption, provisioning, monitoring
 - **Multi-Core VPN** — WireGuard (boringtun) across all cores
 - **DNS & DHCP** — dnsmasq config generation
@@ -31,7 +31,7 @@ A single Rust binary replacing bloated gateway stacks:
 
 | Platform | Networking | Storage | Display |
 |----------|-----------|---------|---------|
-| Bare Metal (ARM64) | Hardware switch ASICs | LUKS2 on HDD | HD44780 LCD / Framebuffer |
+| Bare Metal (ARM64) | Hardware switch ASICs | LUKS2 on HDD | LCM (UDM Pro native serial) / HD44780 LCD / Framebuffer |
 | VM | virtio-net / e1000 | LUKS2 on vdisk | No |
 | Docker | macvlan / host | Volume mount | No |
 
@@ -139,7 +139,7 @@ Rules are auto-created on first boot:
 
 - DNS forwarding to WAN gateway + 1.1.1.1 + 9.9.9.9
 - DHCP on LAN: 192.168.1.100-254, 12h lease, domain `lan`
-- DNSSEC validation enabled
+- DNSSEC validation (requires dnsmasq compiled with --enable-dnssec; disabled on stock UDM Pro)
 - DNS rebind protection enabled
 
 ## Personality

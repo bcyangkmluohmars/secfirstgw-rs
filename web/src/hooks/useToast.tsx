@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { createContext, useCallback, useContext, useState, useRef } from 'react'
+import { createContext, useCallback, useContext, useMemo, useState, useRef } from 'react'
 
 type ToastType = 'success' | 'error' | 'info'
 
@@ -69,11 +69,11 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000)
   }, [])
 
-  const value: ToastContextValue = {
-    success: useCallback((msg: string) => add('success', msg), [add]),
-    error: useCallback((msg: string) => add('error', msg), [add]),
-    info: useCallback((msg: string) => add('info', msg), [add]),
-  }
+  const success = useCallback((msg: string) => add('success', msg), [add])
+  const error = useCallback((msg: string) => add('error', msg), [add])
+  const info = useCallback((msg: string) => add('info', msg), [add])
+
+  const value: ToastContextValue = useMemo(() => ({ success, error, info }), [success, error, info])
 
   return (
     <ToastContext.Provider value={value}>

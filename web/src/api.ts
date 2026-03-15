@@ -121,7 +121,7 @@ export interface NetworkInterface {
   ips: string[];
   mtu: number;
   is_up: boolean;
-  role: string;
+  role: string;  // computed from pvid — not returned by API
   vlan_id: number | null;
   pvid: number;
   tagged_vlans: number[];
@@ -129,6 +129,19 @@ export interface NetworkInterface {
   speed: string | null;
   driver: string | null;
   port_type: string | null;
+}
+
+// Well-known PVID → zone name mapping (matches DB networks table)
+const PVID_ZONE_MAP: Record<number, string> = {
+  0: 'wan', 1: 'void', 10: 'lan', 3000: 'mgmt', 3001: 'dmz', 3002: 'guest',
+};
+
+export function pvidToZone(pvid: number): string {
+  return PVID_ZONE_MAP[pvid] ?? 'unknown';
+}
+
+function enrichInterface(iface: Omit<NetworkInterface, 'role'>): NetworkInterface {
+  return { ...iface, role: pvidToZone(iface.pvid) };
 }
 
 export interface PortConfig {
@@ -354,7 +367,10 @@ export const api = {
   // Protected (auto-E2EE when envelope key set)
   getStatus: () => request<SystemStatus>('/api/v1/status'),
   getSystem: () => request<Record<string, unknown>>('/api/v1/system'),
-  getInterfaces: () => request<{ interfaces: NetworkInterface[] }>('/api/v1/interfaces'),
+  getInterfaces: async () => {
+    const res = await request<{ interfaces: Omit<NetworkInterface, 'role'>[] }>('/api/v1/interfaces');
+    return { interfaces: (res.interfaces ?? []).map(enrichInterface) };
+  },
   updateInterface: (name: string, body: { role?: string; vlan_id?: number | null; mtu?: number; enabled?: boolean }) =>
     request<{ ok: boolean }>(`/api/v1/interfaces/${encodeURIComponent(name)}`, { method: 'PUT', body }),
   toggleInterface: (name: string, enabled: boolean) =>

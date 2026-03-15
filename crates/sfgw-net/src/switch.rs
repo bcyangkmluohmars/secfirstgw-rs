@@ -131,9 +131,10 @@ pub async fn setup_networks(db: &sfgw_db::Db, switch: Option<&SwitchLayout>) -> 
         setup_switch_vlans(sw, db).await?;
     }
 
-    // Step 3: Ensure all bridges exist with correct VLAN attachments and IPs
+    // Step 3: Ensure all bridges exist with correct VLAN attachments and IPs,
+    // and register them in the interfaces table so the API can see them.
     let switch_dev = switch.map(|sw| sw.device.as_str());
-    setup_bridges(&networks, switch_dev)?;
+    setup_bridges(&networks, switch_dev, db).await?;
 
     Ok(())
 }
@@ -499,6 +500,121 @@ fn run_swconfig(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Read the current PVID of a switch port via `swconfig`.
+fn swconfig_get_pvid(device: &str, port: u8) -> Option<u16> {
+    let output = Command::new("swconfig")
+        .args(["dev", device, "port", &port.to_string(), "get", "pvid"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+// ── Switch ASIC watchdog ────────────────────────────────────────────
+
+/// Verify the switch ASIC config matches the DB and reprogram if drifted.
+///
+/// This is called periodically by the controller watchdog. If another process
+/// (e.g. ubios-udapi-server restarting) reprograms the switch ASIC, this
+/// detects the PVID drift and re-applies sfgw's VLAN config.
+///
+/// Returns `true` if a correction was applied.
+pub async fn verify_switch_config(db: &sfgw_db::Db) -> bool {
+    let switch_layout = match sfgw_hal::detect_board() {
+        Some(board) => match board.switch {
+            Some(sw) => SwitchLayout {
+                device: sw.device.to_string(),
+                lan_ports: sw.lan_ports.to_vec(),
+                cpu_port: sw.cpu_port,
+                internal_ports: sw.internal_ports.to_vec(),
+                mgmt_port: sw.mgmt_port,
+            },
+            None => return false, // No switch ASIC on this platform
+        },
+        None => return false,
+    };
+
+    // Load expected per-port config from DB
+    let port_configs = match load_port_vlan_config(db).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "switch watchdog: failed to load port config from DB");
+            return false;
+        }
+    };
+
+    // Compare expected vs actual PVIDs
+    let mut drifted = false;
+    for port_cfg in &port_configs {
+        if let Some(switch_port) = iface_to_switch_port(&port_cfg.name, &switch_layout) {
+            if let Some(actual_pvid) = swconfig_get_pvid(&switch_layout.device, switch_port) {
+                if actual_pvid != port_cfg.pvid {
+                    tracing::warn!(
+                        port = switch_port,
+                        iface = %port_cfg.name,
+                        expected = port_cfg.pvid,
+                        actual = actual_pvid,
+                        "switch ASIC PVID drift detected"
+                    );
+                    drifted = true;
+                }
+            }
+        }
+    }
+
+    if !drifted {
+        return false;
+    }
+
+    // Drift detected — ubios-udapi-server likely restarted and reset the
+    // entire network stack (interfaces, bridges, IPs, firewall, switch ASIC).
+    // We must rebuild everything, not just the switch VLANs.
+    tracing::warn!("switch ASIC drift detected — rebuilding full network stack");
+
+    // Step 1: Re-apply switch VLANs + PVIDs
+    if let Err(e) = setup_switch_vlans(&switch_layout, db).await {
+        tracing::error!(error = %e, "switch watchdog: failed to reprogram switch ASIC");
+        return false;
+    }
+
+    // Step 2: Rebuild bridges, VLAN sub-interfaces, and gateway IPs
+    let networks = match load_enabled_networks(db).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::error!(error = %e, "switch watchdog: failed to load networks");
+            return false;
+        }
+    };
+    if let Err(e) = setup_bridges(&networks, Some(&switch_layout.device), db).await {
+        tracing::error!(error = %e, "switch watchdog: failed to rebuild bridges");
+        return false;
+    }
+
+    // Step 3: Re-apply firewall rules (ubios flushes iptables on exit)
+    if let Err(e) = sfgw_fw::apply_rules(db).await {
+        tracing::error!(error = %e, "switch watchdog: failed to re-apply firewall rules");
+    }
+
+    // Note: dnsmasq is a child process of sfgw (not in ubios's cgroup),
+    // so it survives ubios teardown. No restart needed here.
+
+    tracing::info!("full network stack rebuilt successfully by watchdog");
+    true
+}
+
+/// Background loop: verify switch ASIC config every 10 seconds.
+pub async fn watchdog_loop(db: sfgw_db::Db) {
+    let interval = std::time::Duration::from_secs(10);
+    let mut timer = tokio::time::interval(interval);
+    tracing::info!("switch ASIC watchdog started ({}s interval)", interval.as_secs());
+    loop {
+        timer.tick().await;
+        verify_switch_config(&db).await;
+    }
+}
+
 // ── Linux bridges ───────────────────────────────────────────────────
 
 /// Ensure all bridges exist with correct VLAN attachments and IPs.
@@ -507,7 +623,11 @@ fn run_swconfig(args: &[&str]) -> Result<()> {
 /// - Bridges that already exist (e.g. from migration) are kept
 /// - VLAN sub-interfaces are created and attached if missing
 /// - Gateway IPs are assigned if not already set
-fn setup_bridges(networks: &[NetworkSetup], switch_dev: Option<&str>) -> Result<()> {
+async fn setup_bridges(
+    networks: &[NetworkSetup],
+    switch_dev: Option<&str>,
+    db: &sfgw_db::Db,
+) -> Result<()> {
     for net in networks {
         // Void zone creates no bridge — VLAN 1 traffic is dropped by firewall.
         if net.zone == "void" {
@@ -565,6 +685,10 @@ fn setup_bridges(networks: &[NetworkSetup], switch_dev: Option<&str>) -> Result<
         // Bring up bridge
         run_ip(&["link", "set", &bridge_name, "up"])?;
 
+        // Register bridge in interfaces table so the API can serve it.
+        // Reads live state from sysfs after the bridge is up.
+        register_bridge_interface(&bridge_name, vlan_id.unwrap_or(0) as u16, db).await;
+
         tracing::info!(
             zone = %net.zone,
             bridge = %bridge_name,
@@ -575,6 +699,36 @@ fn setup_bridges(networks: &[NetworkSetup], switch_dev: Option<&str>) -> Result<
     }
 
     Ok(())
+}
+
+/// Register a bridge in the `interfaces` table by reading its live state from sysfs.
+async fn register_bridge_interface(bridge: &str, pvid: u16, db: &sfgw_db::Db) {
+    let sysfs_dir = std::path::Path::new("/sys/class/net").join(bridge);
+
+    let mac = std::fs::read_to_string(sysfs_dir.join("address"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let mtu: u32 = std::fs::read_to_string(sysfs_dir.join("mtu"))
+        .map(|s| s.trim().parse().unwrap_or(1500))
+        .unwrap_or(1500);
+    let is_up = std::fs::read_to_string(sysfs_dir.join("operstate"))
+        .map(|s| s.trim() == "up")
+        .unwrap_or(false);
+    let ips = crate::read_ip_addresses(bridge);
+    let ips_json = serde_json::to_string(&ips).unwrap_or_else(|_| "[]".to_string());
+
+    let conn = db.lock().await;
+    conn.execute(
+        "INSERT INTO interfaces (name, mac, ips, mtu, is_up, pvid, tagged_vlans)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, '[]')
+         ON CONFLICT(name) DO UPDATE SET
+             mac   = excluded.mac,
+             ips   = excluded.ips,
+             mtu   = excluded.mtu,
+             is_up = excluded.is_up",
+        rusqlite::params![bridge, mac, ips_json, mtu, is_up as i32, pvid as i32],
+    )
+    .ok();
 }
 
 /// Convert gateway IP + subnet to CIDR notation.

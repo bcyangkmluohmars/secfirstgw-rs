@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useState } from 'react'
-import { api, type NetworkInterface } from '../../api'
+import { api, pvidToZone, type NetworkInterface } from '../../api'
 import { Badge, Button, EmptyState, Modal, Input, Select, Toggle, Card } from '../../components/ui'
 import { useToast } from '../../hooks/useToast'
 
@@ -40,7 +40,7 @@ export default function InterfacesTab({ interfaces, onReload }: InterfacesTabPro
 
   const openEdit = (iface: NetworkInterface) => {
     setEditForm({
-      role: iface.role,
+      role: pvidToZone(iface.pvid),
       mtu: String(iface.mtu),
       vlanId: iface.vlan_id != null ? String(iface.vlan_id) : null,
     })
@@ -119,7 +119,7 @@ export default function InterfacesTab({ interfaces, onReload }: InterfacesTabPro
               label="Parent Interface"
               value={vlanForm.parent}
               onChange={(e) => setVlanForm({ ...vlanForm, parent: e.target.value })}
-              options={physicalInterfaces.map((i) => ({ value: i.name, label: `${i.name} (${i.role})` }))}
+              options={physicalInterfaces.map((i) => ({ value: i.name, label: `${i.name} (${pvidToZone(i.pvid)})` }))}
             />
             <Input
               label="VLAN ID (1-4094)"
@@ -179,7 +179,7 @@ export default function InterfacesTab({ interfaces, onReload }: InterfacesTabPro
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-navy-800/50">
-                {['', 'Interface', 'MAC', 'IPs', 'MTU', 'Role', 'Status', ''].map((h) => (
+                {['', 'Interface', 'MAC', 'IPs', 'MTU', 'Zone', 'Status', ''].map((h) => (
                   <th key={h} className="text-left px-4 py-3 text-[11px] text-navy-400 uppercase tracking-wider font-medium">{h}</th>
                 ))}
               </tr>
@@ -201,7 +201,7 @@ export default function InterfacesTab({ interfaces, onReload }: InterfacesTabPro
                       : <span className="text-navy-600">---</span>}
                   </td>
                   <td className="px-4 py-3 font-mono text-gray-400 text-xs tabular-nums">{iface.mtu}</td>
-                  <td className="px-4 py-3"><Badge variant={roleVariant(iface.role)}>{iface.role.toUpperCase()}</Badge></td>
+                  <td className="px-4 py-3"><Badge variant={roleVariant(pvidToZone(iface.pvid))}>{pvidToZone(iface.pvid).toUpperCase()}</Badge></td>
                   <td className="px-4 py-3">
                     <Toggle checked={iface.enabled} onChange={() => handleToggle(iface)} />
                   </td>
@@ -222,7 +222,7 @@ export default function InterfacesTab({ interfaces, onReload }: InterfacesTabPro
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-navy-800/50">
-                  {['', 'Interface', 'VLAN ID', 'Role', 'MTU', 'Status', ''].map((h) => (
+                  {['', 'Interface', 'VLAN ID', 'Zone', 'MTU', 'Status', ''].map((h) => (
                     <th key={h} className="text-left px-4 py-3 text-[11px] text-navy-400 uppercase tracking-wider font-medium">{h}</th>
                   ))}
                 </tr>
@@ -237,7 +237,7 @@ export default function InterfacesTab({ interfaces, onReload }: InterfacesTabPro
                     <td className="px-4 py-3">
                       <span className="px-2 py-0.5 rounded bg-navy-800 border border-navy-700/50 text-xs font-mono text-gray-300 tabular-nums">{iface.vlan_id}</span>
                     </td>
-                    <td className="px-4 py-3"><Badge variant={roleVariant(iface.role)}>{iface.role.toUpperCase()}</Badge></td>
+                    <td className="px-4 py-3"><Badge variant={roleVariant(pvidToZone(iface.pvid))}>{pvidToZone(iface.pvid).toUpperCase()}</Badge></td>
                     <td className="px-4 py-3 font-mono text-gray-400 text-xs tabular-nums">{iface.mtu}</td>
                     <td className="px-4 py-3">
                       <Toggle checked={iface.enabled} onChange={() => handleToggle(iface)} />

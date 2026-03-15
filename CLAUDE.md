@@ -131,6 +131,36 @@ Every line of code you write must answer: "What happens if an attacker controls 
 | `sfgw-nas` | SMB3/NFS file sharing | Anything non-NAS |
 | `sfgw-controller` | High-level orchestration, service lifecycle | Low-level implementation |
 
+## Development Workflow
+
+### Target Device
+- **UDM-Pro** on Management network at `10.0.0.1`
+- Only SSH and Web UI exposed — nothing else
+- Deploy scripts handle everything. Do NOT manually SSH to debug deploy issues.
+
+### Deploy (Development)
+```bash
+# THE workflow. Code change → deploy. That's it.
+scripts/dev-deploy.sh <IP>
+# Example: scripts/dev-deploy.sh 10.0.0.1
+```
+
+### Database Changes (Schema / Seed / Migration)
+**If you changed anything in `sfgw-db/migrations/` or seed data:**
+1. Delete the DB on the device: `ssh root@10.0.0.1 rm /data/sfgw/sfgw.db`
+   Then `scripts/dev-deploy.sh 10.0.0.1` — it recreates and seeds automatically
+2. **DO NOT** manually inspect the DB trying to figure out why old data looks wrong
+3. **DO NOT** try manual SSH deploys
+4. **JUST:** delete DB → `scripts/dev-deploy.sh <IP>` → done.
+
+### After Context Compaction
+If you lost context and don't know the project state:
+1. Read this file (you're doing it)
+2. Check `git log --oneline -20` for recent changes
+3. Check `git diff --stat HEAD~5` to see what's been touched
+4. Run the deploy script — it's idempotent
+5. **DO NOT** start debugging from scratch. The tooling works. Trust it.
+
 ## The Anti-Ubiquiti Checklist
 
 Before every PR, ask:

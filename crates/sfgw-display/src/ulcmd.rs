@@ -72,12 +72,17 @@ impl UlcmdDisplay {
             .map_err(|e| DisplayError::Internal(anyhow::anyhow!("set timeout: {e}")))?;
 
         stream.write_all(json.as_bytes())?;
+        stream.write_all(b"\n")?;
         stream.flush()?;
 
-        let mut response = String::new();
-        stream.read_to_string(&mut response)?;
+        // ulcmd sends newline-delimited JSON and does NOT close the
+        // connection, so `read_to_string` would block until the read
+        // timeout fires (EAGAIN).  Read into a fixed buffer instead
+        // and return the first response line.
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf)?;
 
-        Ok(response)
+        Ok(String::from_utf8_lossy(&buf[..n]).into_owned())
     }
 
     /// Switch the MCU display to a named screen.

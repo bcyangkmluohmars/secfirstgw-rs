@@ -15,6 +15,7 @@
 
 pub mod framebuffer;
 pub mod hd44780;
+pub mod lcm;
 pub mod ulcmd;
 
 use std::path::Path;
@@ -115,11 +116,19 @@ pub enum DisplayConfig {
         height: u32,
     },
 
-    /// UDM Pro front-panel LCD via `ulcmd` daemon Unix socket.
+    /// UDM Pro front-panel LCD via `ulcmd` daemon Unix socket (legacy).
     Ulcmd {
         /// Path to the `ulcmd` Unix domain socket.
         #[serde(default = "default_ulcmd_socket")]
         socket_path: String,
+    },
+
+    /// Native LCM display via serial (replaces ulcmd).
+    Lcm {
+        /// Ubiquiti board ID (e.g. "ea15" for UDM Pro).
+        board_id: String,
+        /// Device MAC address for display identification.
+        mac: String,
     },
 }
 
@@ -166,7 +175,28 @@ pub fn auto_detect(platform: &sfgw_hal::Platform) -> DisplayConfig {
         return DisplayConfig::None;
     }
 
-    // UDM Pro: ulcmd daemon controls the front-panel LCD via Unix socket
+    // Native LCM: direct serial to MCU (preferred over ulcmd)
+    if let Some(board) = sfgw_hal::detect_board() {
+        match board.board_id.as_str() {
+            "ea15" | "ea22" | "ea21" => {
+                // Read MAC from board info
+                let mac = read_board_mac().unwrap_or_default();
+                if Path::new("/dev/ttyACM0").exists() {
+                    tracing::info!(
+                        board = board.short_name,
+                        "auto-detected LCM display (native serial)"
+                    );
+                    return DisplayConfig::Lcm {
+                        board_id: board.board_id,
+                        mac,
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Fallback: ulcmd daemon (legacy, kept for compatibility)
     let ulcmd_socket = Path::new(ulcmd::DEFAULT_SOCKET_PATH);
     if ulcmd_socket.exists() {
         tracing::info!("auto-detected UDM Pro LCM display (ulcmd socket)");
@@ -240,7 +270,25 @@ pub fn init(config: &DisplayConfig) -> Result<Option<Box<dyn Display>>, DisplayE
             let display = ulcmd::init(Path::new(socket_path))?;
             Ok(Some(Box::new(display)))
         }
+        DisplayConfig::Lcm { board_id, mac } => {
+            match lcm::init_for_board(board_id, mac)? {
+                Some(display) => Ok(Some(Box::new(display))),
+                None => {
+                    tracing::warn!(board_id, "LCM display not supported for this board");
+                    Ok(None)
+                }
+            }
+        }
     }
+}
+
+/// Read the primary MAC address from `/proc/ubnthal/system.info`.
+fn read_board_mac() -> Option<String> {
+    let content = std::fs::read_to_string("/proc/ubnthal/system.info").ok()?;
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("eth0.macaddr="))
+        .map(|v| v.trim().to_uppercase())
 }
 
 /// Try to find a touch input device by scanning `/dev/input/`.

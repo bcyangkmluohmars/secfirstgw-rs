@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod e2ee;
+pub mod events;
 pub mod middleware;
 pub mod ratelimit;
 pub mod tls;
@@ -28,9 +29,9 @@ use crate::middleware::AuthUser;
 use crate::ratelimit::RateLimiter;
 
 /// Start the axum web API and serve the UI over TLS 1.3.
-pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
+pub async fn serve(db: &sfgw_db::Db, event_tx: events::EventTx) -> Result<()> {
     let listen_addr: SocketAddr = std::env::var("SFGW_LISTEN_ADDR")
-        .unwrap_or_else(|_| "[::]:8443".to_string())
+        .unwrap_or_else(|_| "[::]:443".to_string())
         .parse()
         .context("invalid SFGW_LISTEN_ADDR")?;
 
@@ -196,6 +197,14 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
             ratelimit::rate_limit_middleware,
         ));
 
+    // SSE event stream — auth required but no E2EE (streaming, not request/response).
+    let sse_routes = Router::new()
+        .route("/api/v1/events/stream", get(events::event_stream_handler))
+        .layer(axum::middleware::from_fn_with_state(
+            general_limiter.clone(),
+            ratelimit::rate_limit_middleware,
+        ));
+
     let app = if let Some(web_dir) = std::env::var("SFGW_WEB_DIR")
         .ok()
         .map(PathBuf::from)
@@ -207,8 +216,10 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
         Router::new()
             .merge(public_routes)
             .merge(protected_routes)
+            .merge(sse_routes)
             .layer(cors)
             .layer(axum::middleware::from_fn(security_headers_middleware))
+            .layer(Extension(event_tx))
             .layer(Extension(db))
             .layer(Extension(negotiate_store))
             .layer(Extension(envelope_key_store))
@@ -218,8 +229,10 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
         Router::new()
             .merge(public_routes)
             .merge(protected_routes)
+            .merge(sse_routes)
             .layer(cors)
             .layer(axum::middleware::from_fn(security_headers_middleware))
+            .layer(Extension(event_tx))
             .layer(Extension(db))
             .layer(Extension(negotiate_store))
             .layer(Extension(envelope_key_store))

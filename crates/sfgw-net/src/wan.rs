@@ -690,13 +690,133 @@ fn apply_connection_type<'a>(
     })
 }
 
-/// Apply DHCP on an interface via dhcpcd.
+/// Path to the sfgw udhcpc callback script.
+/// Written at runtime so it works on any platform without installation.
+const UDHCPC_SCRIPT: &str = "/run/sfgw-udhcpc.script";
+
+/// Ensure the udhcpc callback script exists.
+///
+/// UDM Pro ships without `/usr/share/udhcpc/default.script` — Ubiquiti
+/// replaces it with `ubios-udhcpc-script` which is a symlink to
+/// `ubios-udapi-server`.  Without a script, udhcpc obtains a lease but
+/// never configures the IP address, default route, or DNS.
+async fn ensure_udhcpc_script() -> Result<()> {
+    use tokio::fs;
+
+    // Skip if already present (idempotent across multiple WAN ports).
+    if fs::metadata(UDHCPC_SCRIPT).await.is_ok() {
+        return Ok(());
+    }
+
+    let script = r#"#!/bin/sh
+# sfgw udhcpc callback — sets IP, gateway, and DNS on lease events.
+# Called by udhcpc with: $1 = event (deconfig|bound|renew|nak)
+# Environment: $interface, $ip, $subnet, $router, $dns, $domain
+
+case "$1" in
+    deconfig)
+        ip addr flush dev "$interface" 2>/dev/null
+        ip route flush dev "$interface" 2>/dev/null
+        ;;
+    bound|renew)
+        # Calculate prefix length from subnet mask
+        pfx=24
+        if [ -n "$subnet" ]; then
+            pfx=0
+            for octet in $(echo "$subnet" | tr '.' ' '); do
+                case $octet in
+                    255) pfx=$((pfx + 8)) ;;
+                    254) pfx=$((pfx + 7)) ;;
+                    252) pfx=$((pfx + 6)) ;;
+                    248) pfx=$((pfx + 5)) ;;
+                    240) pfx=$((pfx + 4)) ;;
+                    224) pfx=$((pfx + 3)) ;;
+                    192) pfx=$((pfx + 2)) ;;
+                    128) pfx=$((pfx + 1)) ;;
+                esac
+            done
+        fi
+
+        # Set IP address
+        ip addr flush dev "$interface" 2>/dev/null
+        ip addr add "$ip/$pfx" dev "$interface"
+
+        # Set default route via gateway
+        if [ -n "$router" ]; then
+            for gw in $router; do
+                ip route replace default via "$gw" dev "$interface"
+                break  # use first gateway only
+            done
+        fi
+
+        # Write DNS servers to resolv.conf
+        if [ -n "$dns" ]; then
+            : > /etc/resolv.conf
+            [ -n "$domain" ] && echo "search $domain" >> /etc/resolv.conf
+            for ns in $dns; do
+                echo "nameserver $ns" >> /etc/resolv.conf
+            done
+        fi
+        ;;
+esac
+"#;
+
+    fs::write(UDHCPC_SCRIPT, script)
+        .await
+        .context("failed to write udhcpc script")?;
+
+    // chmod +x
+    let mut perms = fs::metadata(UDHCPC_SCRIPT).await?.permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    fs::set_permissions(UDHCPC_SCRIPT, perms).await?;
+
+    tracing::debug!("udhcpc callback script written to {UDHCPC_SCRIPT}");
+    Ok(())
+}
+
+/// Apply DHCP on an interface via udhcpc (BusyBox) or dhcpcd.
 async fn apply_dhcp(interface: &str) -> Result<()> {
+    // Ensure our callback script exists (sets IP + gateway + DNS).
+    ensure_udhcpc_script().await?;
+
+    // Try udhcpc first (BusyBox, available on UDM Pro and most embedded systems),
+    // fall back to dhcpcd if udhcpc is not found.
+    // On UDM Pro, udhcpc lives at /usr/bin/busybox-legacy/udhcpc (not in default PATH).
+    let udhcpc_bin = if std::path::Path::new("/usr/bin/busybox-legacy/udhcpc").exists() {
+        "/usr/bin/busybox-legacy/udhcpc"
+    } else {
+        "udhcpc"
+    };
+    let udhcpc_result = Command::new(udhcpc_bin)
+        .args(["-i", interface, "-n", "-q", "-f", "-s", UDHCPC_SCRIPT])
+        .output()
+        .await;
+
+    match udhcpc_result {
+        Ok(output) if output.status.success() => {
+            tracing::info!(interface, "DHCP lease obtained via udhcpc");
+            return Ok(());
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(
+                interface,
+                "udhcpc failed (exit {}): {}",
+                output.status,
+                stderr.trim()
+            );
+        }
+        Err(_) => {
+            tracing::debug!(interface, "udhcpc not found, trying dhcpcd");
+        }
+    }
+
+    // Fallback: dhcpcd (available on full Linux distros, Docker, VMs)
     let output = Command::new("dhcpcd")
         .args(["--nobackground", "-4", interface])
         .output()
         .await
-        .context("failed to execute dhcpcd")?;
+        .context("failed to execute dhcpcd (udhcpc also unavailable)")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

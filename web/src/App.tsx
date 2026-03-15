@@ -12,6 +12,7 @@ import Vpn from './pages/Vpn'
 import Devices from './pages/Devices'
 import Ids from './pages/Ids'
 import Settings from './pages/Settings'
+import Logs from './pages/Logs'
 import Login from './pages/Login'
 import Setup from './pages/Setup'
 import { api, isAuthenticated, clearToken } from './api'
@@ -102,6 +103,7 @@ export default function App() {
               <Route path="/vpn" element={<Vpn />} />
               <Route path="/devices" element={<Devices />} />
               <Route path="/ids" element={<Ids />} />
+              <Route path="/logs" element={<Logs />} />
               <Route path="/settings" element={<Settings />} />
             </Route>
           )}

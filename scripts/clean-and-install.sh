@@ -275,43 +275,106 @@ install_binary() {
 
 stop_existing() {
     if [ "${PLATFORM}" = "ubiquiti" ]; then
-        log "Stopping UniFi services..."
+        log "Masking and stopping all UniFi services..."
 
-        # Stop UniFi OS services — we're taking over
-        systemctl stop unifi-core 2>/dev/null || true
-        systemctl disable unifi-core 2>/dev/null || true
-        systemctl stop unifi 2>/dev/null || true
-        systemctl disable unifi 2>/dev/null || true
+        # ── Mask all UniFi/ubios services persistently ──────────────────
+        # These services conflict with sfgw (network stack, DNS, firewall).
+        # Masking is persistent across reboot — services cannot be started
+        # even by other init scripts or dependencies.
+        #
+        # Mask everything EXCEPT hardware/system services:
+        #   ubnt-fan       — fan control (hardware safety)
+        #   uhwd           — hardware control daemon (LEDs, thermal)
+        #   ubnd           — button daemon (reset button)
+        #   hddtemp        — disk temperature monitoring
+        #   lm-sensors     — hardware sensors
+        #   earlyoom       — OOM protection
+        #   ubnt-zram-swap — swap management
+        local UBNT_SERVICES=(
+            # Core UniFi platform
+            udapi-server                # monolithic network manager
+            udapi-bridge                # depends on udapi-server
+            unifi-core                  # UniFi OS controller
+            unifi                       # UniFi Network Application (Java)
+            S95unifios                  # legacy init-style startup
 
-        # Stop ubios-udapi-server — this is the process supervisor that
-        # respawns dnsmasq and other platform services on UDM/USG.
-        # Must be stopped BEFORE killing dnsmasq, otherwise it restarts them.
-        # WARNING: This temporarily breaks network connectivity until sfgw
-        # takes over. Only acceptable during full install (not dev-deploy).
-        if pgrep -f "ubios-udapi-server" >/dev/null 2>&1; then
-            log "Stopping ubios-udapi-server (service supervisor)..."
-            warn "Network connectivity will be temporarily interrupted."
-            killall ubios-udapi-server 2>/dev/null || true
-            sleep 1
-        fi
+            # Databases (UniFi apps only — sfgw uses embedded SQLite)
+            unifi-mongodb               # MongoDB
+            postgresql                  # PostgreSQL wrapper
+            postgresql@14-main          # PostgreSQL cluster
+            rabbitmq-server             # RabbitMQ messaging
+            epmd                        # Erlang Port Mapper (RabbitMQ dep)
 
-        # Stop dnsmasq — try init script first (clean shutdown), then killall
+            # UniFi cloud / identity / management
+            unifi-cloud-agent           # cloud management
+            unifi-directory             # directory service
+            unifi-identity-update       # identity updates
+            unifi-credential-server     # credential server
+            uos-agent                   # UniFi OS agent
+            uos-discovery-client        # UniFi OS discovery
+
+            # Telemetry / analytics
+            analytic-report-monitor     # Ubiquiti system monitor
+            analytic-report             # Ubiquiti report init
+            anonid                      # anonymous device ID
+
+            # UniFi support services
+            dns-cache-db                # DNS cache DB (sfgw handles DNS)
+            ubnt-dpkg-daemon            # UniFi package management
+            mcagent                     # MC agent
+            usd                         # UI storage daemon
+            usdbd                       # UI status DB daemon
+            ustated                     # UI state exporter
+            utermd                      # terminal daemon
+            ulp-go                      # ULP-GO
+            # rpsd preserved — Redundant Power Supply, useful for RPS users
+            lagd                        # LAG daemon
+            linkcheck                   # link check
+            freeradius-dh-key           # FreeRADIUS DH keygen
+            redirector-key              # redirector keygen
+            bluetooth-controller@hci0   # Bluetooth (not needed)
+            nginx                       # reverse proxy (sfgw serves directly)
+            ulcmd                       # LCD daemon (sfgw talks to MCU directly)
+        )
+
+        for svc in "${UBNT_SERVICES[@]}"; do
+            if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1; then
+                systemctl mask "${svc}.service" 2>/dev/null || true
+            fi
+        done
+
+        # Reload after masking so systemd sees the changes immediately
+        systemctl daemon-reload
+
+        # Now stop them (mask alone doesn't stop running services)
+        for svc in "${UBNT_SERVICES[@]}"; do
+            systemctl stop "${svc}.service" 2>/dev/null || true
+        done
+
+        warn "Network connectivity will be temporarily interrupted until sfgw starts."
+
+        # Wait for ubios-udapi-server cgroup to fully drain.
+        # ubios has KillMode=control-group — systemd kills all 16+ child
+        # processes (udhcpc, lldpd, avahi, dpinger, dnsmasq, etc.)
+        sleep 2
+
+        # Kill any straggler dnsmasq that survived the cgroup teardown
         if [ -x /etc/init.d/dnsmasq ]; then
             /etc/init.d/dnsmasq stop 2>/dev/null || true
         fi
-        systemctl stop dnsmasq 2>/dev/null || true
-        systemctl disable dnsmasq 2>/dev/null || true
+        # Remove dnsmasq config dirs so ubios respawn attempts fail
+        rm -f /run/dnsmasq.dns.conf.d/*.conf 2>/dev/null || true
+        rm -f /run/dnsmasq.dhcp.conf.d/*.conf 2>/dev/null || true
         killall -q dnsmasq 2>/dev/null || true
         sleep 1
 
-        # Verify no dnsmasq left
         if pgrep dnsmasq >/dev/null 2>&1; then
             warn "dnsmasq still running — sending SIGKILL..."
             killall -q -KILL dnsmasq 2>/dev/null || true
             sleep 1
         fi
 
-        log "All platform services stopped."
+        log "All UniFi services masked and stopped."
     else
         # Generic: stop system dnsmasq if present
         if [ -x /etc/init.d/dnsmasq ]; then
@@ -344,22 +407,30 @@ install_systemd_service() {
     cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<'UNIT'
 [Unit]
 Description=secfirstgw — Security First Gateway
-After=network-online.target
-Wants=network-online.target
+# sfgw IS the network stack — start early, before anything expecting networking.
+# Only needs basic kernel + local filesystems.
+After=local-fs.target
+Before=network-online.target
+Wants=local-fs.target
+# Prevent ubios from starting even if somehow unmasked
+Conflicts=udapi-server.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/sfgw
+ExecStart=/usr/local/bin/sfgw start
 Restart=on-failure
-RestartSec=5
+RestartSec=3
+WatchdogSec=60
 
-# Security hardening
-NoNewPrivileges=no
-ProtectSystem=strict
-ReadWritePaths=/data/sfgw /tmp /run
-PrivateTmp=yes
+# Logging to persistent storage
+StandardOutput=append:/data/sfgw/sfgw.log
+StandardError=append:/data/sfgw/sfgw.log
 
-# Network capabilities (required for firewall, routing, VPN)
+# Note: no ProtectSystem/PrivateTmp — sfgw manages the entire network stack,
+# spawns dnsmasq (needs /etc, /var, user-switch to nobody), and configures
+# iptables, bridges, VLANs. Sandboxing breaks child processes.
+
+# Network capabilities (required for firewall, routing, switch ASIC, VPN)
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_MODULE
 

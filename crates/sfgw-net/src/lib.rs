@@ -162,70 +162,63 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
         }
     }
 
-    // Auto-create default network zones on first boot.
-    // If the networks table is empty, seed it with LAN (active) plus
-    // prepared-but-disabled zones for MGMT, Guest, and DMZ.
+    // Ensure default network zones exist. Uses INSERT OR IGNORE so that
+    // existing user-configured zones are never overwritten, but missing
+    // defaults (e.g. Guest/DMZ added in a later version) are backfilled.
     let conn2 = db.lock().await;
-    // Check for non-void networks only. The void VLAN 1 entry is always inserted
-    // by migration 005, so COUNT(*) is never 0 on a post-005 database.
-    // We seed defaults only if there are no user-visible (non-void) networks yet.
-    let network_count: i64 = conn2
-        .query_row("SELECT COUNT(*) FROM networks WHERE zone != 'void'", [], |row| row.get(0))
-        .map_err(NetError::Database)?;
 
-    if network_count == 0 {
-        // Note: Void VLAN 1 is always inserted by migration 005 — no need to seed it here.
-        #[allow(clippy::type_complexity)]
-        let defaults: &[(&str, &str, Option<i32>, &str, &str, &str, &str, bool)] = &[
-            (
-                "LAN",
-                "lan",
-                Some(10),
-                "192.168.1.0/24",
-                "192.168.1.1",
-                "192.168.1.100",
-                "192.168.1.254",
-                true,
-            ),
-            (
-                "Management",
-                "mgmt",
-                Some(3000),
-                "10.0.0.0/24",
-                "10.0.0.1",
-                "10.0.0.100",
-                "10.0.0.254",
-                true,
-            ),
-            (
-                "Guest",
-                "guest",
-                Some(3001),
-                "192.168.3.0/24",
-                "192.168.3.1",
-                "192.168.3.100",
-                "192.168.3.254",
-                false,
-            ),
-            (
-                "DMZ",
-                "dmz",
-                Some(3002),
-                "172.16.0.0/24",
-                "172.16.0.1",
-                "172.16.0.100",
-                "172.16.0.254",
-                false,
-            ),
-        ];
+    #[allow(clippy::type_complexity)]
+    let defaults: &[(&str, &str, Option<i32>, &str, &str, &str, &str, bool)] = &[
+        (
+            "LAN",
+            "lan",
+            Some(10),
+            "192.168.1.0/24",
+            "192.168.1.1",
+            "192.168.1.100",
+            "192.168.1.254",
+            true,
+        ),
+        (
+            "Management",
+            "mgmt",
+            Some(3000),
+            "10.0.0.0/24",
+            "10.0.0.1",
+            "10.0.0.100",
+            "10.0.0.254",
+            true,
+        ),
+        (
+            "Guest",
+            "guest",
+            Some(3001),
+            "192.168.3.0/24",
+            "192.168.3.1",
+            "192.168.3.100",
+            "192.168.3.254",
+            true,
+        ),
+        (
+            "DMZ",
+            "dmz",
+            Some(3002),
+            "172.16.0.0/24",
+            "172.16.0.1",
+            "172.16.0.100",
+            "172.16.0.254",
+            true,
+        ),
+    ];
 
-        for (name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, enabled) in defaults {
-            conn2.execute(
-                "INSERT INTO networks (name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, dhcp_enabled, enabled)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)",
-                rusqlite::params![name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, *enabled as i32],
-            ).map_err(NetError::Database)?;
+    for (name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, enabled) in defaults {
+        let inserted = conn2.execute(
+            "INSERT OR IGNORE INTO networks (name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, dhcp_enabled, enabled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)",
+            rusqlite::params![name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, *enabled as i32],
+        ).map_err(NetError::Database)?;
 
+        if inserted > 0 {
             tracing::info!(
                 name,
                 zone,
@@ -238,8 +231,43 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
     }
     drop(conn2);
 
+    // Enable IPv4/IPv6 forwarding — required for routing between zones and WAN.
+    for path in &[
+        "/proc/sys/net/ipv4/ip_forward",
+        "/proc/sys/net/ipv6/conf/all/forwarding",
+    ] {
+        if let Err(e) = tokio::fs::write(path, "1").await {
+            tracing::warn!(path, "failed to enable forwarding: {e}");
+        } else {
+            tracing::info!(path, "IP forwarding enabled");
+        }
+    }
+
     // Setup hardware switch VLANs and Linux bridges for all enabled networks.
     switch::setup_networks(db, switch_layout.as_ref()).await?;
+
+    // Start switch ASIC watchdog if we have a hardware switch.
+    // Detects external reprogramming (e.g. ubios-udapi-server restart)
+    // and rebuilds the full network stack within 10 seconds.
+    if switch_layout.is_some() {
+        let db_watch = db.clone();
+        tokio::spawn(async move {
+            switch::watchdog_loop(db_watch).await;
+        });
+    }
+
+    // Apply all enabled WAN configs (start DHCP clients, PPPoE, set static routes, etc.)
+    let wan_configs = wan::list_wan_configs(db).await.unwrap_or_default();
+    for wc in &wan_configs {
+        if wc.enabled {
+            if let Err(e) = wan::apply_wan_config(wc).await {
+                tracing::warn!(
+                    interface = %wc.interface,
+                    "failed to apply WAN config at boot: {e}"
+                );
+            }
+        }
+    }
 
     Ok(())
 }
@@ -408,7 +436,7 @@ fn read_sysfs_trimmed(path: &Path) -> Result<String> {
 /// and the `RTNETLINK` entries in `/proc/net/fib_trie` (IPv4).
 ///
 /// For simplicity and zero-dependency operation we parse /proc files.
-fn read_ip_addresses(iface_name: &str) -> Vec<String> {
+pub(crate) fn read_ip_addresses(iface_name: &str) -> Vec<String> {
     let mut addrs = Vec::new();
 
     // IPv4: parse /proc/net/fib_trie is complex; use /proc/net/if_net (not available).
@@ -977,7 +1005,7 @@ mod tests {
                     "192.168.3.1",
                     "192.168.3.100",
                     "192.168.3.254",
-                    false,
+                    true,
                 ),
                 (
                     "DMZ",
@@ -987,13 +1015,13 @@ mod tests {
                     "172.16.0.1",
                     "172.16.0.100",
                     "172.16.0.254",
-                    false,
+                    true,
                 ),
             ];
 
             for (name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, enabled) in defaults {
                 conn.execute(
-                    "INSERT INTO networks (name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, dhcp_enabled, enabled)
+                    "INSERT OR IGNORE INTO networks (name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, dhcp_enabled, enabled)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)",
                     rusqlite::params![name, zone, vlan_id, subnet, gateway, dhcp_start, dhcp_end, *enabled as i32],
                 ).expect("failed to insert default network");
@@ -1047,32 +1075,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_default_networks_not_reseeded() {
+    async fn test_existing_networks_not_overwritten() {
         let db = test_db().await;
 
-        // The DB already has void from migration 005. Insert a custom LAN to simulate
-        // an existing user configuration. configure() should not seed defaults.
+        // Insert a custom LAN with non-default subnet to simulate user config.
+        // INSERT OR IGNORE should skip this zone (name "LAN" already taken)
+        // but still insert MGMT, Guest, DMZ defaults.
         {
             let conn = db.lock().await;
             conn.execute(
-                "INSERT INTO networks (name, zone, subnet, gateway, enabled)
-                 VALUES ('CustomLAN', 'lan', '10.10.0.0/24', '10.10.0.1', 1)",
+                "INSERT INTO networks (name, zone, vlan_id, subnet, gateway, enabled)
+                 VALUES ('LAN', 'lan', 10, '10.10.0.0/24', '10.10.0.1', 1)",
                 [],
             )
             .expect("failed to insert custom network");
         }
 
-        // configure() checks non-void count. CustomLAN is non-void, so count=1 — no reseeding.
+        // Run INSERT OR IGNORE for all defaults (same logic as configure())
+        {
+            let conn = db.lock().await;
+            for (name, zone, vlan_id, subnet, gw) in &[
+                ("LAN", "lan", 10, "192.168.1.0/24", "192.168.1.1"),
+                ("Management", "mgmt", 3000, "10.0.0.0/24", "10.0.0.1"),
+                ("Guest", "guest", 3001, "192.168.3.0/24", "192.168.3.1"),
+                ("DMZ", "dmz", 3002, "172.16.0.0/24", "172.16.0.1"),
+            ] {
+                conn.execute(
+                    "INSERT OR IGNORE INTO networks (name, zone, vlan_id, subnet, gateway, dhcp_enabled, enabled)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 1, 1)",
+                    rusqlite::params![name, zone, vlan_id, subnet, gw],
+                ).expect("insert or ignore failed");
+            }
+        }
+
         let conn = db.lock().await;
-        let non_void: i64 = conn
+
+        // CustomLAN should keep its custom subnet (not overwritten)
+        let lan_subnet: String = conn
+            .query_row("SELECT subnet FROM networks WHERE zone = 'lan'", [], |r| r.get(0))
+            .expect("LAN should exist");
+        assert_eq!(lan_subnet, "10.10.0.0/24", "custom LAN subnet must not be overwritten");
+
+        // Missing defaults should have been backfilled
+        let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM networks WHERE zone != 'void'", [], |r| r.get(0))
             .expect("count query failed");
-        assert_eq!(non_void, 1, "should have exactly 1 non-void network (no reseeding triggered)");
-
-        // Total = void + CustomLAN = 2
-        let total: i64 = conn
-            .query_row("SELECT COUNT(*) FROM networks", [], |r| r.get(0))
-            .expect("total count query failed");
-        assert_eq!(total, 2, "total should be 2 (void from migration + custom LAN)");
+        assert_eq!(total, 4, "should have 4 non-void networks (custom LAN + 3 backfilled defaults)");
     }
 }

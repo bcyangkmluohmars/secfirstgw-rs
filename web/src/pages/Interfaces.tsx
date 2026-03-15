@@ -110,7 +110,7 @@ export default function Interfaces() {
     return z ? z.zone.toLowerCase() : 'guest'
   }
 
-  // Group by zone (using role field — for zone cards section only)
+  // Group by zone (derived from pvid) — for zone cards section
   const zoneGroups = new Map<string, NetworkInterface[]>()
   const bridgeMembers = new Map<string, string[]>()
   const physicalOnly: NetworkInterface[] = []
@@ -120,16 +120,23 @@ export default function Interfaces() {
     ifaceByName.set(iface.name, iface)
 
     if (iface.name.startsWith('br-')) {
-      const z = iface.role
-      const members = interfaces
-        .filter(i => !i.name.startsWith('br-') && i.role === z && i.vlan_id == null && i.name !== iface.name)
-        .map(i => i.name)
+      // Derive zone from bridge name (br-lan → lan, br-mgmt → mgmt)
+      const brZoneName = iface.name.replace('br-', '')
+      // Find the VLAN ID for this zone from the zones API
+      const brZoneInfo = zones.find(z => z.zone.toLowerCase() === brZoneName)
+      const brVlanId = brZoneInfo?.vlan_id
+      // Only match physical ethN/switchN ports whose pvid matches this bridge's zone VLAN
+      const members = brVlanId != null
+        ? interfaces
+            .filter(i => /^(eth\d|switch\d)/.test(i.name) && i.pvid === brVlanId && i.name !== iface.name)
+            .map(i => i.name)
+        : []
       bridgeMembers.set(iface.name, members)
     }
 
-    const role = iface.role.toLowerCase()
-    if (!zoneGroups.has(role)) zoneGroups.set(role, [])
-    zoneGroups.get(role)!.push(iface)
+    const zone = pvid2Zone(iface.pvid)
+    if (!zoneGroups.has(zone)) zoneGroups.set(zone, [])
+    zoneGroups.get(zone)!.push(iface)
 
     if (iface.vlan_id == null && !iface.name.startsWith('br-')) {
       physicalOnly.push(iface)
@@ -153,7 +160,7 @@ export default function Interfaces() {
 
   const openEdit = (iface: NetworkInterface) => {
     setEditForm({
-      role: iface.role,
+      role: pvid2Zone(iface.pvid),
       mtu: String(iface.mtu),
       vlanId: iface.vlan_id != null ? String(iface.vlan_id) : null,
     })
@@ -262,8 +269,7 @@ export default function Interfaces() {
     getPortIface(bp)?.speed ?? null
 
   // Resolve zone name for a board port using PVID (primary model).
-  // Falls back to iface.role for virtual/bridge interfaces that may lack pvid data,
-  // or to bp.default_zone if the interface isn't in our map yet.
+  // Falls back to bp.default_zone if the interface isn't in our map yet.
   const getPortZone = (bp: BoardPort): string => {
     const iface = getPortIface(bp)
     if (!iface) return bp.default_zone
@@ -678,14 +684,15 @@ export default function Interfaces() {
                 <p className="text-xs text-navy-400 uppercase tracking-wider font-medium mb-3">Bridges</p>
                 <div className="space-y-2">
                   {interfaces.filter(i => i.name.startsWith('br-')).map(br => {
-                    const c = zoneColor(br.role)
+                    const brZone = br.name.replace('br-', '')
+                    const c = zoneColor(brZone)
                     const members = bridgeMembers.get(br.name) ?? []
                     return (
                       <div key={br.name} className={`rounded-lg border ${c.border} ${c.bg} p-3`}>
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-3">
                             <span className="text-xs font-mono font-semibold text-gray-200">{br.name}</span>
-                            <Badge variant={roleVariant(br.role)}>{br.role.toUpperCase()}</Badge>
+                            <Badge variant={roleVariant(brZone)}>{brZone.toUpperCase()}</Badge>
                             {br.ips?.map((ip, i) => (
                               <span key={i} className="text-xs font-mono text-gray-400">{ip}</span>
                             ))}
@@ -903,7 +910,7 @@ export default function Interfaces() {
           <Modal open={editIface !== null} onClose={() => setEditIface(null)} title={`Edit: ${editIface?.name ?? ''}`}>
             <div className="space-y-4">
               {editIface && (
-                <div className={`rounded-lg border p-3 flex items-center gap-3 ${zoneColor(editIface.role).border} ${zoneColor(editIface.role).bg}`}>
+                <div className={`rounded-lg border p-3 flex items-center gap-3 ${zoneColor(pvid2Zone(editIface.pvid)).border} ${zoneColor(pvid2Zone(editIface.pvid)).bg}`}>
                   <div>
                     <p className="text-xs text-navy-400">
                       {editIface.port_type ?? 'Unknown'}{editIface.speed ? ` · ${editIface.speed}` : ''}{editIface.driver ? ` · ${editIface.driver}` : ''}

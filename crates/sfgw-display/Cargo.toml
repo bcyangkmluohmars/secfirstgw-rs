@@ -9,6 +9,7 @@ license.workspace = true
 sfgw-hal = { path = "../sfgw-hal" }
 anyhow.workspace = true
 libc.workspace = true
+nix.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde = { workspace = true }

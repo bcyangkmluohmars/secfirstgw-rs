@@ -131,6 +131,169 @@ pub fn init() -> Result<Platform, HalError> {
     Ok(Platform::Vm)
 }
 
+/// Known Ubiquiti board identifiers and their corresponding device models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardInfo {
+    /// Raw board ID from `/proc/ubnthal/board` (e.g. "ea15").
+    pub board_id: String,
+    /// Human-readable model name (e.g. "UniFi Dream Machine Pro").
+    pub model: &'static str,
+    /// Short model name for UI display (e.g. "UDM Pro").
+    pub short_name: &'static str,
+    /// Total number of physical ethernet ports.
+    pub port_count: u8,
+    /// Port layout descriptor for UI rendering.
+    pub ports: &'static [PortDef],
+    /// Hardware switch ASIC layout, if present.
+    pub switch: Option<&'static SwitchAsic>,
+}
+
+impl BoardInfo {
+    /// Returns interface names assigned to WAN by default.
+    #[must_use]
+    pub fn wan_ifaces(&self) -> Vec<&'static str> {
+        self.ports.iter().filter(|p| p.default_zone == "wan").map(|p| p.iface).collect()
+    }
+
+    /// Returns the MGMT interface name, if any.
+    #[must_use]
+    pub fn mgmt_iface(&self) -> Option<&'static str> {
+        self.ports.iter().find(|p| p.default_zone == "mgmt").map(|p| p.iface)
+    }
+}
+
+/// Hardware switch ASIC configuration (e.g. RTL8370B on UDM Pro).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwitchAsic {
+    /// swconfig device name (e.g. "switch0").
+    pub device: &'static str,
+    /// Switch port numbers that are LAN ports.
+    pub lan_ports: &'static [u8],
+    /// CPU port number (internal, always tagged in every VLAN).
+    pub cpu_port: u8,
+    /// Additional internal ports tagged in every VLAN (e.g. SFP+ uplink).
+    pub internal_ports: &'static [u8],
+    /// Dedicated MGMT port number for PVID assignment.
+    pub mgmt_port: Option<u8>,
+}
+
+/// A port definition for UI rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortDef {
+    /// Port label shown in UI (e.g. "1", "WAN1", "SFP+").
+    pub label: &'static str,
+    /// Linux interface name (e.g. "eth0", "eth8").
+    pub iface: &'static str,
+    /// Physical connector type.
+    pub connector: Connector,
+    /// Default zone assignment.
+    pub default_zone: &'static str,
+}
+
+/// Physical port connector type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Connector {
+    Rj45,
+    SfpPlus,
+}
+
+impl fmt::Display for Connector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Connector::Rj45 => write!(f, "RJ45"),
+            Connector::SfpPlus => write!(f, "SFP+"),
+        }
+    }
+}
+
+// Switch ASIC definitions
+static UDMPRO_SWITCH: SwitchAsic = SwitchAsic {
+    device: "switch0",
+    lan_ports: &[0, 1, 2, 3, 4, 5, 6],
+    cpu_port: 8,
+    internal_ports: &[9],
+    mgmt_port: Some(7),
+};
+
+static UDM_SWITCH: SwitchAsic = SwitchAsic {
+    device: "switch0",
+    lan_ports: &[0, 1, 2, 3],
+    cpu_port: 4,
+    internal_ports: &[],
+    mgmt_port: None,
+};
+
+// UDM Pro / SE port definitions
+static UDMPRO_PORTS: &[PortDef] = &[
+    PortDef { label: "1", iface: "eth0", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef { label: "2", iface: "eth1", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef { label: "3", iface: "eth2", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef { label: "4", iface: "eth3", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef { label: "5", iface: "eth4", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef { label: "6", iface: "eth5", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef { label: "7", iface: "eth6", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef { label: "8", iface: "eth7", connector: Connector::Rj45, default_zone: "mgmt" },
+    PortDef { label: "WAN", iface: "eth8", connector: Connector::Rj45, default_zone: "wan" },
+    PortDef { label: "WAN2", iface: "eth9", connector: Connector::SfpPlus, default_zone: "wan" },
+    PortDef { label: "SFP+", iface: "eth10", connector: Connector::SfpPlus, default_zone: "lan" },
+];
+
+static UDM_PORTS: &[PortDef] = &[
+    PortDef { label: "1", iface: "eth0", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef { label: "2", iface: "eth1", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef { label: "3", iface: "eth2", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef { label: "4", iface: "eth3", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef { label: "WAN", iface: "eth4", connector: Connector::Rj45, default_zone: "wan" },
+    PortDef { label: "WAN2", iface: "eth5", connector: Connector::Rj45, default_zone: "wan" },
+];
+
+static USG3P_PORTS: &[PortDef] = &[
+    PortDef { label: "WAN", iface: "eth0", connector: Connector::Rj45, default_zone: "wan" },
+    PortDef { label: "LAN", iface: "eth1", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef { label: "VOIP", iface: "eth2", connector: Connector::Rj45, default_zone: "lan" },
+];
+
+static USG_PRO4_PORTS: &[PortDef] = &[
+    PortDef { label: "WAN", iface: "eth0", connector: Connector::Rj45, default_zone: "wan" },
+    PortDef { label: "LAN", iface: "eth1", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef { label: "WAN2", iface: "eth2", connector: Connector::Rj45, default_zone: "wan" },
+    PortDef { label: "LAN2", iface: "eth3", connector: Connector::Rj45, default_zone: "lan" },
+    PortDef { label: "SFP1", iface: "eth4", connector: Connector::SfpPlus, default_zone: "lan" },
+    PortDef { label: "SFP2", iface: "eth5", connector: Connector::SfpPlus, default_zone: "lan" },
+];
+
+/// Detect the Ubiquiti board model by reading `/proc/ubnthal/board` and
+/// `/proc/ubnthal/system.info`.
+///
+/// Returns `None` if not running on Ubiquiti hardware or board ID is unknown.
+#[must_use]
+pub fn detect_board() -> Option<BoardInfo> {
+    // /proc/ubnthal/board is key=value format, e.g. "boardid=ea15"
+    let board_content = std::fs::read_to_string("/proc/ubnthal/board").ok()?;
+    let board_id = board_content
+        .lines()
+        .find_map(|line| line.strip_prefix("boardid="))
+        .map(|v| v.trim().to_string())?;
+
+    let (model, short_name, port_count, ports, switch) = match board_id.as_str() {
+        "ea15" => ("UniFi Dream Machine Pro", "UDM Pro", 11, UDMPRO_PORTS, Some(&UDMPRO_SWITCH)),
+        "ea22" => ("UniFi Dream Machine SE", "UDM SE", 11, UDMPRO_PORTS, Some(&UDMPRO_SWITCH)),
+        "ea21" => ("UniFi Dream Machine", "UDM", 6, UDM_PORTS, Some(&UDM_SWITCH)),
+        "e610" => ("UniFi Security Gateway 3P", "USG 3P", 3, USG3P_PORTS, None),
+        "e612" => ("UniFi Security Gateway Pro 4", "USG Pro 4", 6, USG_PRO4_PORTS, None),
+        _ => return None,
+    };
+
+    Some(BoardInfo {
+        board_id,
+        model,
+        short_name,
+        port_count,
+        ports,
+        switch,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

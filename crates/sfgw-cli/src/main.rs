@@ -94,27 +94,33 @@ enum CryptoCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter("sfgw=info")
+    // Initialize tracing with a broadcast layer for live SSE event streaming.
+    let (event_tx, broadcast_layer) = sfgw_api::events::init();
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::new("sfgw=info"))
+        .with(tracing_subscriber::fmt::layer())
+        .with(broadcast_layer)
         .init();
 
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Start) => start_services().await?,
+        Some(Commands::Start) => start_services(event_tx).await?,
         Some(Commands::Status) => show_status().await?,
         Some(Commands::Fw { cmd }) => handle_fw(cmd).await?,
         Some(Commands::Vpn { cmd }) => handle_vpn(cmd).await?,
         Some(Commands::Net { cmd }) => handle_net(cmd).await?,
         Some(Commands::Adopt { cmd }) => handle_adopt(cmd).await?,
         Some(Commands::Crypto { cmd }) => handle_crypto(cmd).await?,
-        None => start_services().await?,
+        None => start_services(event_tx).await?,
     }
 
     Ok(())
 }
 
-async fn start_services() -> Result<()> {
+async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
     tracing::info!("starting secfirstgw v{}", env!("CARGO_PKG_VERSION"));
 
     // Phase 1: Hardware init — detect platform (bare metal / VM / Docker)
@@ -165,11 +171,12 @@ async fn start_services() -> Result<()> {
     tracing::info!("starting IDS engine");
     sfgw_ids::start(&db, sfgw_ids::IdsRole::Gateway).await?;
 
-    // Phase 12: Display (auto-detect: character LCD, framebuffer touchscreen, or none)
+    // Phase 12: Display (auto-detect: native LCM, character LCD, framebuffer, or none)
+    // LCM driver spawns its own background thread for periodic stats updates.
     tracing::info!("initializing display");
     let display_config = sfgw_display::auto_detect(&platform);
     let _display = match sfgw_display::init(&display_config) {
-        Ok(d) => Some(d),
+        Ok(d) => d,
         Err(e) => {
             tracing::warn!("display unavailable: {e}");
             None
@@ -178,7 +185,7 @@ async fn start_services() -> Result<()> {
 
     // Phase 13: API server (blocks)
     tracing::info!("starting API server");
-    sfgw_api::serve(&db).await?;
+    sfgw_api::serve(&db, event_tx).await?;
 
     Ok(())
 }

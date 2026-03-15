@@ -428,7 +428,7 @@ pub async fn start_monitor(
 
     let raw_fd = fd.as_raw_fd();
 
-    // Load authorized DNS servers from the database (interfaces with role 'lan' or 'mgmt').
+    // Load authorized DNS servers from the database (LAN pvid=10 or MGMT pvid=3000 interfaces).
     // Falls back to loopback only if loading fails.
     let authorized = load_authorized_from_db(&_db).await.unwrap_or_else(|e| {
         tracing::warn!("Failed to load authorized DNS servers from DB: {e}, using loopback only");
@@ -489,12 +489,12 @@ pub async fn start_monitor(
 
 /// Load authorized DNS server IPs from the database.
 ///
-/// Queries the interfaces table for entries with role 'lan' or 'mgmt',
+/// Queries the interfaces table for LAN (pvid=10) or MGMT (pvid=3000) entries,
 /// parses their IP addresses (stripping CIDR prefix if present), and
 /// returns them as the set of IPs that are allowed to send DNS responses.
 async fn load_authorized_from_db(db: &sfgw_db::Db) -> Result<Vec<IpAddr>> {
     let conn = db.lock().await;
-    let mut stmt = conn.prepare("SELECT ips FROM interfaces WHERE role IN ('lan', 'mgmt')")?;
+    let mut stmt = conn.prepare("SELECT ips FROM interfaces WHERE pvid IN (10, 3000)")?;
     let rows: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
         .filter_map(|r| r.ok())

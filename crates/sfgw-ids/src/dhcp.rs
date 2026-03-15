@@ -402,7 +402,7 @@ pub async fn start_monitor(
 /// Load our own MAC addresses from the interfaces table.
 async fn load_our_macs(db: &sfgw_db::Db) -> Result<Vec<[u8; 6]>> {
     let conn = db.lock().await;
-    let mut stmt = conn.prepare("SELECT mac FROM interfaces WHERE role IN ('lan', 'wan')")?;
+    let mut stmt = conn.prepare("SELECT mac FROM interfaces WHERE pvid IS NOT NULL")?;
     let macs: Vec<[u8; 6]> = stmt
         .query_map([], |row| {
             let mac_str: String = row.get(0)?;

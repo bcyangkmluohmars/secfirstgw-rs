@@ -13,6 +13,7 @@ sfgw-vpn = { path = "../sfgw-vpn" }
 sfgw-dns = { path = "../sfgw-dns" }
 sfgw-ids = { path = "../sfgw-ids" }
 sfgw-adopt = { path = "../sfgw-adopt" }
+sfgw-hal = { path = "../sfgw-hal" }
 sfgw-personality = { path = "../sfgw-personality" }
 anyhow.workspace = true
 tokio.workspace = true
@@ -36,6 +37,8 @@ rcgen.workspace = true
 axum-server.workspace = true
 rustls-pki-types.workspace = true
 rustls-pemfile.workspace = true
+tracing-subscriber.workspace = true
+futures-core = "0.3"
 
 [dev-dependencies]
 x25519-dalek = { workspace = true, features = ["static_secrets"] }
