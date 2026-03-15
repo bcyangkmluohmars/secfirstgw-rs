@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-03-15)
 
 ## Current Position
 
-Phase: 4 of 5 (API)
+Phase: 5 of 5 (Web UI)
 Plan: 1 of ? in current phase — PLAN COMPLETE
-Status: Phase 04 plan 01 complete — port/zone API endpoints with live ASIC+FW reconfiguration
-Last activity: 2026-03-15 — Plan 04-01 complete (port GET/PUT, zone list/get, reconfigure_networks)
+Status: Phase 05 plan 01 complete — switch panel PVID zone coloring with tagged VLAN dots
+Last activity: 2026-03-15 — Plan 05-01 complete (PortConfig/ZoneInfo types, pvid-based switch panel)
 
-Progress: [██████░░░░] 60%
+Progress: [███████░░░] 70%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 5
-- Average duration: ~13 min
-- Total execution time: ~64 min
+- Total plans completed: 6
+- Average duration: ~11 min
+- Total execution time: ~67 min
 
 **By Phase:**
 
@@ -31,10 +31,11 @@ Progress: [██████░░░░] 60%
 | 02-switch-asic | 1 | ~18 min | ~18 min |
 | 03-network-enforcement | 1 | ~18 min | ~18 min |
 | 04-api | 1 | ~18 min | ~18 min |
+| 05-web-ui | 1 | ~3 min | ~3 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (2 min), 01-02 (9 min), 02-01 (18 min), 03-01 (18 min), 04-01 (18 min)
-- Trend: stabilizing at ~18 min for ASIC/FW/API plans
+- Last 5 plans: 01-02 (9 min), 02-01 (18 min), 03-01 (18 min), 04-01 (18 min), 05-01 (3 min)
+- Trend: UI work significantly faster than backend; /api/v1/interfaces already returned pvid/tagged_vlans so no extra API work needed
 
 *Updated after each plan completion*
 
@@ -65,6 +66,8 @@ Decisions logged in PROJECT.md Key Decisions table. Key decisions for current wo
 - [Phase 04-api]: Port PUT releases DB lock before reconfigure — both reconfig fns acquire their own lock
 - [Phase 04-api]: Port update reconfig failure returns 200 — DB is source of truth, ASIC syncs on next boot
 - [Phase 04-api]: Zone-interface association uses pvid = vlan_id match (consistent with Phase 3 PVID zone resolution)
+- [05-01] NetworkInterface updated to include pvid/tagged_vlans — /api/v1/interfaces already returns them, no per-port calls needed
+- [05-01] Switch panel uses pvid exclusively for zone resolution; zone cards section still groups by role field
 
 ### Pending Todos
 
@@ -77,5 +80,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-15
-Stopped at: Completed 04-01-PLAN.md — port/zone API endpoints with live ASIC+FW reconfiguration
+Stopped at: Completed 05-01-PLAN.md — switch panel PVID zone coloring and tagged VLAN dots
 Resume file: None
