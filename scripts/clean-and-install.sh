@@ -282,14 +282,16 @@ stop_existing() {
         # Masking is persistent across reboot — services cannot be started
         # even by other init scripts or dependencies.
         #
-        # Mask everything EXCEPT hardware/system services:
-        #   ubnt-fan       — fan control (hardware safety)
-        #   uhwd           — hardware control daemon (LEDs, thermal)
+        # Mask everything EXCEPT:
         #   ubnd           — button daemon (reset button)
         #   hddtemp        — disk temperature monitoring
         #   lm-sensors     — hardware sensors
         #   earlyoom       — OOM protection
         #   ubnt-zram-swap — swap management
+        #
+        # NOTE: uhwd (hardware daemon) is masked because sfgw configures
+        # the adt7475 fan controller directly via sysfs (hardware-autonomous
+        # mode). See configure_fan_control().
         local UBNT_SERVICES=(
             # Core UniFi platform
             udapi-server                # monolithic network manager
@@ -335,6 +337,8 @@ stop_existing() {
             bluetooth-controller@hci0   # Bluetooth (not needed)
             nginx                       # reverse proxy (sfgw serves directly)
             ulcmd                       # LCD daemon (sfgw talks to MCU directly)
+            uhwd                        # hardware daemon (sfgw manages fan via sysfs)
+            wan_arp_poll                # WAN ARP polling (not needed)
         )
 
         for svc in "${UBNT_SERVICES[@]}"; do
@@ -416,10 +420,12 @@ Wants=local-fs.target
 Conflicts=udapi-server.service
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 ExecStart=/usr/local/bin/sfgw start
 Restart=on-failure
 RestartSec=3
+TimeoutStartSec=120
 WatchdogSec=60
 
 # Logging to persistent storage
@@ -510,6 +516,45 @@ SYSCTL
 
     # Apply now
     sysctl -p /etc/sysctl.d/99-sfgw.conf >/dev/null 2>&1 || true
+}
+
+# ─── Fan Control (Ubiquiti hardware) ─────────────────────────────────────────
+
+configure_fan_control() {
+    local HW="/sys/bus/i2c/devices/4-002e"
+    if [ ! -d "${HW}" ]; then
+        return 0
+    fi
+
+    log "Configuring adt7475 hardware-autonomous fan control..."
+
+    # PWM2 is the active fan on UDM Pro.
+    # Map it to temp2 sensor, set reasonable thresholds,
+    # then switch to chip-managed automatic mode.
+    #
+    # The adt7475 chip handles fan speed autonomously in hardware —
+    # no userspace daemon needed. Linear ramp between point1 and point2.
+
+    # Map PWM2 to temp2 sensor channel
+    echo 2 > "${HW}/pwm2_auto_channels_temp" 2>/dev/null || true
+    # Ramp-up start: 45°C → min PWM (quiet idle)
+    echo 45000 > "${HW}/temp2_auto_point1_temp" 2>/dev/null || true
+    # Full speed at 75°C
+    echo 75000 > "${HW}/temp2_auto_point2_temp" 2>/dev/null || true
+    # Min PWM at point1 (25% = quiet), max at point2 (100%)
+    echo 64 > "${HW}/pwm2_auto_point1_pwm" 2>/dev/null || true
+    echo 255 > "${HW}/pwm2_auto_point2_pwm" 2>/dev/null || true
+    # Switch to automatic mode (chip manages PWM based on temp)
+    echo 2 > "${HW}/pwm2_enable" 2>/dev/null || true
+
+    # Verify
+    local mode
+    mode="$(cat "${HW}/pwm2_enable" 2>/dev/null || echo '?')"
+    if [ "${mode}" = "2" ]; then
+        log "Fan control: adt7475 autonomous mode active (45-75°C ramp)"
+    else
+        warn "Fan control: could not set autonomous mode (pwm2_enable=${mode})"
+    fi
 }
 
 # ─── Start ────────────────────────────────────────────────────────────────────
@@ -627,6 +672,7 @@ main() {
     install_deps
     install_binary
     enable_forwarding
+    configure_fan_control
     install_service
     start_service
     verify_ssh_alive

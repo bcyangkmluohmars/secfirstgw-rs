@@ -159,6 +159,26 @@ secfirstgw has attitude. Error messages, rate-limit responses, honeypot replies,
 
 Open source — add your own personality and submit a PR.
 
+## Platform Notes
+
+### UDM Pro Baseline Load Average
+
+The UDM Pro kernel (4.19) has several I2C hardware monitoring drivers compiled in as builtins (not loadable modules). These poll continuously and cannot be disabled from userspace:
+
+| Driver | Device | Function |
+|--------|--------|----------|
+| `adt7475` | `4-002e` | Temperature sensors, fan RPM, PWM control |
+| `pca953x` | `0-0028` | GPIO expander (LEDs) |
+| `pca954x` | `0-0071` | I2C bus multiplexer |
+| `rtc-s35390a` | `1-0030` | Real-time clock |
+| `dummy` | `1-0031` to `1-0037` | Unused I2C addresses (still polled) |
+
+Additionally, the Annapurna Labs Ethernet switch driver (`al_mod_eth`) runs a permanent link detection loop across all ports in uninterruptible sleep (D-state), which the kernel counts as load.
+
+This results in a **baseline load average of ~1.0-1.2** even when the system is completely idle (0% CPU usage). These are kernel threads in I/O wait — not actual CPU utilization.
+
+The web UI accounts for this by using core-relative thresholds for load average coloring (warn at `cores`, error at `2x cores`) and displaying actual CPU utilization (delta-sampled from `/proc/stat`) separately from load average.
+
 ## Security First
 
 Every design decision prioritizes security:

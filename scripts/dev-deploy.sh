@@ -86,6 +86,24 @@ log "Restarting sfgw service..."
 ssh "${USER}@${TARGET}" bash <<'REMOTE_RESTART'
 set -euo pipefail
 
+# Mask uhwd and wan_arp_poll (sfgw manages fan via sysfs)
+for svc in uhwd wan_arp_poll; do
+    systemctl stop "${svc}.service" 2>/dev/null || true
+    systemctl mask "${svc}.service" 2>/dev/null || true
+done
+
+# Configure adt7475 hardware-autonomous fan control (UDM Pro)
+HW="/sys/bus/i2c/devices/4-002e"
+if [ -d "$HW" ]; then
+    echo 2 > "$HW/pwm2_auto_channels_temp" 2>/dev/null || true
+    echo 45000 > "$HW/temp2_auto_point1_temp" 2>/dev/null || true
+    echo 75000 > "$HW/temp2_auto_point2_temp" 2>/dev/null || true
+    echo 64 > "$HW/pwm2_auto_point1_pwm" 2>/dev/null || true
+    echo 255 > "$HW/pwm2_auto_point2_pwm" 2>/dev/null || true
+    echo 2 > "$HW/pwm2_enable" 2>/dev/null || true
+    echo "Fan: adt7475 autonomous mode (45-75°C ramp)"
+fi
+
 systemctl start sfgw.service
 sleep 2
 
