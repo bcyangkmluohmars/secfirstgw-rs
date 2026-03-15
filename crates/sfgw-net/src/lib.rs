@@ -43,14 +43,16 @@ type Result<T> = std::result::Result<T, NetError>;
 ///     ips: vec!["192.168.1.1".to_string()],
 ///     mtu: 1500,
 ///     is_up: true,
-///     role: "wan".to_string(),
+///     pvid: 10,
+///     tagged_vlans: vec![],
 /// };
 ///
 /// // Roundtrip via JSON
 /// let json = serde_json::to_string(&iface).unwrap();
 /// let back: InterfaceInfo = serde_json::from_str(&json).unwrap();
 /// assert_eq!(back.name, "eth0");
-/// assert_eq!(back.role, "wan");
+/// assert_eq!(back.pvid, 10);
+/// assert!(back.tagged_vlans.is_empty());
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterfaceInfo {
@@ -59,7 +61,10 @@ pub struct InterfaceInfo {
     pub ips: Vec<String>,
     pub mtu: u32,
     pub is_up: bool,
-    pub role: String,
+    /// Port VLAN ID (PVID). 0 = WAN (not an internal VLAN port). 10 = default LAN.
+    pub pvid: u16,
+    /// Tagged VLANs trunked on this port. Empty by default; user-configured.
+    pub tagged_vlans: Vec<u16>,
 }
 
 const SYSFS_NET: &str = "/sys/class/net";
@@ -77,12 +82,15 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
     for iface in &interfaces {
         let ips_json = serde_json::to_string(&iface.ips).context("failed to serialize IPs")?;
 
+        let tagged_json =
+            serde_json::to_string(&iface.tagged_vlans).context("failed to serialize tagged_vlans")?;
+
         // Update live state (mac, ips, mtu, is_up) on every boot.
-        // Role is only set on first discovery — never overwritten on subsequent boots
-        // so that user-assigned roles (e.g. WAN via UI) are preserved.
+        // PVID and tagged_vlans are only set on first discovery — never overwritten on
+        // subsequent boots so that user-assigned VLAN config is preserved.
         conn.execute(
-            "INSERT INTO interfaces (name, mac, ips, mtu, is_up, role)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO interfaces (name, mac, ips, mtu, is_up, pvid, tagged_vlans)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(name) DO UPDATE SET
                  mac   = excluded.mac,
                  ips   = excluded.ips,
@@ -94,7 +102,8 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
                 ips_json,
                 iface.mtu,
                 iface.is_up as i32,
-                iface.role,
+                iface.pvid as i32,
+                tagged_json,
             ],
         )
         .with_context(|| format!("failed to upsert interface '{}'", iface.name))?;
@@ -105,7 +114,7 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
             ips = ?iface.ips,
             mtu = iface.mtu,
             is_up = iface.is_up,
-            role = %iface.role,
+            pvid = iface.pvid,
             "discovered network interface"
         );
     }
@@ -118,10 +127,10 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
     // Drop the lock before calling wan functions (they acquire their own lock)
     drop(conn);
 
-    // Auto-create default WAN configs (DHCP) for interfaces with role=wan
+    // Auto-create default WAN configs (DHCP) for interfaces with pvid=0 (WAN ports)
     // that don't already have a wan_config entry.
     for iface in &interfaces {
-        if iface.role == "wan"
+        if iface.pvid == 0
             && let Ok(existing) = wan::get_wan_config(db, &iface.name).await
             && existing.is_none()
         {
@@ -157,17 +166,21 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
     // If the networks table is empty, seed it with LAN (active) plus
     // prepared-but-disabled zones for MGMT, Guest, and DMZ.
     let conn2 = db.lock().await;
+    // Check for non-void networks only. The void VLAN 1 entry is always inserted
+    // by migration 005, so COUNT(*) is never 0 on a post-005 database.
+    // We seed defaults only if there are no user-visible (non-void) networks yet.
     let network_count: i64 = conn2
-        .query_row("SELECT COUNT(*) FROM networks", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM networks WHERE zone != 'void'", [], |row| row.get(0))
         .map_err(NetError::Database)?;
 
     if network_count == 0 {
+        // Note: Void VLAN 1 is always inserted by migration 005 — no need to seed it here.
         #[allow(clippy::type_complexity)]
         let defaults: &[(&str, &str, Option<i32>, &str, &str, &str, &str, bool)] = &[
             (
                 "LAN",
                 "lan",
-                None,
+                Some(10),
                 "192.168.1.0/24",
                 "192.168.1.1",
                 "192.168.1.100",
@@ -235,7 +248,7 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
 pub async fn list_interfaces(db: &sfgw_db::Db) -> Result<Vec<InterfaceInfo>> {
     let conn = db.lock().await;
     let mut stmt = conn
-        .prepare("SELECT name, mac, ips, mtu, is_up, role FROM interfaces")
+        .prepare("SELECT name, mac, ips, mtu, is_up, pvid, tagged_vlans FROM interfaces")
         .context("failed to prepare interface query")?;
 
     let rows = stmt
@@ -245,22 +258,26 @@ pub async fn list_interfaces(db: &sfgw_db::Db) -> Result<Vec<InterfaceInfo>> {
             let ips_json: String = row.get(2)?;
             let mtu: u32 = row.get(3)?;
             let is_up: bool = row.get(4)?;
-            let role: String = row.get(5)?;
-            Ok((name, mac, ips_json, mtu, is_up, role))
+            let pvid_raw: i32 = row.get(5)?;
+            let tagged_json: String = row.get(6)?;
+            Ok((name, mac, ips_json, mtu, is_up, pvid_raw, tagged_json))
         })
         .context("failed to query interfaces")?;
 
     let mut interfaces = Vec::new();
     for row in rows {
-        let (name, mac, ips_json, mtu, is_up, role) = row?;
+        let (name, mac, ips_json, mtu, is_up, pvid_raw, tagged_json) = row?;
         let ips: Vec<String> = serde_json::from_str(&ips_json).unwrap_or_default();
+        let pvid = pvid_raw.clamp(0, u16::MAX as i32) as u16;
+        let tagged_vlans: Vec<u16> = serde_json::from_str(&tagged_json).unwrap_or_default();
         interfaces.push(InterfaceInfo {
             name,
             mac,
             ips,
             mtu,
             is_up,
-            role,
+            pvid,
+            tagged_vlans,
         });
     }
 
@@ -273,10 +290,10 @@ pub async fn list_interfaces(db: &sfgw_db::Db) -> Result<Vec<InterfaceInfo>> {
 
 /// Platform-aware interface detection.
 ///
-/// Role assignment per platform:
-/// - **Docker**: all interfaces → LAN (single NIC, web UI must be reachable)
-/// - **Bare metal (UDM Pro)**: eth8/eth9 → WAN, everything else → LAN
-/// - **Bare metal (generic)**: first physical → WAN, rest → LAN
+/// PVID assignment per platform:
+/// - **Docker**: all interfaces → pvid=10 (LAN; web UI must be reachable)
+/// - **Bare metal (UDM Pro)**: eth8/eth9 → pvid=0 (WAN), eth7 → pvid=3000 (MGMT), rest → pvid=10
+/// - **Bare metal (generic)**: first physical → pvid=0 (WAN), rest → pvid=10
 /// - **VM**: same as generic bare metal
 fn detect_interfaces_for_platform(
     platform: &sfgw_hal::Platform,
@@ -287,125 +304,49 @@ fn detect_interfaces_for_platform(
     match platform {
         sfgw_hal::Platform::Docker => {
             for iface in &mut interfaces {
-                if iface.role == "wan" {
-                    iface.role = "lan".to_string();
+                if iface.pvid == 0 {
+                    iface.pvid = 10;
                     tracing::info!(
                         name = %iface.name,
-                        "Docker mode: reassigned interface from WAN to LAN"
+                        "Docker mode: reassigned interface from WAN (pvid=0) to LAN (pvid=10)"
                     );
                 }
             }
         }
         sfgw_hal::Platform::BareMetal => {
-            if let Some(port_map) = detect_ubnt_port_map() {
+            if let Some(board) = sfgw_hal::detect_board() {
+                let wan = board.wan_ifaces();
+                let mgmt = board.mgmt_iface();
                 for iface in &mut interfaces {
-                    if port_map.wan.contains(&iface.name.as_str()) {
-                        iface.role = "wan".to_string();
-                    } else if port_map.mgmt == Some(iface.name.as_str()) {
-                        iface.role = "mgmt".to_string();
-                    } else if iface.role == "wan" {
-                        iface.role = "lan".to_string();
+                    if wan.contains(&iface.name.as_str()) {
+                        iface.pvid = 0; // WAN: outside internal VLAN space
+                    } else if mgmt == Some(iface.name.as_str()) {
+                        iface.pvid = 3000;
+                    } else if iface.pvid == 0 {
+                        // Default-guessed WAN that isn't actually WAN on this board
+                        iface.pvid = 10;
                     }
                 }
                 tracing::info!(
-                    wan = ?port_map.wan,
-                    mgmt = ?port_map.mgmt,
-                    "port roles assigned from board ID"
+                    board_id = %board.board_id,
+                    model = board.short_name,
+                    ?wan,
+                    ?mgmt,
+                    "port PVIDs assigned from board ID"
                 );
-                switch_layout = port_map.switch;
+                switch_layout = board.switch.map(|sw| switch::SwitchLayout {
+                    device: sw.device.to_string(),
+                    lan_ports: sw.lan_ports.to_vec(),
+                    cpu_port: sw.cpu_port,
+                    internal_ports: sw.internal_ports.to_vec(),
+                    mgmt_port: sw.mgmt_port,
+                });
             }
         }
         sfgw_hal::Platform::Vm => {}
     }
 
     Ok((interfaces, switch_layout))
-}
-
-/// Port role assignments and switch layout for a known board.
-struct BoardPortMap {
-    wan: Vec<&'static str>,
-    mgmt: Option<&'static str>,
-    switch: Option<switch::SwitchLayout>,
-}
-
-/// Detect port roles and switch layout from Ubiquiti board ID.
-///
-/// Reads `/proc/ubnthal/board` and maps known `boardid` values to
-/// WAN/MGMT interface names and hardware switch port layout.
-/// Returns `None` on non-Ubiquiti hardware or unknown board IDs.
-fn detect_ubnt_port_map() -> Option<BoardPortMap> {
-    let board = std::fs::read_to_string("/proc/ubnthal/board").ok()?;
-    let board_id = board
-        .lines()
-        .find(|l| l.starts_with("boardid="))
-        .map(|l| &l[8..])?;
-
-    let map = match board_id {
-        // UDM Pro: RTL8370B, 10 ports (0-7 LAN, 8 CPU, 9 SFP+ LAN)
-        "ea15" => BoardPortMap {
-            wan: vec!["eth8", "eth9"],
-            mgmt: Some("eth7"),
-            switch: Some(switch::SwitchLayout {
-                device: "switch0".to_string(),
-                lan_ports: vec![0, 1, 2, 3, 4, 5, 6],
-                cpu_port: 8,
-                internal_ports: vec![9],
-                mgmt_port: Some(7),
-            }),
-        },
-        // UDM SE: same switch layout as UDM Pro
-        "ea22" => BoardPortMap {
-            wan: vec!["eth8", "eth9"],
-            mgmt: Some("eth7"),
-            switch: Some(switch::SwitchLayout {
-                device: "switch0".to_string(),
-                lan_ports: vec![0, 1, 2, 3, 4, 5, 6],
-                cpu_port: 8,
-                internal_ports: vec![9],
-                mgmt_port: Some(7),
-            }),
-        },
-        // UDM: smaller switch, no dedicated MGMT port
-        "ea21" => BoardPortMap {
-            wan: vec!["eth4", "eth5"],
-            mgmt: None,
-            switch: Some(switch::SwitchLayout {
-                device: "switch0".to_string(),
-                lan_ports: vec![0, 1, 2, 3],
-                cpu_port: 4,
-                internal_ports: vec![],
-                mgmt_port: None,
-            }),
-        },
-        // USG 3P: no switch ASIC
-        "e610" => BoardPortMap {
-            wan: vec!["eth0"],
-            mgmt: None,
-            switch: None,
-        },
-        // USG Pro 4: no switch ASIC
-        "e612" => BoardPortMap {
-            wan: vec!["eth0", "eth2"],
-            mgmt: None,
-            switch: None,
-        },
-        _ => {
-            tracing::info!(
-                board_id,
-                "unknown Ubiquiti board ID — using default role heuristic"
-            );
-            return None;
-        }
-    };
-
-    tracing::info!(
-        board_id,
-        wan = ?map.wan,
-        mgmt = ?map.mgmt,
-        has_switch = map.switch.is_some(),
-        "Ubiquiti board identified"
-    );
-    Some(map)
 }
 
 /// Detect all network interfaces by reading sysfs.
@@ -435,7 +376,8 @@ fn detect_interfaces() -> Result<Vec<InterfaceInfo>> {
         let is_up = operstate == "up";
 
         let ips = read_ip_addresses(&iface_name);
-        let role = guess_role(&iface_name);
+        let pvid = guess_pvid(&iface_name);
+        let tagged_vlans = guess_tagged_vlans();
 
         interfaces.push(InterfaceInfo {
             name: iface_name,
@@ -443,7 +385,8 @@ fn detect_interfaces() -> Result<Vec<InterfaceInfo>> {
             ips,
             mtu,
             is_up,
-            role,
+            pvid,
+            tagged_vlans,
         });
     }
 
@@ -684,25 +627,36 @@ fn hex_to_ipv6(hex: &str) -> Option<String> {
     )
 }
 
-/// Guess a role for the interface based on naming conventions.
-fn guess_role(name: &str) -> String {
+/// Guess the initial PVID for an interface based on naming conventions.
+///
+/// Returns 0 for loopback/VPN/container/virtual interfaces (not internal VLAN ports),
+/// 0 for the first physical interface (likely WAN), and 10 (LAN) for everything else.
+fn guess_pvid(name: &str) -> u16 {
     if name == "lo" {
-        "loopback".to_string()
+        0 // Loopback: not a VLAN port
     } else if name.starts_with("wg") || name.starts_with("tun") || name.starts_with("tap") {
-        "vpn".to_string()
+        0 // VPN tunnels: not a VLAN port
     } else if name.starts_with("docker") || name.starts_with("br-") || name.starts_with("veth") {
-        "container".to_string()
+        0 // Container interfaces: not a VLAN port
     } else if name.starts_with("wl") || name.starts_with("wlan") {
-        "wifi".to_string()
+        10 // WiFi: LAN by default
     } else if name.starts_with("virbr") {
-        "virtual".to_string()
+        0 // Virtual bridge: not a VLAN port
     } else if name.starts_with("eth0") || name.starts_with("ens") || name.starts_with("enp") {
-        // First physical interface is typically WAN
-        "wan".to_string()
+        // First physical interface is typically WAN; pvid=0 signals "not internal VLAN"
+        0
     } else {
         // eth1+, en*, and anything else defaults to LAN
-        "lan".to_string()
+        10
     }
+}
+
+/// Guess tagged VLANs for an interface during auto-detection.
+///
+/// Always returns an empty list — tagged VLAN trunk membership is never
+/// auto-detected, only user-configured. This makes the intent explicit.
+fn guess_tagged_vlans() -> Vec<u16> {
+    vec![]
 }
 
 /// I/O statistics for a single network interface.
@@ -811,14 +765,16 @@ mod tests {
             ips: vec!["192.168.1.1".to_string()],
             mtu: 1500,
             is_up: true,
-            role: "wan".to_string(),
+            pvid: 0,
+            tagged_vlans: vec![],
         };
         assert_eq!(iface.name, "eth0");
         assert_eq!(iface.mac, "aa:bb:cc:dd:ee:ff");
         assert_eq!(iface.ips.len(), 1);
         assert_eq!(iface.mtu, 1500);
         assert!(iface.is_up);
-        assert_eq!(iface.role, "wan");
+        assert_eq!(iface.pvid, 0);
+        assert!(iface.tagged_vlans.is_empty());
     }
 
     #[test]
@@ -829,12 +785,14 @@ mod tests {
             ips: vec!["127.0.0.1".to_string(), "::1/128".to_string()],
             mtu: 65536,
             is_up: true,
-            role: "loopback".to_string(),
+            pvid: 0,
+            tagged_vlans: vec![],
         };
         let json = serde_json::to_string(&iface).expect("serialize failed");
         let deserialized: InterfaceInfo = serde_json::from_str(&json).expect("deserialize failed");
         assert_eq!(deserialized.name, "lo");
         assert_eq!(deserialized.ips.len(), 2);
+        assert_eq!(deserialized.pvid, 0);
     }
 
     #[tokio::test]
@@ -852,8 +810,8 @@ mod tests {
         {
             let conn = db.lock().await;
             conn.execute(
-                "INSERT INTO interfaces (name, mac, ips, mtu, is_up, role)
-                 VALUES ('lo', '00:00:00:00:00:00', '[\"127.0.0.1\"]', 65536, 1, 'loopback')",
+                "INSERT INTO interfaces (name, mac, ips, mtu, is_up, pvid, tagged_vlans)
+                 VALUES ('lo', '00:00:00:00:00:00', '[\"127.0.0.1\"]', 65536, 1, 0, '[]')",
                 [],
             )
             .expect("failed to insert test interface");
@@ -862,52 +820,59 @@ mod tests {
         let interfaces = list_interfaces(&db).await.expect("list_interfaces failed");
         assert_eq!(interfaces.len(), 1);
         assert_eq!(interfaces[0].name, "lo");
-        assert_eq!(interfaces[0].role, "loopback");
+        assert_eq!(interfaces[0].pvid, 0);
+        assert!(interfaces[0].tagged_vlans.is_empty());
         assert!(interfaces[0].is_up);
     }
 
     #[test]
-    fn test_guess_role_loopback() {
-        assert_eq!(guess_role("lo"), "loopback");
+    fn test_guess_pvid_loopback() {
+        assert_eq!(guess_pvid("lo"), 0); // loopback: not a VLAN port
     }
 
     #[test]
-    fn test_guess_role_vpn() {
-        assert_eq!(guess_role("wg0"), "vpn");
-        assert_eq!(guess_role("tun0"), "vpn");
-        assert_eq!(guess_role("tap0"), "vpn");
+    fn test_guess_pvid_vpn() {
+        assert_eq!(guess_pvid("wg0"), 0); // VPN: not a VLAN port
+        assert_eq!(guess_pvid("tun0"), 0);
+        assert_eq!(guess_pvid("tap0"), 0);
     }
 
     #[test]
-    fn test_guess_role_container() {
-        assert_eq!(guess_role("docker0"), "container");
-        assert_eq!(guess_role("br-abc123"), "container");
-        assert_eq!(guess_role("veth1234"), "container");
+    fn test_guess_pvid_container() {
+        assert_eq!(guess_pvid("docker0"), 0); // container: not a VLAN port
+        assert_eq!(guess_pvid("br-abc123"), 0);
+        assert_eq!(guess_pvid("veth1234"), 0);
     }
 
     #[test]
-    fn test_guess_role_wifi() {
-        assert_eq!(guess_role("wlan0"), "wifi");
-        assert_eq!(guess_role("wlp2s0"), "wifi");
+    fn test_guess_pvid_wifi() {
+        assert_eq!(guess_pvid("wlan0"), 10); // WiFi: LAN by default
+        assert_eq!(guess_pvid("wlp2s0"), 10);
     }
 
     #[test]
-    fn test_guess_role_virtual() {
-        assert_eq!(guess_role("virbr0"), "virtual");
+    fn test_guess_pvid_virtual() {
+        assert_eq!(guess_pvid("virbr0"), 0); // virtual bridge: not a VLAN port
     }
 
     #[test]
-    fn test_guess_role_wan() {
-        assert_eq!(guess_role("eth0"), "wan");
-        assert_eq!(guess_role("ens33"), "wan");
-        assert_eq!(guess_role("enp0s3"), "wan");
+    fn test_guess_pvid_wan() {
+        assert_eq!(guess_pvid("eth0"), 0); // first physical: WAN (pvid=0)
+        assert_eq!(guess_pvid("ens33"), 0);
+        assert_eq!(guess_pvid("enp0s3"), 0);
     }
 
     #[test]
-    fn test_guess_role_lan() {
-        assert_eq!(guess_role("eth1"), "lan");
-        assert_eq!(guess_role("en1"), "lan");
-        assert_eq!(guess_role("someother"), "lan");
+    fn test_guess_pvid_lan() {
+        assert_eq!(guess_pvid("eth1"), 10); // LAN default
+        assert_eq!(guess_pvid("en1"), 10);
+        assert_eq!(guess_pvid("someother"), 10);
+    }
+
+    #[test]
+    fn test_guess_tagged_vlans_always_empty() {
+        // Tagged VLANs are never auto-detected, always user-configured.
+        assert!(guess_tagged_vlans().is_empty());
     }
 
     #[test]
@@ -965,23 +930,29 @@ mod tests {
     async fn test_default_networks_seeded_on_empty_db() {
         let db = test_db().await;
 
-        // Simulate what configure() does: seed defaults when networks table is empty
+        // After all migrations, the DB has exactly 1 network: void VLAN 1 (inserted by migration 005).
+        // configure() uses a non-void count check so it seeds when no user-visible networks exist.
         {
             let conn = db.lock().await;
-            let count: i64 = conn
+            let total: i64 = conn
                 .query_row("SELECT COUNT(*) FROM networks", [], |r| r.get(0))
                 .expect("networks table should exist");
-            assert_eq!(count, 0, "fresh DB should have no networks");
+            assert_eq!(total, 1, "fresh DB should have only the void entry from migration 005");
+
+            let non_void: i64 = conn
+                .query_row("SELECT COUNT(*) FROM networks WHERE zone != 'void'", [], |r| r.get(0))
+                .expect("non-void count query failed");
+            assert_eq!(non_void, 0, "fresh DB should have no user-visible networks");
         }
 
-        // Insert defaults (same logic as configure())
+        // Insert defaults (same logic as configure() — does NOT re-insert void, migration handles it)
         {
             let conn = db.lock().await;
             let defaults: &[(&str, &str, Option<i32>, &str, &str, &str, &str, bool)] = &[
                 (
                     "LAN",
                     "lan",
-                    None,
+                    Some(10),
                     "192.168.1.0/24",
                     "192.168.1.1",
                     "192.168.1.100",
@@ -996,7 +967,7 @@ mod tests {
                     "10.0.0.1",
                     "10.0.0.100",
                     "10.0.0.254",
-                    false,
+                    true,
                 ),
                 (
                     "Guest",
@@ -1029,32 +1000,44 @@ mod tests {
             }
         }
 
-        // Verify all 4 networks were created
+        // Total = void (from migration) + 4 seeded = 5
         let conn = db.lock().await;
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM networks", [], |r| r.get(0))
             .expect("count query failed");
-        assert_eq!(count, 4, "should have 4 default networks");
+        assert_eq!(count, 5, "should have 5 total networks (1 void from migration + 4 seeded)");
+
+        // Verify Void VLAN 1 exists and is disabled (inserted by migration 005)
+        let void_vlan: i32 = conn
+            .query_row("SELECT vlan_id FROM networks WHERE zone = 'void'", [], |r| {
+                r.get(0)
+            })
+            .expect("Void network should exist");
+        assert_eq!(void_vlan, 1, "Void should have VLAN 1");
+        let void_enabled: i32 = conn
+            .query_row("SELECT enabled FROM networks WHERE zone = 'void'", [], |r| {
+                r.get(0)
+            })
+            .expect("Void enabled should be readable");
+        assert_eq!(void_enabled, 0, "Void should be disabled");
+
+        // Verify LAN has vlan_id=10 (not NULL)
+        let lan_vlan: i32 = conn
+            .query_row("SELECT vlan_id FROM networks WHERE zone = 'lan'", [], |r| {
+                r.get(0)
+            })
+            .expect("LAN network should exist");
+        assert_eq!(lan_vlan, 10, "LAN should have VLAN 10");
 
         // Verify LAN is enabled
         let lan_enabled: i32 = conn
             .query_row("SELECT enabled FROM networks WHERE zone = 'lan'", [], |r| {
                 r.get(0)
             })
-            .expect("LAN network should exist");
+            .expect("LAN enabled should be readable");
         assert_eq!(lan_enabled, 1, "LAN should be enabled");
 
-        // Verify prepared zones are disabled
-        let mgmt_enabled: i32 = conn
-            .query_row(
-                "SELECT enabled FROM networks WHERE zone = 'mgmt'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("MGMT network should exist");
-        assert_eq!(mgmt_enabled, 0, "MGMT should be disabled");
-
-        // Verify VLAN IDs
+        // Verify VLAN IDs for other zones
         let dmz_vlan: i32 = conn
             .query_row("SELECT vlan_id FROM networks WHERE zone = 'dmz'", [], |r| {
                 r.get(0)
@@ -1067,7 +1050,8 @@ mod tests {
     async fn test_default_networks_not_reseeded() {
         let db = test_db().await;
 
-        // Insert a single network to simulate existing config
+        // The DB already has void from migration 005. Insert a custom LAN to simulate
+        // an existing user configuration. configure() should not seed defaults.
         {
             let conn = db.lock().await;
             conn.execute(
@@ -1078,11 +1062,17 @@ mod tests {
             .expect("failed to insert custom network");
         }
 
-        // The seeding logic should skip because count > 0
+        // configure() checks non-void count. CustomLAN is non-void, so count=1 — no reseeding.
         let conn = db.lock().await;
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM networks", [], |r| r.get(0))
+        let non_void: i64 = conn
+            .query_row("SELECT COUNT(*) FROM networks WHERE zone != 'void'", [], |r| r.get(0))
             .expect("count query failed");
-        assert_eq!(count, 1, "should still have only 1 network (no reseeding)");
+        assert_eq!(non_void, 1, "should have exactly 1 non-void network (no reseeding triggered)");
+
+        // Total = void + CustomLAN = 2
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM networks", [], |r| r.get(0))
+            .expect("total count query failed");
+        assert_eq!(total, 2, "total should be 2 (void from migration + custom LAN)");
     }
 }

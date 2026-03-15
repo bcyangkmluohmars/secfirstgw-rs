@@ -483,18 +483,18 @@ pub async fn set_wan_config(db: &sfgw_db::Db, config: &WanPortConfig) -> Result<
     )
     .context("failed to upsert wan_config")?;
 
-    // Also update the interface role to "wan"
+    // Set the interface pvid=0 to mark it as a WAN port (outside internal VLAN space).
     conn.execute(
-        "UPDATE interfaces SET role = 'wan' WHERE name = ?1",
+        "UPDATE interfaces SET pvid = 0 WHERE name = ?1",
         rusqlite::params![config.interface],
     )
-    .context("failed to update interface role to wan")?;
+    .context("failed to set interface pvid to 0 (WAN)")?;
 
     tracing::info!(
         interface = %config.interface,
         enabled = config.enabled,
         priority = config.priority,
-        "WAN config saved, interface role set to wan"
+        "WAN config saved, interface pvid set to 0 (WAN)"
     );
     Ok(())
 }
@@ -538,15 +538,15 @@ pub async fn remove_wan_config(db: &sfgw_db::Db, interface: &str) -> Result<()> 
     if affected == 0 {
         tracing::warn!(interface, "no WAN config found to remove");
     } else {
-        // Revert interface role back to "lan"
+        // Revert interface pvid back to LAN default (10) when WAN config is removed.
         conn.execute(
-            "UPDATE interfaces SET role = 'lan' WHERE name = ?1 AND role = 'wan'",
+            "UPDATE interfaces SET pvid = 10 WHERE name = ?1 AND pvid = 0",
             rusqlite::params![interface],
         )
-        .context("failed to revert interface role")?;
+        .context("failed to revert interface pvid to LAN default")?;
         tracing::info!(
             interface,
-            "WAN config removed, interface role reverted to lan"
+            "WAN config removed, interface pvid reverted to 10 (LAN default)"
         );
     }
     Ok(())
