@@ -5,7 +5,7 @@
 See: .planning/PROJECT.md (updated 2026-03-15)
 
 **Core value:** Security first — default deny, zero trust, minimal attack surface
-**Current focus:** Phase 4 — API (v0.1.0 VLAN Trunk Model)
+**Current focus:** Phase 5 — Web UI (v0.1.0 VLAN Trunk Model)
 
 ## Current Position
 

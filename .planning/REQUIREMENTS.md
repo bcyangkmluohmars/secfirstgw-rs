@@ -36,9 +36,9 @@ Requirements for VLAN Trunk Model milestone. Each maps to roadmap phases.
 
 ### API
 
-- [ ] **API-01**: Port config endpoint: GET/PUT per-port PVID + tagged VLAN list
-- [ ] **API-02**: Zone endpoint returns associated VLANs
-- [ ] **API-03**: Interfaces endpoint reflects PVID and tagged VLANs instead of role
+- [x] **API-01**: Port config endpoint: GET/PUT per-port PVID + tagged VLAN list
+- [x] **API-02**: Zone endpoint returns associated VLANs
+- [x] **API-03**: Interfaces endpoint reflects PVID and tagged VLANs instead of role
 
 ### Web UI
 
@@ -92,9 +92,9 @@ Deferred to future release.
 | WAN-03 | Phase 3 | ✓ Done |
 | FW-01 | Phase 3 | ✓ Done |
 | FW-02 | Phase 3 | ✓ Done |
-| API-01 | Phase 4 | Pending |
-| API-02 | Phase 4 | Pending |
-| API-03 | Phase 4 | Pending |
+| API-01 | Phase 4 | ✓ Done |
+| API-02 | Phase 4 | ✓ Done |
+| API-03 | Phase 4 | ✓ Done |
 | UI-01 | Phase 5 | Pending |
 | UI-02 | Phase 5 | Pending |
 | UI-03 | Phase 5 | Pending |
