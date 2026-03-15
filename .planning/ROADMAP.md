@@ -1,4 +1,4 @@
-# Roadmap: secfirstgw-rs — v0.1.0 VLAN Trunk Model
+# Roadmap: secfirstgw-rs — v0.2.0 VLAN Trunk Model + LCM Display
 
 ## Overview
 
@@ -7,7 +7,7 @@ Replace the broken single-role port model with a proper VLAN trunk model where z
 ## Milestones
 
 - [x] **v0.0.3 Foundation** — Phases pre-GSD (shipped 2026-03-14)
-- [ ] **v0.1.0 VLAN Trunk Model** — Phases 1-5 (in progress)
+- [~] **v0.2.0 VLAN Trunk Model + LCM Display** — Phases 1-4 complete, Phase 5 partial (tagged 2026-03-15)
 
 ## Phases
 
@@ -127,4 +127,4 @@ Plans:
 | 5. Web UI | 0/2 | In progress | - |
 
 ---
-*Roadmap created: 2026-03-15 for milestone v0.1.0*
+*Roadmap created: 2026-03-15 for milestone v0.2.0 (tagged 2026-03-15)*

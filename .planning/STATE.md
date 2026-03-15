@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-03-15)
 
 **Core value:** Security first — default deny, zero trust, minimal attack surface
-**Current focus:** Phase 5 — Web UI (v0.1.0 VLAN Trunk Model)
+**Current focus:** v0.2.0 tagged — Phase 5 Web UI partial, LCM display driver shipped
 
 ## Current Position
 
-Phase: 5 of 5 (Web UI)
-Plan: 2 of ? in current phase — CHECKPOINT (human-verify)
-Status: Phase 05 plan 02 Task 1 complete — port config panel built, awaiting human verification (Task 2)
-Last activity: 2026-03-15 — Plan 05-02 Task 1 complete (port config panel with PVID selector + tagged VLAN checklist)
+Phase: 5 of 5 (Web UI) — partially complete
+Plan: 05-02 at checkpoint (human-verify)
+Status: v0.2.0 tagged and pushed. Phases 1-4 complete. Phase 5 plan 05-01 done, 05-02 Task 1 done (port config panel), Task 2 awaiting verification. Native LCM display driver shipped outside phase scope.
+Last activity: 2026-03-15 — v0.2.0 tagged, CI fixes, README updated, LCM driver deployed
 
-Progress: [███████░░░] 70%
+Progress: [████████░░] 85%
 
 ## Performance Metrics
 
@@ -82,5 +82,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-15
-Stopped at: 05-02-PLAN.md Task 2 checkpoint (human-verify) — port config panel built, awaiting user verification
+Stopped at: v0.2.0 tagged. Phase 5 plan 05-02 Task 2 checkpoint (human-verify) still pending.
 Resume file: None
