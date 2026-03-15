@@ -54,6 +54,10 @@ const portTypeLabel = (portType: string | null) => {
   return portType
 }
 
+// Determine if a port name is a physical port (not a bridge or VLAN sub-interface)
+const isPhysicalPort = (name: string) =>
+  !name.startsWith('br-') && !name.includes('.')
+
 export default function Interfaces() {
   const [interfaces, setInterfaces] = useState<NetworkInterface[]>([])
   const [zones, setZones] = useState<ZoneInfo[]>([])
@@ -64,6 +68,12 @@ export default function Interfaces() {
   const [vlanForm, setVlanForm] = useState({ parent: '', vlanId: '', role: 'lan' })
   const [editForm, setEditForm] = useState({ role: '', mtu: '', vlanId: '' as string | null })
   const toast = useToast()
+
+  // Port config panel state
+  const [configPort, setConfigPort] = useState<NetworkInterface | null>(null)
+  const [configPvid, setConfigPvid] = useState<number>(10)
+  const [configTagged, setConfigTagged] = useState<number[]>([])
+  const [saving, setSaving] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -150,6 +160,26 @@ export default function Interfaces() {
     setEditIface(iface)
   }
 
+  // Open the port config panel for physical ports
+  const openPortConfig = async (iface: NetworkInterface) => {
+    // Use data from iface if it has pvid/tagged_vlans; otherwise fetch from API
+    if (iface.pvid !== undefined && iface.tagged_vlans !== undefined) {
+      setConfigPort(iface)
+      setConfigPvid(iface.pvid)
+      setConfigTagged(iface.tagged_vlans ?? [])
+    } else {
+      try {
+        const portData = await api.getPort(iface.name)
+        setConfigPort(iface)
+        setConfigPvid(portData.pvid)
+        setConfigTagged(portData.tagged_vlans ?? [])
+      } catch (e: unknown) {
+        toast.error(`Could not load port config: ${(e as Error).message}`)
+        return
+      }
+    }
+  }
+
   const handleCreateVlan = async () => {
     const vid = Number(vlanForm.vlanId)
     if (!vlanForm.parent || !vid || vid < 1 || vid > 4094) {
@@ -178,6 +208,21 @@ export default function Interfaces() {
     } catch (e: unknown) { toast.error((e as Error).message) }
   }
 
+  const handleSavePortConfig = async () => {
+    if (!configPort) return
+    setSaving(true)
+    try {
+      await api.updatePort(configPort.name, { pvid: configPvid, tagged_vlans: configTagged })
+      toast.success(`Port ${configPort.name} updated`)
+      setConfigPort(null)
+      await load()
+    } catch (e: unknown) {
+      toast.error((e as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const handleToggle = async (iface: NetworkInterface) => {
     try {
       await api.toggleInterface(iface.name, !iface.enabled)
@@ -192,6 +237,13 @@ export default function Interfaces() {
       toast.success(`${name} deleted`)
       load()
     } catch (e: unknown) { toast.error((e as Error).message) }
+  }
+
+  // Handle tagged VLAN toggle in config panel
+  const toggleTaggedVlan = (vlanId: number) => {
+    setConfigTagged(prev =>
+      prev.includes(vlanId) ? prev.filter(v => v !== vlanId) : [...prev, vlanId]
+    )
   }
 
   if (loading) return <Spinner label="Loading interfaces..." />
@@ -251,6 +303,15 @@ export default function Interfaces() {
     )
   }
 
+  // ── Port click handler — routes to config panel or old edit modal ───────
+  const handlePortClick = (iface: NetworkInterface) => {
+    if (isPhysicalPort(iface.name)) {
+      openPortConfig(iface)
+    } else {
+      openEdit(iface)
+    }
+  }
+
   // ── Device-specific switch panel (e.g. UDM Pro) ─────────────────────────
   const renderDeviceSwitch = (boardInfo: BoardInfo) => {
     const isSfp = (p: BoardPort) => p.connector === 'SFP+'
@@ -272,7 +333,7 @@ export default function Interfaces() {
       return (
         <button
           key={bp.iface}
-          onClick={() => iface && openEdit(iface)}
+          onClick={() => iface && handlePortClick(iface)}
           className={`relative group flex flex-col items-center justify-center rounded-lg border transition-all cursor-pointer
             ${size === 'sfp' ? 'w-[52px] h-[56px]' : 'w-[56px] h-[72px]'}
             ${isVoid
@@ -434,7 +495,7 @@ export default function Interfaces() {
             return (
               <button
                 key={iface.name}
-                onClick={() => openEdit(iface)}
+                onClick={() => handlePortClick(iface)}
                 className={`relative group flex flex-col items-center justify-center rounded-lg border transition-all
                   ${isBridge ? 'min-w-[100px] px-3' : 'w-[56px]'} h-[72px]
                   ${isVoid
@@ -481,7 +542,7 @@ export default function Interfaces() {
                 )}
 
                 {/* Tagged VLAN dots */}
-                {!isVoid && !isWanPort && renderTaggedDots(iface)}
+                {!isVoid && !isWanPort && !isBridge && renderTaggedDots(iface)}
               </button>
             )
           })}
@@ -508,6 +569,76 @@ export default function Interfaces() {
       </div>
     </div>
   )
+
+  // ── Port config panel helpers ───────────────────────────────────────────
+
+  // Resolve the PVID zone info for the config panel header
+  const configZone = configPort ? pvid2Zone(configPvid) : 'guest'
+  const configZoneColor = zoneColor(configZone)
+
+  // Build zone options for PVID selector:
+  // - WAN: pvid=0, special red styling
+  // - void: pvid=1, special dark styling
+  // - all other zones: pvid = zone.vlan_id
+  interface PvidOption {
+    pvid: number
+    label: string
+    zone: string
+    dotClass: string
+    textClass: string
+    borderClass: string
+    bgClass: string
+  }
+
+  const pvidOptions: PvidOption[] = [
+    {
+      pvid: 0,
+      label: 'WAN (no internal VLAN)',
+      zone: 'wan',
+      dotClass: ZONE_COLORS.wan.dot,
+      textClass: ZONE_COLORS.wan.text,
+      borderClass: ZONE_COLORS.wan.border,
+      bgClass: ZONE_COLORS.wan.bg,
+    },
+    ...zones
+      .filter(z => z.zone.toLowerCase() !== 'wan' && z.vlan_id != null)
+      .sort((a, b) => {
+        // void last, then sort by vlan_id
+        if (a.zone.toLowerCase() === 'void') return 1
+        if (b.zone.toLowerCase() === 'void') return -1
+        return (a.vlan_id ?? 0) - (b.vlan_id ?? 0)
+      })
+      .map(z => {
+        const isVoid = z.zone.toLowerCase() === 'void'
+        const c = zoneColor(z.zone.toLowerCase())
+        return {
+          pvid: z.vlan_id!,
+          label: isVoid
+            ? `VOID — VLAN ${z.vlan_id} (isolated — all traffic dropped)`
+            : `${z.zone.toUpperCase()} (VLAN ${z.vlan_id})`,
+          zone: z.zone.toLowerCase(),
+          dotClass: c.dot,
+          textClass: c.text,
+          borderClass: c.border,
+          bgClass: c.bg,
+        }
+      }),
+  ]
+
+  // Zones available for tagged VLAN checklist:
+  // - exclude void zone
+  // - exclude the current PVID zone (it's already the primary)
+  // - only zones with a vlan_id
+  const taggedOptions = zones.filter(z => {
+    if (z.vlan_id == null) return false
+    if (z.zone.toLowerCase() === 'void') return false
+    if (z.vlan_id === configPvid) return false  // already primary
+    if (z.zone.toLowerCase() === 'wan') return false  // WAN has no internal VLAN
+    return true
+  })
+
+  // WAN ports (pvid=0) and void ports (pvid=1) can't carry tagged VLANs
+  const taggedDisabled = configPvid === 0 || configPvid === 1
 
   return (
     <div className="space-y-6 stagger-children">
@@ -768,7 +899,7 @@ export default function Interfaces() {
             </div>
           </Modal>
 
-          {/* Edit Interface Modal */}
+          {/* Edit Interface Modal (bridges and VLAN sub-interfaces only) */}
           <Modal open={editIface !== null} onClose={() => setEditIface(null)} title={`Edit: ${editIface?.name ?? ''}`}>
             <div className="space-y-4">
               {editIface && (
@@ -801,6 +932,140 @@ export default function Interfaces() {
                 <Button variant="secondary" onClick={() => setEditIface(null)}>Cancel</Button>
               </div>
             </div>
+          </Modal>
+
+          {/* Port Config Panel — for physical ports */}
+          <Modal
+            open={configPort !== null}
+            onClose={() => setConfigPort(null)}
+            title={`Configure: ${configPort?.name ?? ''}`}
+            size="lg"
+          >
+            {configPort && (
+              <div className="space-y-5">
+                {/* Section 1: Port Info (read-only) */}
+                <div className={`rounded-lg border p-3 flex items-center gap-4 ${configZoneColor.border} ${configZoneColor.bg}`}>
+                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${configZoneColor.dot}`} />
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                    <span className="font-mono font-semibold text-gray-200">{configPort.name}</span>
+                    {configPort.mac && (
+                      <span className="font-mono text-navy-400">{configPort.mac}</span>
+                    )}
+                    {configPort.port_type && (
+                      <span className="text-navy-400">{portTypeLabel(configPort.port_type)}</span>
+                    )}
+                    {configPort.speed && (
+                      <span className="text-navy-400">{configPort.speed}</span>
+                    )}
+                    <span className={`font-medium ${configPort.is_up && configPort.enabled ? 'text-emerald-400' : 'text-navy-500'}`}>
+                      {configPort.is_up && configPort.enabled ? 'Link Up' : 'Link Down'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Section 2: Primary Zone (PVID) */}
+                <div>
+                  <p className="text-xs text-navy-400 uppercase tracking-wider font-medium mb-2">Primary Zone (PVID)</p>
+                  <div className="space-y-1.5">
+                    {pvidOptions.map(opt => {
+                      const selected = configPvid === opt.pvid
+                      return (
+                        <button
+                          key={opt.pvid}
+                          onClick={() => {
+                            setConfigPvid(opt.pvid)
+                            // Remove any tagged VLANs that would conflict with new PVID
+                            setConfigTagged(prev => prev.filter(v => v !== opt.pvid))
+                          }}
+                          className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border text-left transition-all
+                            ${selected
+                              ? `${opt.bgClass} ${opt.borderClass} ring-1 ring-inset ${opt.borderClass}`
+                              : 'bg-navy-900/30 border-navy-800/40 hover:bg-navy-800/30'
+                            }`}
+                        >
+                          {/* Radio indicator */}
+                          <span className={`w-4 h-4 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-colors
+                            ${selected ? `${opt.borderClass} border-current` : 'border-navy-600'}`}>
+                            {selected && (
+                              <span className={`w-2 h-2 rounded-full ${opt.dotClass}`} />
+                            )}
+                          </span>
+                          {/* Zone color dot */}
+                          <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${opt.dotClass}`} />
+                          {/* Zone label */}
+                          <span className={`text-sm font-medium ${selected ? opt.textClass : 'text-navy-300'}`}>
+                            {opt.label}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {/* Section 3: Tagged VLANs */}
+                <div>
+                  <p className="text-xs text-navy-400 uppercase tracking-wider font-medium mb-2">
+                    Additional Tagged VLANs
+                    {taggedDisabled && (
+                      <span className="ml-2 text-navy-600 normal-case font-normal">
+                        {configPvid === 0 ? '— not available on WAN ports' : '— not available on void ports'}
+                      </span>
+                    )}
+                  </p>
+                  {taggedOptions.length === 0 && !taggedDisabled ? (
+                    <p className="text-xs text-navy-500 italic">No additional zones available to tag.</p>
+                  ) : (
+                    <div className={`space-y-1.5 ${taggedDisabled ? 'opacity-40 pointer-events-none' : ''}`}>
+                      {taggedOptions.map(z => {
+                        const c = zoneColor(z.zone.toLowerCase())
+                        const checked = configTagged.includes(z.vlan_id!)
+                        return (
+                          <button
+                            key={z.vlan_id}
+                            onClick={() => toggleTaggedVlan(z.vlan_id!)}
+                            disabled={taggedDisabled}
+                            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border text-left transition-all
+                              ${checked
+                                ? `${c.bg} ${c.border}`
+                                : 'bg-navy-900/30 border-navy-800/40 hover:bg-navy-800/30'
+                              }`}
+                          >
+                            {/* Checkbox indicator */}
+                            <span className={`w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors
+                              ${checked ? `${c.border} border-current bg-current/20` : 'border-navy-600'}`}>
+                              {checked && (
+                                <svg className={`w-2.5 h-2.5 ${c.text}`} viewBox="0 0 10 10" fill="none">
+                                  <path d="M1.5 5L4 7.5L8.5 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              )}
+                            </span>
+                            {/* Zone color dot */}
+                            <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${c.dot}`} />
+                            {/* Zone label */}
+                            <span className={`text-sm font-medium ${checked ? c.text : 'text-navy-300'}`}>
+                              {z.zone.toUpperCase()} (VLAN {z.vlan_id})
+                            </span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Section 4: Actions */}
+                <div className="flex gap-2 pt-1 border-t border-navy-800/30">
+                  <Button
+                    onClick={handleSavePortConfig}
+                    disabled={saving}
+                  >
+                    {saving ? 'Saving...' : 'Save'}
+                  </Button>
+                  <Button variant="secondary" onClick={() => setConfigPort(null)} disabled={saving}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
           </Modal>
         </>
       )}
