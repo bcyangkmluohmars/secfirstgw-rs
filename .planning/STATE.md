@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-03-15)
 
 ## Current Position
 
-Phase: 2 of 5 (Switch ASIC)
-Plan: 1 of 1 in current phase — PHASE COMPLETE
-Status: Phase 02 complete — all plans done
-Last activity: 2026-03-15 — Plan 02-01 complete (switch ASIC rewritten to per-port PVID model, 75 tests pass)
+Phase: 3 of 5 (Network Enforcement)
+Plan: 1 of ? in current phase — PLAN COMPLETE
+Status: Phase 03 plan 01 complete — firewall crash fixed, VLAN isolation rules added
+Last activity: 2026-03-15 — Plan 03-01 complete (PVID-based zone resolution, VLAN isolation iptables rules)
 
-Progress: [████░░░░░░] 40%
+Progress: [█████░░░░░] 50%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 3
-- Average duration: ~9.3 min
-- Total execution time: ~28 min
+- Total plans completed: 4
+- Average duration: ~11.5 min
+- Total execution time: ~46 min
 
 **By Phase:**
 
@@ -29,10 +29,11 @@ Progress: [████░░░░░░] 40%
 |-------|-------|-------|----------|
 | 01-data-model | 2 | ~11 min | ~5.5 min |
 | 02-switch-asic | 1 | ~18 min | ~18 min |
+| 03-network-enforcement | 1 | ~18 min | ~18 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (2 min), 01-02 (9 min), 02-01 (18 min)
-- Trend: increasing (larger plans)
+- Last 5 plans: 01-01 (2 min), 01-02 (9 min), 02-01 (18 min), 03-01 (18 min)
+- Trend: stabilizing at ~18 min for firewall/ASIC plans
 
 *Updated after each plan completion*
 
@@ -56,6 +57,10 @@ Decisions logged in PROJECT.md Key Decisions table. Key decisions for current wo
 - [02-01] setup_switch_vlans is now async (reads DB directly); WAN excluded at SQL level (WHERE pvid > 0)
 - [02-01] VLAN 1 catch-all sink always programmed on ASIC; no Linux bridge (setup_bridges skips void)
 - [02-01] Stale cleanup covers 3000-3100 range (zone VLANs) in addition to 1-100
+- [03-01] ZonePolicy.vlan_id: Option<u16> added so iptables emitter derives VLAN DROP rules without re-querying DB
+- [03-01] void zone excluded from routable zone list in load_interface_zones() — DROP-only, never bridged
+- [03-01] VLAN isolation rules placed before zone rules in generate_zone_ruleset() — isolation checked first
+- [03-01] WAN-02/WAN-03 left to switch ASIC hardware enforcement (Phase 2) + zone DROP as defense-in-depth
 
 ### Pending Todos
 
@@ -68,5 +73,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-15
-Stopped at: Completed 02-01-PLAN.md — Phase 02 complete, ready for Phase 03
+Stopped at: Completed 03-01-PLAN.md — PVID zone resolution fixed, VLAN isolation rules enforced
 Resume file: None
