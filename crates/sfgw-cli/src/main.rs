@@ -251,11 +251,16 @@ async fn handle_net(cmd: NetCommands) -> Result<()> {
             let ifaces = sfgw_net::list_interfaces(&db).await?;
             for iface in &ifaces {
                 let status = if iface.is_up { "UP  " } else { "DOWN" };
+                let pvid_str = if iface.pvid == 0 {
+                    "WAN".to_string()
+                } else {
+                    format!("pvid={}", iface.pvid)
+                };
                 println!(
-                    "[{status}] {name:<12} {mac:<18} {role:<8} mtu={mtu} ips={ips}",
+                    "[{status}] {name:<12} {mac:<18} {pvid:<10} mtu={mtu} ips={ips}",
                     name = iface.name,
                     mac = iface.mac,
-                    role = iface.role,
+                    pvid = pvid_str,
                     mtu = iface.mtu,
                     ips = iface.ips.join(", ")
                 );

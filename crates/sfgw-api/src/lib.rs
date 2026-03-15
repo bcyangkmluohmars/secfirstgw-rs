@@ -940,6 +940,21 @@ async fn system_handler(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) 
         .unwrap_or_else(|_| "unknown".to_string())
     };
 
+    let board = sfgw_hal::detect_board().map(|b| {
+        json!({
+            "board_id": b.board_id,
+            "model": b.model,
+            "short_name": b.short_name,
+            "port_count": b.port_count,
+            "ports": b.ports.iter().map(|p| json!({
+                "label": p.label,
+                "iface": p.iface,
+                "connector": p.connector.to_string(),
+                "default_zone": p.default_zone,
+            })).collect::<Vec<_>>(),
+        })
+    });
+
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "schema_version": version,
@@ -948,6 +963,7 @@ async fn system_handler(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) 
         "kernel": read_kernel_version(),
         "arch": read_arch(),
         "cpu_count": read_cpu_count(),
+        "board": board,
     }))
 }
 
@@ -957,7 +973,7 @@ async fn interfaces_handler(
 ) -> impl IntoResponse {
     let conn = db.lock().await;
     let mut stmt = match conn.prepare(
-        "SELECT name, mac, ips, mtu, is_up, role, vlan_id, enabled FROM interfaces ORDER BY name",
+        "SELECT name, mac, ips, mtu, is_up, pvid, tagged_vlans, enabled FROM interfaces ORDER BY name",
     ) {
         Ok(s) => s,
         Err(e) => return internal_err(anyhow::anyhow!("{e}")),
@@ -966,6 +982,9 @@ async fn interfaces_handler(
         let name: String = row.get(0)?;
         let ips_json: String = row.get(2)?;
         let ips: Value = serde_json::from_str(&ips_json).unwrap_or(Value::Array(vec![]));
+        let tagged_json: String = row.get(6)?;
+        let tagged_vlans: Value =
+            serde_json::from_str(&tagged_json).unwrap_or(Value::Array(vec![]));
 
         // Detect hardware port type from sysfs
         let port_info = detect_port_type(&name);
@@ -976,8 +995,8 @@ async fn interfaces_handler(
             "ips": ips,
             "mtu": row.get::<_, i64>(3)?,
             "is_up": row.get::<_, bool>(4)?,
-            "role": row.get::<_, String>(5)?,
-            "vlan_id": row.get::<_, Option<i64>>(6)?,
+            "pvid": row.get::<_, i64>(5)?,
+            "tagged_vlans": tagged_vlans,
             "enabled": row.get::<_, bool>(7)?,
             "speed": port_info.0,
             "driver": port_info.1,
@@ -1076,7 +1095,7 @@ fn format_speed(mbps: i64) -> String {
     }
 }
 
-/// Update interface properties (role, vlan_id, mtu, enabled).
+/// Update interface properties (pvid, tagged_vlans, mtu, enabled).
 async fn interface_update(
     _auth: AuthUser,
     Path(name): Path<String>,
@@ -1085,40 +1104,41 @@ async fn interface_update(
 ) -> impl IntoResponse {
     let conn = db.lock().await;
 
-    // Validate role if provided
-    if let Some(role) = body.get("role").and_then(|v| v.as_str()) {
-        let valid_roles = ["wan", "lan", "dmz", "mgmt", "guest"];
-        if !valid_roles.contains(&role) {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(
-                    json!({ "error": format!("invalid role: {role}. Must be one of: {}", valid_roles.join(", ")) }),
-                ),
-            );
-        }
-    }
-
     // Build dynamic UPDATE
     let mut sets = Vec::new();
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-    if let Some(role) = body.get("role").and_then(|v| v.as_str()) {
-        sets.push("role = ?");
-        params.push(Box::new(role.to_string()));
+    if let Some(pvid) = body.get("pvid").and_then(|v| v.as_i64()) {
+        // pvid=0 is valid (WAN port — outside internal VLAN space). 1-4094 are internal VLANs.
+        if pvid != 0 && !(1..=4094).contains(&pvid) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "pvid must be 0 (WAN) or 1-4094" })),
+            );
+        }
+        sets.push("pvid = ?");
+        params.push(Box::new(pvid));
     }
-    if let Some(vlan_id) = body.get("vlan_id") {
-        sets.push("vlan_id = ?");
-        if vlan_id.is_null() {
-            params.push(Box::new(Option::<i64>::None));
-        } else if let Some(v) = vlan_id.as_i64() {
-            if !(1..=4094).contains(&v) {
+    if let Some(tagged) = body.get("tagged_vlans").and_then(|v| v.as_array()) {
+        // Validate each VLAN ID is in the valid range 1-4094
+        for vlan in tagged {
+            if let Some(v) = vlan.as_i64() {
+                if !(1..=4094).contains(&v) {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({ "error": "tagged VLAN IDs must be 1-4094" })),
+                    );
+                }
+            } else {
                 return (
                     StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(json!({ "error": "vlan_id must be 1-4094" })),
+                    Json(json!({ "error": "tagged_vlans must be an array of integers" })),
                 );
             }
-            params.push(Box::new(Some(v)));
         }
+        let json_str = serde_json::to_string(tagged).unwrap_or_else(|_| "[]".to_string());
+        sets.push("tagged_vlans = ?");
+        params.push(Box::new(json_str));
     }
     if let Some(mtu) = body.get("mtu").and_then(|v| v.as_i64()) {
         if !(576..=9216).contains(&mtu) {
@@ -1216,16 +1236,16 @@ async fn interface_create_vlan(
             );
         }
     };
-    let role = body
-        .get("role")
-        .and_then(|v| v.as_str())
-        .unwrap_or("lan")
-        .to_string();
-    let valid_roles = ["wan", "lan", "dmz", "mgmt", "guest"];
-    if !valid_roles.contains(&role.as_str()) {
+    // pvid for the new VLAN sub-interface defaults to the VLAN ID itself
+    // (the sub-interface carries exactly that VLAN as its native VLAN).
+    let pvid = body
+        .get("pvid")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(vlan_id);
+    if pvid != 0 && !(1..=4094).contains(&pvid) {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({ "error": format!("invalid role: {role}") })),
+            Json(json!({ "error": "pvid must be 0 (WAN) or 1-4094" })),
         );
     }
 
@@ -1267,16 +1287,16 @@ async fn interface_create_vlan(
     }
 
     match conn.execute(
-        "INSERT INTO interfaces (name, mac, ips, mtu, is_up, role, vlan_id, enabled)
-         VALUES (?, '', '[]', 1500, 0, ?, ?, 1)",
-        rusqlite::params![vlan_name, role, vlan_id],
+        "INSERT INTO interfaces (name, mac, ips, mtu, is_up, pvid, tagged_vlans, enabled)
+         VALUES (?, '', '[]', 1500, 0, ?, '[]', 1)",
+        rusqlite::params![vlan_name, pvid],
     ) {
         Ok(_) => {
             tracing::info!(
                 parent = %parent,
                 vlan_id,
                 vlan_name = %vlan_name,
-                role = %role,
+                pvid,
                 "VLAN sub-interface created"
             );
             (
@@ -1284,7 +1304,7 @@ async fn interface_create_vlan(
                 Json(json!({
                     "name": vlan_name,
                     "vlan_id": vlan_id,
-                    "role": role,
+                    "pvid": pvid,
                 })),
             )
         }
@@ -1292,7 +1312,7 @@ async fn interface_create_vlan(
     }
 }
 
-/// Delete a VLAN sub-interface. Only allows deleting VLAN interfaces (has vlan_id).
+/// Delete a VLAN sub-interface. Only allows deleting VLAN interfaces (name contains a dot).
 async fn interface_delete(
     _auth: AuthUser,
     Path(name): Path<String>,
@@ -1300,19 +1320,12 @@ async fn interface_delete(
 ) -> impl IntoResponse {
     let conn = db.lock().await;
 
-    // Only allow deleting VLAN sub-interfaces, not physical ones
-    let is_vlan: bool = conn
-        .query_row(
-            "SELECT vlan_id IS NOT NULL FROM interfaces WHERE name = ?",
-            [&name],
-            |row| row.get::<_, bool>(0),
-        )
-        .unwrap_or(false);
-
-    if !is_vlan {
+    // Only allow deleting VLAN sub-interfaces. These are identified by a dot in the name
+    // (e.g. "eth0.10"). Physical interfaces like "eth0" or "lo" cannot be deleted.
+    if !name.contains('.') {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({ "error": "cannot delete physical interfaces, only VLAN sub-interfaces" })),
+            Json(json!({ "error": "cannot delete physical interfaces, only VLAN sub-interfaces (name must contain a dot)" })),
         );
     }
 
