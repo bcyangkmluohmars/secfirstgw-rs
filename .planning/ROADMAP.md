@@ -19,7 +19,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Data Model** — DB migration to PVID + tagged VLAN list, void VLAN 1, LAN VLAN 10 defaults *(completed 2026-03-15)*
 - [x] **Phase 2: Switch ASIC** — swconfig programming driven by per-port config (UDM Pro hardware addon) *(completed 2026-03-15)*
-- [ ] **Phase 3: Network Enforcement** — WAN isolation + firewall rules updated for new VLAN ID scheme
+- [x] **Phase 3: Network Enforcement** — WAN isolation + firewall rules updated for new VLAN ID scheme *(completed 2026-03-15)*
 - [ ] **Phase 4: API** — REST endpoints exposing PVID, tagged VLANs, and zone→VLAN relationships
 - [ ] **Phase 5: Web UI** — Switch visualization with port VLAN config, colored zone dots, board-specific layout
 
@@ -74,7 +74,7 @@ Plans:
 **Plans:** 1 plan
 
 Plans:
-- [ ] 03-01-PLAN.md — Fix load_interface_zones() for PVID model + add VLAN isolation iptables rules
+- [x] 03-01-PLAN.md — Fix load_interface_zones() for PVID model + add VLAN isolation iptables rules
 
 ---
 
@@ -121,7 +121,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Data Model | 2/2 | ✓ Complete | 2026-03-15 |
 | 2. Switch ASIC | 1/1 | ✓ Complete | 2026-03-15 |
-| 3. Network Enforcement | 0/1 | In progress | - |
+| 3. Network Enforcement | 1/1 | ✓ Complete | 2026-03-15 |
 | 4. API | 0/? | Not started | - |
 | 5. Web UI | 0/? | Not started | - |
 

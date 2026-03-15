@@ -25,14 +25,14 @@ Requirements for VLAN Trunk Model milestone. Each maps to roadmap phases.
 
 ### WAN Isolation
 
-- [ ] **WAN-01**: WAN ports cannot receive internal VLANs (10, 3000, 3001, etc.)
-- [ ] **WAN-02**: Internal ports cannot receive WAN provider VLANs
-- [ ] **WAN-03**: Provider VLAN config (e.g. VLAN 7 Telekom) stays in WAN config only
+- [x] **WAN-01**: WAN ports cannot receive internal VLANs (10, 3000, 3001, etc.)
+- [x] **WAN-02**: Internal ports cannot receive WAN provider VLANs
+- [x] **WAN-03**: Provider VLAN config (e.g. VLAN 7 Telekom) stays in WAN config only
 
 ### Firewall
 
-- [ ] **FW-01**: Firewall rules updated for new VLAN ID scheme (VLAN 10 = LAN, not VLAN 1)
-- [ ] **FW-02**: VLAN 1 catch-all DROP rule on all chains (void VLAN enforcement)
+- [x] **FW-01**: Firewall rules updated for new VLAN ID scheme (VLAN 10 = LAN, not VLAN 1)
+- [x] **FW-02**: VLAN 1 catch-all DROP rule on all chains (void VLAN enforcement)
 
 ### API
 
@@ -87,11 +87,11 @@ Deferred to future release.
 | ASIC-01 | Phase 2 | ✓ Done |
 | ASIC-02 | Phase 2 | ✓ Done |
 | ASIC-03 | Phase 2 | ✓ Done |
-| WAN-01 | Phase 3 | Pending |
-| WAN-02 | Phase 3 | Pending |
-| WAN-03 | Phase 3 | Pending |
-| FW-01 | Phase 3 | Pending |
-| FW-02 | Phase 3 | Pending |
+| WAN-01 | Phase 3 | ✓ Done |
+| WAN-02 | Phase 3 | ✓ Done |
+| WAN-03 | Phase 3 | ✓ Done |
+| FW-01 | Phase 3 | ✓ Done |
+| FW-02 | Phase 3 | ✓ Done |
 | API-01 | Phase 4 | Pending |
 | API-02 | Phase 4 | Pending |
 | API-03 | Phase 4 | Pending |
