@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-03-15)
 
 ## Current Position
 
-Phase: 3 of 5 (Network Enforcement)
+Phase: 4 of 5 (API)
 Plan: 1 of ? in current phase — PLAN COMPLETE
-Status: Phase 03 plan 01 complete — firewall crash fixed, VLAN isolation rules added
-Last activity: 2026-03-15 — Plan 03-01 complete (PVID-based zone resolution, VLAN isolation iptables rules)
+Status: Phase 04 plan 01 complete — port/zone API endpoints with live ASIC+FW reconfiguration
+Last activity: 2026-03-15 — Plan 04-01 complete (port GET/PUT, zone list/get, reconfigure_networks)
 
-Progress: [█████░░░░░] 50%
+Progress: [██████░░░░] 60%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
-- Average duration: ~11.5 min
-- Total execution time: ~46 min
+- Total plans completed: 5
+- Average duration: ~13 min
+- Total execution time: ~64 min
 
 **By Phase:**
 
@@ -30,10 +30,11 @@ Progress: [█████░░░░░] 50%
 | 01-data-model | 2 | ~11 min | ~5.5 min |
 | 02-switch-asic | 1 | ~18 min | ~18 min |
 | 03-network-enforcement | 1 | ~18 min | ~18 min |
+| 04-api | 1 | ~18 min | ~18 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (2 min), 01-02 (9 min), 02-01 (18 min), 03-01 (18 min)
-- Trend: stabilizing at ~18 min for firewall/ASIC plans
+- Last 5 plans: 01-01 (2 min), 01-02 (9 min), 02-01 (18 min), 03-01 (18 min), 04-01 (18 min)
+- Trend: stabilizing at ~18 min for ASIC/FW/API plans
 
 *Updated after each plan completion*
 
@@ -61,6 +62,9 @@ Decisions logged in PROJECT.md Key Decisions table. Key decisions for current wo
 - [03-01] void zone excluded from routable zone list in load_interface_zones() — DROP-only, never bridged
 - [03-01] VLAN isolation rules placed before zone rules in generate_zone_ruleset() — isolation checked first
 - [03-01] WAN-02/WAN-03 left to switch ASIC hardware enforcement (Phase 2) + zone DROP as defense-in-depth
+- [Phase 04-api]: Port PUT releases DB lock before reconfigure — both reconfig fns acquire their own lock
+- [Phase 04-api]: Port update reconfig failure returns 200 — DB is source of truth, ASIC syncs on next boot
+- [Phase 04-api]: Zone-interface association uses pvid = vlan_id match (consistent with Phase 3 PVID zone resolution)
 
 ### Pending Todos
 
@@ -73,5 +77,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-15
-Stopped at: Completed 03-01-PLAN.md — PVID zone resolution fixed, VLAN isolation rules enforced
+Stopped at: Completed 04-01-PLAN.md — port/zone API endpoints with live ASIC+FW reconfiguration
 Resume file: None
