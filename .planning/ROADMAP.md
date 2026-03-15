@@ -17,7 +17,7 @@ Replace the broken single-role port model with a proper VLAN trunk model where z
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Data Model** — DB migration to PVID + tagged VLAN list, void VLAN 1, LAN VLAN 10 defaults
+- [x] **Phase 1: Data Model** — DB migration to PVID + tagged VLAN list, void VLAN 1, LAN VLAN 10 defaults *(completed 2026-03-15)*
 - [ ] **Phase 2: Switch ASIC** — swconfig programming driven by per-port config (UDM Pro hardware addon)
 - [ ] **Phase 3: Network Enforcement** — WAN isolation + firewall rules updated for new VLAN ID scheme
 - [ ] **Phase 4: API** — REST endpoints exposing PVID, tagged VLANs, and zone→VLAN relationships
@@ -39,8 +39,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans:** 2 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — DB migration 005: role-to-PVID schema change, void VLAN 1, LAN VLAN 10
-- [ ] 01-02-PLAN.md — Rust code updates: sfgw-net structs/queries/seeding, switch.rs, sfgw-api handlers
+- [x] 01-01-PLAN.md — DB migration 005: role-to-PVID schema change, void VLAN 1, LAN VLAN 10
+- [x] 01-02-PLAN.md — Rust code updates: sfgw-net structs/queries/seeding, switch.rs, sfgw-api handlers
 
 ---
 
@@ -119,7 +119,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Data Model | 0/2 | Planned | - |
+| 1. Data Model | 2/2 | ✓ Complete | 2026-03-15 |
 | 2. Switch ASIC | 0/? | Not started | - |
 | 3. Network Enforcement | 0/? | Not started | - |
 | 4. API | 0/? | Not started | - |

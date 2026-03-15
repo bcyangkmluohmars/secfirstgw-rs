@@ -9,13 +9,13 @@ Requirements for VLAN Trunk Model milestone. Each maps to roadmap phases.
 
 ### Data Model
 
-- [ ] **DATA-01**: VLAN 1 is void — all traffic on VLAN 1 is DROPped by firewall
-- [ ] **DATA-02**: LAN zone defaults to VLAN 10 (not VLAN 1)
-- [ ] **DATA-03**: Each zone owns one or more VLANs (zone → N VLANs relationship)
-- [ ] **DATA-04**: Each port has exactly one PVID (untagged VLAN) determining its primary zone
-- [ ] **DATA-05**: Each port can carry additional tagged VLANs from any zone
-- [ ] **DATA-06**: New/unconfigured ports default to PVID 10 (LAN) — lockout prevention
-- [ ] **DATA-07**: DB migration from role-per-interface to PVID + tagged VLAN list model
+- [x] **DATA-01**: VLAN 1 is void — all traffic on VLAN 1 is DROPped by firewall
+- [x] **DATA-02**: LAN zone defaults to VLAN 10 (not VLAN 1)
+- [x] **DATA-03**: Each zone owns one or more VLANs (zone → N VLANs relationship)
+- [x] **DATA-04**: Each port has exactly one PVID (untagged VLAN) determining its primary zone
+- [x] **DATA-05**: Each port can carry additional tagged VLANs from any zone
+- [x] **DATA-06**: New/unconfigured ports default to PVID 10 (LAN) — lockout prevention
+- [x] **DATA-07**: DB migration from role-per-interface to PVID + tagged VLAN list model
 
 ### Switch ASIC (hardware addon)
 
@@ -77,13 +77,13 @@ Deferred to future release.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DATA-01 | Phase 1 | Pending |
-| DATA-02 | Phase 1 | Pending |
-| DATA-03 | Phase 1 | Pending |
-| DATA-04 | Phase 1 | Pending |
-| DATA-05 | Phase 1 | Pending |
-| DATA-06 | Phase 1 | Pending |
-| DATA-07 | Phase 1 | Pending |
+| DATA-01 | Phase 1 | ✓ Done |
+| DATA-02 | Phase 1 | ✓ Done |
+| DATA-03 | Phase 1 | ✓ Done |
+| DATA-04 | Phase 1 | ✓ Done |
+| DATA-05 | Phase 1 | ✓ Done |
+| DATA-06 | Phase 1 | ✓ Done |
+| DATA-07 | Phase 1 | ✓ Done |
 | ASIC-01 | Phase 2 | Pending |
 | ASIC-02 | Phase 2 | Pending |
 | ASIC-03 | Phase 2 | Pending |
@@ -108,4 +108,4 @@ Deferred to future release.
 
 ---
 *Requirements defined: 2026-03-15*
-*Last updated: 2026-03-15 after roadmap creation*
+*Last updated: 2026-03-15 — Phase 1 complete*
