@@ -1,37 +1,63 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useEffect, useState, useCallback } from 'react'
-import { api, type NetworkInterface } from '../api'
+import { api, type NetworkInterface, type ZoneInfo } from '../api'
 import { PageHeader, Spinner, Badge, Button, Modal, Input, Select, Toggle, Card, EmptyState } from '../components/ui'
 import { useToast } from '../hooks/useToast'
 
 const ROLES = ['wan', 'lan', 'dmz', 'mgmt', 'guest'] as const
 
+const ZONE_COLORS: Record<string, { bg: string; border: string; text: string; dot: string; glow: string }> = {
+  wan:   { bg: 'bg-red-500/10',     border: 'border-red-500/30',     text: 'text-red-400',     dot: 'bg-red-400',     glow: 'shadow-red-500/20' },
+  lan:   { bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', text: 'text-emerald-400', dot: 'bg-emerald-400', glow: 'shadow-emerald-500/20' },
+  dmz:   { bg: 'bg-amber-500/10',   border: 'border-amber-500/30',   text: 'text-amber-400',   dot: 'bg-amber-400',   glow: 'shadow-amber-500/20' },
+  mgmt:  { bg: 'bg-blue-500/10',    border: 'border-blue-500/30',    text: 'text-blue-400',    dot: 'bg-blue-400',    glow: 'shadow-blue-500/20' },
+  guest: { bg: 'bg-gray-500/10',    border: 'border-gray-500/30',    text: 'text-gray-400',    dot: 'bg-gray-400',    glow: 'shadow-gray-500/20' },
+  void:  { bg: 'bg-navy-950',       border: 'border-navy-800/20',    text: 'text-navy-600',    dot: 'bg-navy-700',    glow: '' },
+}
+
+const zoneColor = (zone: string) => ZONE_COLORS[zone.toLowerCase()] ?? ZONE_COLORS.guest
+
 const roleVariant = (r: string) => {
   switch (r.toLowerCase()) {
-    case 'wan': return 'danger' as const
-    case 'lan': return 'success' as const
-    case 'dmz': return 'warning' as const
-    case 'mgmt': return 'info' as const
+    case 'wan':   return 'danger'  as const
+    case 'lan':   return 'success' as const
+    case 'dmz':   return 'warning' as const
+    case 'mgmt':  return 'info'    as const
     case 'guest': return 'neutral' as const
-    default: return 'neutral' as const
+    default:      return 'neutral' as const
   }
 }
 
-const portTypeIcon = (portType: string | null) => {
-  if (!portType) return null
-  const lower = portType.toLowerCase()
-  if (lower.includes('rj45')) return '🔌'
-  if (lower.includes('sfp')) return '💎'
-  if (lower.includes('qsfp')) return '⚡'
-  if (lower.includes('bridge')) return '🌉'
-  if (lower.includes('vlan')) return '🏷️'
-  if (lower.includes('virtual') || lower.includes('veth')) return '☁️'
-  return '🔗'
+interface BoardPort {
+  label: string
+  iface: string
+  connector: string
+  default_zone: string
+}
+
+interface BoardInfo {
+  board_id: string
+  model: string
+  short_name: string
+  port_count: number
+  ports: BoardPort[]
+}
+
+const portTypeLabel = (portType: string | null) => {
+  if (!portType) return ''
+  const l = portType.toLowerCase()
+  if (l.includes('sfp+') || l.includes('sfpp')) return 'SFP+'
+  if (l.includes('sfp')) return 'SFP'
+  if (l.includes('rj45')) return 'RJ45'
+  if (l.includes('bridge')) return 'Bridge'
+  return portType
 }
 
 export default function Interfaces() {
   const [interfaces, setInterfaces] = useState<NetworkInterface[]>([])
+  const [zones, setZones] = useState<ZoneInfo[]>([])
+  const [board, setBoard] = useState<BoardInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [showVlanModal, setShowVlanModal] = useState(false)
   const [editIface, setEditIface] = useState<NetworkInterface | null>(null)
@@ -41,19 +67,77 @@ export default function Interfaces() {
 
   const load = useCallback(async () => {
     try {
-      const res = await api.getInterfaces()
-      setInterfaces(res.interfaces ?? [])
+      const [ifaceRes, sysRes, zoneRes] = await Promise.all([
+        api.getInterfaces(),
+        api.getSystem(),
+        api.getZones(),
+      ])
+      setInterfaces(ifaceRes.interfaces ?? [])
+      setBoard((sysRes.board as BoardInfo) ?? null)
+      setZones(zoneRes.zones ?? [])
     } catch (e: unknown) { toast.error((e as Error).message) }
     finally { setLoading(false) }
   }, [toast])
 
   useEffect(() => { load() }, [load])
 
-  const physicalInterfaces = interfaces.filter((i) => i.vlan_id == null)
-  const vlanInterfaces = interfaces.filter((i) => i.vlan_id != null)
+  // Build vlan_id → ZoneInfo lookup for PVID-based zone resolution
+  const vlanToZone = new Map<number, ZoneInfo>()
+  for (const z of zones) {
+    if (z.vlan_id != null) {
+      vlanToZone.set(z.vlan_id, z)
+    }
+  }
+
+  // Resolve zone name from a port's pvid.
+  // pvid=0  → WAN (outside internal VLAN space)
+  // pvid=1  → void (DROP-all VLAN)
+  // pvid=N  → zone whose vlan_id === N, or 'guest' as fallback
+  const pvid2Zone = (pvid: number): string => {
+    if (pvid === 0) return 'wan'
+    if (pvid === 1) return 'void'
+    const z = vlanToZone.get(pvid)
+    return z ? z.zone.toLowerCase() : 'guest'
+  }
+
+  // Group by zone (using role field — for zone cards section only)
+  const zoneGroups = new Map<string, NetworkInterface[]>()
+  const bridgeMembers = new Map<string, string[]>()
+  const physicalOnly: NetworkInterface[] = []
+  const ifaceByName = new Map<string, NetworkInterface>()
+
+  for (const iface of interfaces) {
+    ifaceByName.set(iface.name, iface)
+
+    if (iface.name.startsWith('br-')) {
+      const z = iface.role
+      const members = interfaces
+        .filter(i => !i.name.startsWith('br-') && i.role === z && i.vlan_id == null && i.name !== iface.name)
+        .map(i => i.name)
+      bridgeMembers.set(iface.name, members)
+    }
+
+    const role = iface.role.toLowerCase()
+    if (!zoneGroups.has(role)) zoneGroups.set(role, [])
+    zoneGroups.get(role)!.push(iface)
+
+    if (iface.vlan_id == null && !iface.name.startsWith('br-')) {
+      physicalOnly.push(iface)
+    }
+  }
+
+  const zoneOrder = ['wan', 'lan', 'mgmt', 'dmz', 'guest']
+  const sortedZones = [...zoneGroups.entries()].sort((a, b) => {
+    const ai = zoneOrder.indexOf(a[0])
+    const bi = zoneOrder.indexOf(b[0])
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi)
+  })
+
+  // Zones visible in the legend (from actual zone data, not just roles)
+  const legendZones = zones.filter(z => z.zone !== 'void').map(z => z.zone.toLowerCase())
 
   const openVlanModal = () => {
-    setVlanForm({ parent: physicalInterfaces[0]?.name ?? '', vlanId: '', role: 'lan' })
+    setVlanForm({ parent: physicalOnly[0]?.name ?? '', vlanId: '', role: 'lan' })
     setShowVlanModal(true)
   }
 
@@ -112,11 +196,324 @@ export default function Interfaces() {
 
   if (loading) return <Spinner label="Loading interfaces..." />
 
+  // ── Switch panel helpers ────────────────────────────────────────────────
+
+  const getPortIface = (bp: BoardPort): NetworkInterface | undefined =>
+    ifaceByName.get(bp.iface)
+
+  const getPortUp = (bp: BoardPort): boolean => {
+    const iface = getPortIface(bp)
+    return iface ? (iface.is_up && iface.enabled) : false
+  }
+
+  const getPortSpeed = (bp: BoardPort): string | null =>
+    getPortIface(bp)?.speed ?? null
+
+  // Resolve zone name for a board port using PVID (primary model).
+  // Falls back to iface.role for virtual/bridge interfaces that may lack pvid data,
+  // or to bp.default_zone if the interface isn't in our map yet.
+  const getPortZone = (bp: BoardPort): string => {
+    const iface = getPortIface(bp)
+    if (!iface) return bp.default_zone
+    // pvid is always present since the server returns it; use it as primary signal
+    return pvid2Zone(iface.pvid)
+  }
+
+  // Render colored dots for tagged VLANs (excluding the PVID's own VLAN)
+  const renderTaggedDots = (iface: NetworkInterface) => {
+    // WAN ports (pvid=0) have no internal VLAN model — skip dots
+    if (iface.pvid === 0) return null
+    // Filter out the PVID itself (already shown as primary color)
+    const tagged = (iface.tagged_vlans ?? []).filter(v => v !== iface.pvid)
+    if (tagged.length === 0) return null
+
+    const maxDots = 3
+    const shown = tagged.slice(0, maxDots)
+    const extra = tagged.length - maxDots
+
+    return (
+      <div className="flex items-center gap-0.5 mt-0.5 justify-center">
+        {shown.map(vlanId => {
+          const z = vlanToZone.get(vlanId)
+          const dotColor = z ? zoneColor(z.zone.toLowerCase()).dot : 'bg-navy-600'
+          return (
+            <span
+              key={vlanId}
+              className={`w-1.5 h-1.5 rounded-full ${dotColor}`}
+              title={z ? `VLAN ${vlanId} (${z.zone})` : `VLAN ${vlanId}`}
+            />
+          )
+        })}
+        {extra > 0 && (
+          <span className="text-[7px] text-navy-500 ml-0.5">+{extra}</span>
+        )}
+      </div>
+    )
+  }
+
+  // ── Device-specific switch panel (e.g. UDM Pro) ─────────────────────────
+  const renderDeviceSwitch = (boardInfo: BoardInfo) => {
+    const isSfp = (p: BoardPort) => p.connector === 'SFP+'
+    const isWan = (p: BoardPort) => p.default_zone === 'wan'
+    const lanPorts = boardInfo.ports.filter(p => !isSfp(p) && !isWan(p) && p.default_zone !== 'mgmt')
+    const mgmtPort = boardInfo.ports.find(p => p.default_zone === 'mgmt')
+    const wanPorts = boardInfo.ports.filter(p => isWan(p) && !isSfp(p))
+    const sfpPorts = boardInfo.ports.filter(p => isSfp(p))
+
+    const renderPort = (bp: BoardPort, size: 'normal' | 'sfp' = 'normal') => {
+      const iface = getPortIface(bp)
+      const zone = getPortZone(bp)
+      const isVoid = zone === 'void'
+      const isWanPort = zone === 'wan'
+      const up = getPortUp(bp)
+      const speed = getPortSpeed(bp)
+      const c = zoneColor(zone)
+
+      return (
+        <button
+          key={bp.iface}
+          onClick={() => iface && openEdit(iface)}
+          className={`relative group flex flex-col items-center justify-center rounded-lg border transition-all cursor-pointer
+            ${size === 'sfp' ? 'w-[52px] h-[56px]' : 'w-[56px] h-[72px]'}
+            ${isVoid
+              ? 'bg-navy-950 border-navy-800/20 opacity-60'
+              : up
+                ? `${c.bg} ${c.border} shadow-md ${c.glow}`
+                : 'bg-navy-900/50 border-navy-800/30 opacity-50'
+            }
+            hover:scale-105 hover:brightness-125`}
+          title={`${bp.iface} — ${isVoid ? 'VOID (unused)' : zone.toUpperCase()}${speed ? ` (${speed})` : ''}`}
+        >
+          {/* Link indicator dot */}
+          <span className={`absolute top-1 right-1 w-1.5 h-1.5 rounded-full ${
+            isVoid ? 'bg-navy-800' : up ? c.dot : 'bg-navy-600'
+          }`} />
+
+          {/* Port label */}
+          <span className={`text-xs font-mono font-bold ${
+            isVoid ? 'text-navy-600' : up ? c.text : 'text-navy-500'
+          }`}>
+            {bp.label}
+          </span>
+
+          {/* Connector type */}
+          <span className="text-[9px] text-navy-500 mt-0.5">{bp.connector}</span>
+
+          {/* VOID label for void ports */}
+          {isVoid && (
+            <span className="text-[8px] text-navy-700 font-mono">VOID</span>
+          )}
+
+          {/* Speed */}
+          {!isVoid && speed && (
+            <span className="text-[8px] text-navy-600">{speed}</span>
+          )}
+
+          {/* Tagged VLAN dots (not for WAN or void) */}
+          {!isVoid && !isWanPort && iface && renderTaggedDots(iface)}
+        </button>
+      )
+    }
+
+    return (
+      <div className="bg-navy-950 border border-navy-800/50 rounded-xl p-5">
+        {/* Device header */}
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-navy-800 border border-navy-700/50 flex items-center justify-center">
+              <svg className="w-4 h-4 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <rect x="2" y="3" width="20" height="18" rx="2" />
+                <line x1="2" y1="9" x2="22" y2="9" />
+                <circle cx="6" cy="6" r="1" fill="currentColor" />
+                <circle cx="10" cy="6" r="1" fill="currentColor" />
+              </svg>
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-gray-200">{boardInfo.short_name}</p>
+              <p className="text-[10px] text-navy-500">{boardInfo.model}</p>
+            </div>
+          </div>
+          <span className="text-[10px] text-navy-500 font-mono">Board: {boardInfo.board_id}</span>
+        </div>
+
+        {/* Port layout — mimics physical front panel */}
+        <div className="flex items-end gap-6">
+          {/* LAN ports group */}
+          {lanPorts.length > 0 && (
+            <div>
+              <p className="text-[9px] text-navy-600 uppercase tracking-wider mb-1.5 text-center">LAN</p>
+              <div className="flex gap-1.5">
+                {lanPorts.map(p => renderPort(p))}
+              </div>
+            </div>
+          )}
+
+          {/* MGMT port */}
+          {mgmtPort && (
+            <div>
+              <p className="text-[9px] text-navy-600 uppercase tracking-wider mb-1.5 text-center">MGMT</p>
+              <div className="flex gap-1.5">
+                {renderPort(mgmtPort)}
+              </div>
+            </div>
+          )}
+
+          {/* Divider */}
+          <div className="w-px h-16 bg-navy-800/50 self-center" />
+
+          {/* WAN ports */}
+          {wanPorts.length > 0 && (
+            <div>
+              <p className="text-[9px] text-navy-600 uppercase tracking-wider mb-1.5 text-center">WAN</p>
+              <div className="flex gap-1.5">
+                {wanPorts.map(p => renderPort(p))}
+              </div>
+            </div>
+          )}
+
+          {/* SFP+ ports */}
+          {sfpPorts.length > 0 && (
+            <div>
+              <p className="text-[9px] text-navy-600 uppercase tracking-wider mb-1.5 text-center">SFP+</p>
+              <div className="flex gap-1.5">
+                {sfpPorts.map(p => renderPort(p, 'sfp'))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Zone legend — based on zone data from API */}
+        <div className="flex flex-wrap items-center justify-center gap-4 mt-4 pt-3 border-t border-navy-800/30">
+          {legendZones
+            .filter((z, i, arr) => arr.indexOf(z) === i) // unique
+            .sort((a, b) => zoneOrder.indexOf(a) - zoneOrder.indexOf(b))
+            .map(z => {
+              const c = zoneColor(z)
+              return (
+                <div key={z} className="flex items-center gap-1.5">
+                  <span className={`w-2 h-2 rounded-full ${c.dot}`} />
+                  <span className={`text-[10px] font-medium uppercase tracking-wider ${c.text}`}>{z}</span>
+                </div>
+              )
+            })}
+          {/* Void indicator */}
+          <div className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-navy-700" />
+            <span className="text-[10px] font-medium uppercase tracking-wider text-navy-600">void</span>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Generic switch panel (no hardware board detected) ───────────────────
+  const renderGenericSwitch = () => (
+    <div className="bg-navy-950 border border-navy-800/50 rounded-xl p-4">
+      <div className="flex flex-wrap gap-2 justify-center">
+        {interfaces
+          .filter(i => i.vlan_id == null)
+          .sort((a, b) => {
+            if (a.name.startsWith('br-') && !b.name.startsWith('br-')) return -1
+            if (!a.name.startsWith('br-') && b.name.startsWith('br-')) return 1
+            return a.name.localeCompare(b.name, undefined, { numeric: true })
+          })
+          .map(iface => {
+            const zone = pvid2Zone(iface.pvid)
+            const isVoid = zone === 'void'
+            const isWanPort = zone === 'wan'
+            const c = zoneColor(zone)
+            const isUp = iface.is_up && iface.enabled
+            const isBridge = iface.name.startsWith('br-')
+            const members = isBridge ? bridgeMembers.get(iface.name) ?? [] : []
+            const label = iface.name.startsWith('br-')
+              ? iface.name.replace('br-', '').toUpperCase()
+              : iface.name.match(/^eth(\d+)$/)?.[1] != null
+                ? String(Number(iface.name.match(/^eth(\d+)$/)![1]) + 1)
+                : iface.name
+
+            return (
+              <button
+                key={iface.name}
+                onClick={() => openEdit(iface)}
+                className={`relative group flex flex-col items-center justify-center rounded-lg border transition-all
+                  ${isBridge ? 'min-w-[100px] px-3' : 'w-[56px]'} h-[72px]
+                  ${isVoid
+                    ? 'bg-navy-950 border-navy-800/20 opacity-60'
+                    : isUp
+                      ? `${c.bg} ${c.border} shadow-md ${c.glow}`
+                      : 'bg-navy-900/50 border-navy-800/30 opacity-50'
+                  }
+                  hover:scale-105 hover:brightness-125 cursor-pointer`}
+              >
+                {/* Link indicator dot */}
+                <span className={`absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full ${
+                  isVoid ? 'bg-navy-800' : isUp ? c.dot : 'bg-navy-600'
+                }`} />
+
+                {/* Port label */}
+                <span className={`text-xs font-mono font-bold ${
+                  isVoid ? 'text-navy-600' : isUp ? c.text : 'text-navy-500'
+                }`}>
+                  {label}
+                </span>
+
+                {/* Port type or VOID label */}
+                {isVoid ? (
+                  <span className="text-[8px] text-navy-700 font-mono mt-0.5">VOID</span>
+                ) : (
+                  <span className="text-[9px] text-navy-500 mt-0.5">
+                    {portTypeLabel(iface.port_type)}
+                  </span>
+                )}
+
+                {/* Bridge member count */}
+                {isBridge && members.length > 0 && (
+                  <span className="text-[8px] text-navy-600 mt-0.5 truncate max-w-[90px]">
+                    {members.length} ports
+                  </span>
+                )}
+
+                {/* Speed */}
+                {!isVoid && iface.speed && (
+                  <span className="text-[8px] text-navy-600">
+                    {iface.speed}
+                  </span>
+                )}
+
+                {/* Tagged VLAN dots */}
+                {!isVoid && !isWanPort && renderTaggedDots(iface)}
+              </button>
+            )
+          })}
+      </div>
+
+      {/* Zone legend */}
+      <div className="flex flex-wrap items-center justify-center gap-4 mt-4 pt-3 border-t border-navy-800/30">
+        {legendZones
+          .filter((z, i, arr) => arr.indexOf(z) === i)
+          .sort((a, b) => zoneOrder.indexOf(a) - zoneOrder.indexOf(b))
+          .map(z => {
+            const c = zoneColor(z)
+            return (
+              <div key={z} className="flex items-center gap-1.5">
+                <span className={`w-2 h-2 rounded-full ${c.dot}`} />
+                <span className={`text-[10px] font-medium uppercase tracking-wider ${c.text}`}>{z}</span>
+              </div>
+            )
+          })}
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-navy-700" />
+          <span className="text-[10px] font-medium uppercase tracking-wider text-navy-600">void</span>
+        </div>
+      </div>
+    </div>
+  )
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 stagger-children">
       <PageHeader
         title="Interfaces"
-        subtitle="Hardware ports, VLANs, and virtual interfaces"
+        subtitle={board ? `${board.short_name} — ${board.port_count} ports` : 'Hardware ports, VLANs, and virtual interfaces'}
       />
 
       {interfaces.length === 0 ? (
@@ -127,10 +524,206 @@ export default function Interfaces() {
         />
       ) : (
         <>
-          {/* Action bar */}
-          <div className="flex items-center gap-2">
-            <Button size="sm" onClick={openVlanModal}>+ Create VLAN</Button>
-          </div>
+          {/* Visual Switch Panel */}
+          <Card noPadding>
+            <div className="p-5">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <p className="text-xs text-navy-400 uppercase tracking-wider font-medium">
+                    {board ? 'Device Ports' : 'Port Overview'}
+                  </p>
+                </div>
+                <Button size="sm" onClick={openVlanModal}>+ Create VLAN</Button>
+              </div>
+
+              {board ? renderDeviceSwitch(board) : renderGenericSwitch()}
+            </div>
+          </Card>
+
+          {/* Bridges & Virtual Interfaces (not shown in device view since board only shows physical) */}
+          {board && interfaces.filter(i => i.name.startsWith('br-')).length > 0 && (
+            <Card noPadding>
+              <div className="p-5">
+                <p className="text-xs text-navy-400 uppercase tracking-wider font-medium mb-3">Bridges</p>
+                <div className="space-y-2">
+                  {interfaces.filter(i => i.name.startsWith('br-')).map(br => {
+                    const c = zoneColor(br.role)
+                    const members = bridgeMembers.get(br.name) ?? []
+                    return (
+                      <div key={br.name} className={`rounded-lg border ${c.border} ${c.bg} p-3`}>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs font-mono font-semibold text-gray-200">{br.name}</span>
+                            <Badge variant={roleVariant(br.role)}>{br.role.toUpperCase()}</Badge>
+                            {br.ips?.map((ip, i) => (
+                              <span key={i} className="text-xs font-mono text-gray-400">{ip}</span>
+                            ))}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] font-mono text-navy-500">MTU {br.mtu}</span>
+                            <Toggle checked={br.enabled} onChange={() => handleToggle(br)} />
+                            <Button variant="secondary" size="sm" onClick={() => openEdit(br)}>Edit</Button>
+                          </div>
+                        </div>
+                        {members.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {members.map(m => {
+                              const mi = ifaceByName.get(m)
+                              const mUp = mi?.is_up && mi?.enabled
+                              return (
+                                <span
+                                  key={m}
+                                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono border
+                                    ${mUp ? 'bg-navy-800/50 border-navy-700/50 text-gray-300' : 'bg-navy-900/50 border-navy-800/30 text-navy-600'}`}
+                                >
+                                  <span className={`w-1 h-1 rounded-full ${mUp ? c.dot : 'bg-navy-600'}`} />
+                                  {m}
+                                  {mi?.speed && <span className="text-navy-500">{mi.speed}</span>}
+                                </span>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            </Card>
+          )}
+
+          {/* Zone Cards */}
+          {sortedZones.map(([zone, ifaces]) => {
+            const c = zoneColor(zone)
+            const bridges = ifaces.filter(i => i.name.startsWith('br-'))
+            const ports = ifaces.filter(i => !i.name.startsWith('br-') && i.vlan_id == null)
+            const vlans = ifaces.filter(i => i.vlan_id != null)
+            const primaryBridge = bridges[0]
+            const primaryIp = primaryBridge?.ips?.[0] ?? ports.find(p => p.ips?.length)?.ips?.[0]
+
+            return (
+              <Card key={zone} noPadding>
+                <div className="p-5">
+                  {/* Zone header */}
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-3 h-3 rounded-full ${c.dot}`} />
+                      <div>
+                        <h3 className={`text-sm font-bold uppercase tracking-wider ${c.text}`}>{zone}</h3>
+                        {primaryIp && (
+                          <span className="text-xs font-mono text-navy-400">{primaryIp}</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-navy-500">
+                        {ifaces.filter(i => i.is_up && i.enabled).length}/{ifaces.length} up
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Bridge info (only in non-board mode) */}
+                  {!board && bridges.map(br => {
+                    const members = bridgeMembers.get(br.name) ?? []
+                    return (
+                      <div key={br.name} className={`rounded-lg border ${c.border} ${c.bg} p-3 mb-3`}>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs font-mono font-semibold text-gray-200">{br.name}</span>
+                            <Badge variant={roleVariant(zone)}>Bridge</Badge>
+                            {br.ips?.map((ip, i) => (
+                              <span key={i} className="text-xs font-mono text-gray-400">{ip}</span>
+                            ))}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] font-mono text-navy-500">MTU {br.mtu}</span>
+                            <Toggle checked={br.enabled} onChange={() => handleToggle(br)} />
+                            <Button variant="secondary" size="sm" onClick={() => openEdit(br)}>Edit</Button>
+                          </div>
+                        </div>
+                        {members.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {members.map(m => {
+                              const mi = ifaceByName.get(m)
+                              const mUp = mi?.is_up && mi?.enabled
+                              return (
+                                <span
+                                  key={m}
+                                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono border
+                                    ${mUp ? 'bg-navy-800/50 border-navy-700/50 text-gray-300' : 'bg-navy-900/50 border-navy-800/30 text-navy-600'}`}
+                                >
+                                  <span className={`w-1 h-1 rounded-full ${mUp ? c.dot : 'bg-navy-600'}`} />
+                                  {m}
+                                  {mi?.speed && <span className="text-navy-500">{mi.speed}</span>}
+                                </span>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+
+                  {/* Non-bridge ports */}
+                  {ports.filter(p => !bridges.some(br => (bridgeMembers.get(br.name) ?? []).includes(p.name))).length > 0 && (
+                    <div className="space-y-1.5">
+                      {ports
+                        .filter(p => !bridges.some(br => (bridgeMembers.get(br.name) ?? []).includes(p.name)))
+                        .map(iface => (
+                          <div key={iface.name} className="flex items-center justify-between py-2 px-3 rounded-lg hover:bg-navy-800/20 transition-colors group">
+                            <div className="flex items-center gap-3">
+                              <span className={`w-2 h-2 rounded-full ${iface.is_up && iface.enabled ? c.dot : 'bg-navy-600'}`} />
+                              <span className="text-sm font-mono font-semibold text-gray-200">{iface.name}</span>
+                              {iface.port_type && (
+                                <span className="text-[10px] text-navy-500">{portTypeLabel(iface.port_type)}</span>
+                              )}
+                              {iface.speed && (
+                                <span className="px-1.5 py-0.5 rounded bg-navy-800 border border-navy-700/50 text-[9px] font-mono text-gray-400">{iface.speed}</span>
+                              )}
+                              {iface.ips?.map((ip, i) => (
+                                <span key={i} className="text-xs font-mono text-gray-400">{ip}</span>
+                              ))}
+                            </div>
+                            <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <span className="text-[10px] font-mono text-navy-500">MTU {iface.mtu}</span>
+                              <Toggle checked={iface.enabled} onChange={() => handleToggle(iface)} />
+                              <Button variant="secondary" size="sm" onClick={() => openEdit(iface)}>Edit</Button>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+
+                  {/* VLANs in this zone */}
+                  {vlans.length > 0 && (
+                    <div className="mt-3 pt-3 border-t border-navy-800/30">
+                      <p className="text-[10px] text-navy-500 uppercase tracking-wider mb-2">VLANs</p>
+                      <div className="space-y-1.5">
+                        {vlans.map(vlan => {
+                          const parentName = vlan.name.includes('.') ? vlan.name.split('.')[0] : '---'
+                          return (
+                            <div key={vlan.name} className="flex items-center justify-between py-2 px-3 rounded-lg hover:bg-navy-800/20 transition-colors group">
+                              <div className="flex items-center gap-3">
+                                <span className={`w-2 h-2 rounded-full ${vlan.is_up && vlan.enabled ? c.dot : 'bg-navy-600'}`} />
+                                <span className="text-sm font-mono text-gray-200">{vlan.name}</span>
+                                <span className="px-1.5 py-0.5 rounded bg-navy-800 border border-navy-700/50 text-[9px] font-mono text-gray-300">VID {vlan.vlan_id}</span>
+                                <span className="text-[10px] text-navy-500">on {parentName}</span>
+                              </div>
+                              <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <Toggle checked={vlan.enabled} onChange={() => handleToggle(vlan)} />
+                                <Button variant="secondary" size="sm" onClick={() => openEdit(vlan)}>Edit</Button>
+                                <Button variant="danger" size="sm" onClick={() => handleDeleteVlan(vlan.name)}>Delete</Button>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </Card>
+            )
+          })}
 
           {/* Create VLAN Modal */}
           <Modal open={showVlanModal} onClose={() => setShowVlanModal(false)} title="Create VLAN Sub-Interface">
@@ -143,7 +736,7 @@ export default function Interfaces() {
                   label="Parent Interface"
                   value={vlanForm.parent}
                   onChange={(e) => setVlanForm({ ...vlanForm, parent: e.target.value })}
-                  options={physicalInterfaces.map((i) => ({
+                  options={physicalOnly.map((i) => ({
                     value: i.name,
                     label: `${i.name}${i.port_type ? ` (${i.port_type})` : ''}`
                   }))}
@@ -179,10 +772,7 @@ export default function Interfaces() {
           <Modal open={editIface !== null} onClose={() => setEditIface(null)} title={`Edit: ${editIface?.name ?? ''}`}>
             <div className="space-y-4">
               {editIface && (
-                <div className="bg-navy-800/50 border border-navy-700/30 rounded-lg p-3 flex items-center gap-3">
-                  {editIface.port_type && (
-                    <span className="text-lg">{portTypeIcon(editIface.port_type)}</span>
-                  )}
+                <div className={`rounded-lg border p-3 flex items-center gap-3 ${zoneColor(editIface.role).border} ${zoneColor(editIface.role).bg}`}>
                   <div>
                     <p className="text-xs text-navy-400">
                       {editIface.port_type ?? 'Unknown'}{editIface.speed ? ` · ${editIface.speed}` : ''}{editIface.driver ? ` · ${editIface.driver}` : ''}
@@ -212,128 +802,6 @@ export default function Interfaces() {
               </div>
             </div>
           </Modal>
-
-          {/* Physical / Hardware Ports */}
-          <Card title="Hardware Ports" noPadding>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-navy-800/50">
-                    {['', 'Port', 'Type', 'MAC', 'IPs', 'Speed', 'MTU', 'Zone', 'Status', ''].map((h, idx) => (
-                      <th key={`${h}-${idx}`} className="text-left px-4 py-3 text-[11px] text-navy-400 uppercase tracking-wider font-medium">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="stagger-children">
-                  {physicalInterfaces.map((iface) => (
-                    <tr key={iface.name} className={`border-b border-navy-800/30 hover:bg-navy-800/20 transition-colors ${!iface.enabled ? 'opacity-40' : ''}`}>
-                      <td className="px-4 py-3 w-10">
-                        <div className="relative">
-                          <span className={`block w-2 h-2 rounded-full ${iface.is_up && iface.enabled ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                          {iface.is_up && iface.enabled && <span className="absolute inset-0 w-2 h-2 rounded-full bg-emerald-400 animate-ping opacity-30" />}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className="font-mono text-gray-200 text-sm font-semibold">{iface.name}</span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-1.5">
-                          {iface.port_type && <span className="text-sm">{portTypeIcon(iface.port_type)}</span>}
-                          <span className="text-xs text-gray-400">{iface.port_type ?? '---'}</span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 font-mono text-navy-500 text-xs">{iface.mac || '---'}</td>
-                      <td className="px-4 py-3 font-mono text-gray-400 text-xs tabular-nums">
-                        {(iface.ips ?? []).length > 0
-                          ? (iface.ips ?? []).map((ip, i) => <div key={i}>{ip}</div>)
-                          : <span className="text-navy-600">---</span>}
-                      </td>
-                      <td className="px-4 py-3">
-                        {iface.speed ? (
-                          <span className="px-2 py-0.5 rounded bg-navy-800 border border-navy-700/50 text-[10px] font-mono text-gray-300 tabular-nums">{iface.speed}</span>
-                        ) : (
-                          <span className="text-navy-600 text-xs">---</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 font-mono text-gray-400 text-xs tabular-nums">{iface.mtu}</td>
-                      <td className="px-4 py-3"><Badge variant={roleVariant(iface.role)}>{iface.role.toUpperCase()}</Badge></td>
-                      <td className="px-4 py-3">
-                        <Toggle checked={iface.enabled} onChange={() => handleToggle(iface)} />
-                      </td>
-                      <td className="px-4 py-3">
-                        <Button variant="secondary" size="sm" onClick={() => openEdit(iface)}>Edit</Button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Card>
-
-          {/* VLAN Sub-Interfaces */}
-          {vlanInterfaces.length > 0 && (
-            <Card title="VLAN Sub-Interfaces" noPadding>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-navy-800/50">
-                      {['', 'Interface', 'VLAN ID', 'Parent', 'Zone', 'MTU', 'Status', ''].map((h, idx) => (
-                        <th key={`${h}-${idx}`} className="text-left px-4 py-3 text-[11px] text-navy-400 uppercase tracking-wider font-medium">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="stagger-children">
-                    {vlanInterfaces.map((iface) => {
-                      const parentName = iface.name.includes('.') ? iface.name.split('.')[0] : '---'
-                      return (
-                        <tr key={iface.name} className={`border-b border-navy-800/30 hover:bg-navy-800/20 transition-colors ${!iface.enabled ? 'opacity-40' : ''}`}>
-                          <td className="px-4 py-3 w-10">
-                            <span className={`w-2 h-2 rounded-full inline-block ${iface.is_up && iface.enabled ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                          </td>
-                          <td className="px-4 py-3 font-mono text-gray-200 text-sm">{iface.name}</td>
-                          <td className="px-4 py-3">
-                            <span className="px-2 py-0.5 rounded bg-navy-800 border border-navy-700/50 text-xs font-mono text-gray-300 tabular-nums">{iface.vlan_id}</span>
-                          </td>
-                          <td className="px-4 py-3 font-mono text-navy-400 text-xs">{parentName}</td>
-                          <td className="px-4 py-3"><Badge variant={roleVariant(iface.role)}>{iface.role.toUpperCase()}</Badge></td>
-                          <td className="px-4 py-3 font-mono text-gray-400 text-xs tabular-nums">{iface.mtu}</td>
-                          <td className="px-4 py-3">
-                            <Toggle checked={iface.enabled} onChange={() => handleToggle(iface)} />
-                          </td>
-                          <td className="px-4 py-3">
-                            <div className="flex gap-1.5">
-                              <Button variant="secondary" size="sm" onClick={() => openEdit(iface)}>Edit</Button>
-                              <Button variant="danger" size="sm" onClick={() => handleDeleteVlan(iface.name)}>Delete</Button>
-                            </div>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
-          )}
-
-          {/* Summary cards */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div className="bg-navy-900 border border-navy-800/50 rounded-xl p-4">
-              <p className="text-[10px] text-navy-500 uppercase tracking-wider">Physical Ports</p>
-              <p className="text-2xl font-semibold text-gray-200 mt-1 tabular-nums">{physicalInterfaces.length}</p>
-            </div>
-            <div className="bg-navy-900 border border-navy-800/50 rounded-xl p-4">
-              <p className="text-[10px] text-navy-500 uppercase tracking-wider">VLANs</p>
-              <p className="text-2xl font-semibold text-gray-200 mt-1 tabular-nums">{vlanInterfaces.length}</p>
-            </div>
-            <div className="bg-navy-900 border border-navy-800/50 rounded-xl p-4">
-              <p className="text-[10px] text-navy-500 uppercase tracking-wider">Active</p>
-              <p className="text-2xl font-semibold text-emerald-400 mt-1 tabular-nums">{interfaces.filter((i) => i.is_up && i.enabled).length}</p>
-            </div>
-            <div className="bg-navy-900 border border-navy-800/50 rounded-xl p-4">
-              <p className="text-[10px] text-navy-500 uppercase tracking-wider">Disabled</p>
-              <p className="text-2xl font-semibold text-red-400 mt-1 tabular-nums">{interfaces.filter((i) => !i.enabled).length}</p>
-            </div>
-          </div>
         </>
       )}
     </div>
