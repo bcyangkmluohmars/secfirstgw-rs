@@ -71,10 +71,10 @@ Plans:
   2. A packet tagged with a provider VLAN (e.g. VLAN 7 for Telekom) cannot enter on a LAN port
   3. Any packet on VLAN 1 is DROPped by a catch-all rule before reaching any chain (verifiable via `iptables -L`)
   4. LAN zone rules reference VLAN 10 (br-lan.10 or equivalent), not VLAN 1
-**Plans**: TBD
+**Plans:** 1 plan
 
 Plans:
-- [ ] 03-01: TBD
+- [ ] 03-01-PLAN.md — Fix load_interface_zones() for PVID model + add VLAN isolation iptables rules
 
 ---
 
@@ -121,7 +121,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Data Model | 2/2 | ✓ Complete | 2026-03-15 |
 | 2. Switch ASIC | 1/1 | ✓ Complete | 2026-03-15 |
-| 3. Network Enforcement | 0/? | Not started | - |
+| 3. Network Enforcement | 0/1 | In progress | - |
 | 4. API | 0/? | Not started | - |
 | 5. Web UI | 0/? | Not started | - |
 
