@@ -10,27 +10,27 @@ See: .planning/PROJECT.md (updated 2026-03-15)
 ## Current Position
 
 Phase: 1 of 5 (Data Model)
-Plan: 0 of ? in current phase
-Status: Ready to plan
-Last activity: 2026-03-15 — Roadmap created, 5 phases defined for v0.1.0
+Plan: 1 of 2 in current phase
+Status: In progress — plan 01 complete, plan 02 pending
+Last activity: 2026-03-15 — Plan 01-01 complete (migration 005, 12/12 tests passing)
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█░░░░░░░░░] 10%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
-- Average duration: —
-- Total execution time: —
+- Total plans completed: 1
+- Average duration: ~2 min
+- Total execution time: ~2 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 01-data-model | 1 | ~2 min | ~2 min |
 
 **Recent Trend:**
-- Last 5 plans: —
+- Last 5 plans: 01-01 (2 min)
 - Trend: —
 
 *Updated after each plan completion*
@@ -46,19 +46,20 @@ Decisions logged in PROJECT.md Key Decisions table. Key decisions for current wo
 - WAN ports completely isolated from internal VLAN numbering space — two separate worlds
 - Switch ASIC config (swconfig) is a hardware addon: runs only when UDM Pro board detected at startup
 - New/unconfigured ports default to pvid=10 (LAN) — prevents lockout on fresh installs
+- [01-01] WAN pvid=0 signals "not an internal VLAN port" — value chosen to be obviously invalid in VLAN range
+- [01-01] SQLite rename-create-copy-drop used for DROP COLUMN compat with SQLite < 3.35
 
 ### Pending Todos
 
-None yet.
+None.
 
 ### Blockers/Concerns
 
-- DB migration must preserve non-role fields in existing v0.0.3 `interfaces` table — validate before writing migration
 - switch.rs currently hardcodes "all VLANs on all ports" — full rewrite required in Phase 2
 - iptables-legacy only on UDM Pro kernel 4.19 — no nf_tables, all FW work in Phase 3 must use iptables
 
 ## Session Continuity
 
 Last session: 2026-03-15
-Stopped at: Roadmap created — ready to run /gsd:plan-phase 1
+Stopped at: Completed 01-01-PLAN.md — ready for 01-02-PLAN.md
 Resume file: None
