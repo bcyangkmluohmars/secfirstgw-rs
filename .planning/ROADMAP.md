@@ -68,9 +68,9 @@ Plans:
 **Requirements**: WAN-01, WAN-02, WAN-03, FW-01, FW-02
 **Success Criteria** (what must be TRUE):
   1. A packet tagged with an internal VLAN ID (10, 3000, 3001) cannot arrive on a WAN interface — iptables DROP rule in place and verifiable
-  2. A packet tagged with a provider VLAN (e.g. VLAN 7 for Telekom) cannot enter on a LAN port
+  2. A packet tagged with a provider VLAN (e.g. VLAN 7 for Telekom) cannot enter on a LAN port — enforced by switch ASIC VLAN membership (Phase 2) at hardware level, with existing zone rules (WAN -> any = DROP) as iptables defense-in-depth
   3. Any packet on VLAN 1 is DROPped by a catch-all rule before reaching any chain (verifiable via `iptables -L`)
-  4. LAN zone rules reference VLAN 10 (br-lan.10 or equivalent), not VLAN 1
+  4. LAN zone rules reference VLAN 10 (br-lan), not VLAN 1
 **Plans:** 1 plan
 
 Plans:
