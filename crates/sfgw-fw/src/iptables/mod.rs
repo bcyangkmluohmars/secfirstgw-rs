@@ -705,6 +705,10 @@ pub fn generate_zone_ruleset(
         // Default secure rules (conntrack, loopback, ICMP).
         emit_default_rules(out);
 
+        // VLAN isolation rules (before zone rules — must be checked first).
+        // Enforces WAN-01 (internal VLANs blocked on WAN) and FW-02 (VLAN 1 void DROP).
+        emit_vlan_isolation_rules(out, zones);
+
         // Zone-specific rules.
         if !wan_ifaces.is_empty() {
             emit_wan_zone_rules(out, &wan_ifaces);
@@ -998,6 +1002,85 @@ fn emit_user_nat_rules(out: &mut String, rules: &[FirewallRule]) {
         )
         .unwrap();
     }
+}
+
+// ── VLAN isolation rules ─────────────────────────────────────────────
+
+/// Emit VLAN isolation rules that enforce WAN-01, FW-01, and FW-02.
+///
+/// These rules go BEFORE zone rules to ensure VLAN isolation is evaluated first.
+///
+/// **FW-02 — VLAN 1 void DROP on WAN interfaces:**
+/// VLAN 1 is the "factory default untagged" VLAN. The VLAN trunk model assigns it
+/// to the void zone (DROP all). WAN interfaces are unbridged, so a `.1` sub-interface
+/// could theoretically be created by misconfiguration. The `br-void` rules are
+/// defense-in-depth in case someone manually creates that bridge.
+///
+/// **WAN-01 — Internal VLANs blocked on WAN interfaces:**
+/// Internal VLAN IDs (10, 3000, 3001, 3002, etc.) must never appear on WAN ports.
+/// These sub-interface DROP rules prevent any misconfigured VLAN sub-interfaces from
+/// leaking internal traffic onto the WAN.
+///
+/// **FW-01 — LAN zone uses VLAN 10 bridge (br-lan):**
+/// This is enforced by `load_interface_zones()` which resolves the LAN zone to `br-lan`
+/// (the bridge for VLAN 10). The zone rules already reference `br-lan`, not `br-1`.
+fn emit_vlan_isolation_rules(out: &mut String, zones: &[ZonePolicy]) {
+    writeln!(out, "# ── VLAN isolation rules (WAN-01, FW-02) ──").unwrap();
+
+    // Collect WAN interfaces (raw names — WAN is unbridged).
+    let wan_ifaces = zone_interfaces(zones, &FirewallZone::Wan);
+
+    // FW-02: VLAN 1 void DROP on WAN interfaces.
+    // WAN ports are unbridged; a misconfigured .1 sub-interface would bypass ASIC DROP.
+    for wan in &wan_ifaces {
+        writeln!(
+            out,
+            "-A SFGW-INPUT -i {wan}.1 -j DROP -m comment --comment \"VLAN 1 void DROP\""
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "-A SFGW-FORWARD -i {wan}.1 -j DROP -m comment --comment \"VLAN 1 void DROP\""
+        )
+        .unwrap();
+    }
+
+    // FW-02: Defense-in-depth — drop br-void in case someone creates it manually.
+    writeln!(
+        out,
+        "-A SFGW-INPUT -i br-void -j DROP -m comment --comment \"VLAN 1 void DROP\""
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "-A SFGW-FORWARD -i br-void -j DROP -m comment --comment \"VLAN 1 void DROP\""
+    )
+    .unwrap();
+
+    // WAN-01: Internal VLANs blocked on WAN interfaces.
+    // For each non-WAN zone with a vlan_id, DROP any sub-interface of that VLAN on WAN.
+    for zone in zones {
+        if zone.zone == FirewallZone::Wan {
+            continue;
+        }
+        let Some(vid) = zone.vlan_id else {
+            continue;
+        };
+        for wan in &wan_ifaces {
+            writeln!(
+                out,
+                "-A SFGW-INPUT -i {wan}.{vid} -j DROP -m comment --comment \"no internal VLAN on WAN\""
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "-A SFGW-FORWARD -i {wan}.{vid} -j DROP -m comment --comment \"no internal VLAN on WAN\""
+            )
+            .unwrap();
+        }
+    }
+
+    writeln!(out).unwrap();
 }
 
 // ── Zone-specific rule emitters ──────────────────────────────────────
