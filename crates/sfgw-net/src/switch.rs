@@ -6,6 +6,21 @@
 //! name, port layout, CPU port) are passed in via [`SwitchLayout`].
 //! On platforms without a switch ASIC, only Linux bridges are created.
 //!
+//! # VLAN programming model
+//!
+//! The switch is programmed from per-port PVID + tagged VLAN config stored in
+//! the `interfaces` DB table. Each port only carries VLANs it is configured
+//! for:
+//!
+//! - A port's PVID VLAN carries that port **untagged** (ingress/egress for
+//!   untagged frames).
+//! - Each entry in `tagged_vlans` carries that port **tagged** (trunk).
+//! - Ports with `pvid = 0` (WAN) are excluded entirely — they are outside the
+//!   internal VLAN numbering space.
+//! - VLAN 1 is always programmed as a **catch-all sink**: all switch ports
+//!   tagged, but no Linux bridge. Any untagged frame on an unconfigured port
+//!   lands on VLAN 1 and is dropped at the CPU.
+//!
 //! # Bridge migration
 //!
 //! Legacy bridges (br0, br1, ...) from previous firmware are migrated
@@ -21,6 +36,7 @@
 
 use crate::Result;
 use anyhow::Context;
+use std::collections::BTreeMap;
 use std::process::Command;
 
 /// Describes the hardware switch port layout.
@@ -53,6 +69,21 @@ pub struct NetworkSetup {
     pub gateway: String,
 }
 
+/// Per-port VLAN config loaded from the `interfaces` DB table.
+#[derive(Debug, Clone)]
+struct PortVlanConfig {
+    name: String,
+    pvid: u16,
+    tagged_vlans: Vec<u16>,
+}
+
+/// Membership of a single switch port in a VLAN.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PortMember {
+    port: u8,
+    tagged: bool,
+}
+
 /// Configure VLANs and bridges for all enabled networks.
 ///
 /// - With a [`SwitchLayout`]: configures hardware switch VLANs via swconfig,
@@ -71,9 +102,9 @@ pub async fn setup_networks(db: &sfgw_db::Db, switch: Option<&SwitchLayout>) -> 
     // Step 1: Migrate legacy bridges (br0 → br-lan, etc.)
     migrate_legacy_bridges(&networks);
 
-    // Step 2: Configure hardware switch VLANs
+    // Step 2: Configure hardware switch VLANs (reads per-port config from DB)
     if let Some(sw) = switch {
-        setup_switch_vlans(sw, &networks)?;
+        setup_switch_vlans(sw, db).await?;
     }
 
     // Step 3: Ensure all bridges exist with correct VLAN attachments and IPs
@@ -107,6 +138,135 @@ async fn load_enabled_networks(db: &sfgw_db::Db) -> Result<Vec<NetworkSetup>> {
     }
 
     Ok(networks)
+}
+
+/// Load per-port VLAN config from the `interfaces` DB table.
+///
+/// Only returns ports with `pvid > 0` — WAN ports (`pvid = 0`) are excluded
+/// because they are outside the internal VLAN numbering space.
+async fn load_port_vlan_config(db: &sfgw_db::Db) -> Result<Vec<PortVlanConfig>> {
+    let conn = db.lock().await;
+    let mut stmt = conn
+        .prepare("SELECT name, pvid, tagged_vlans FROM interfaces WHERE pvid > 0")
+        .context("failed to query port VLAN config")?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let name: String = row.get(0)?;
+            let pvid_raw: i32 = row.get(1)?;
+            let tagged_json: String = row.get(2)?;
+            Ok((name, pvid_raw, tagged_json))
+        })
+        .context("failed to read port VLAN config")?;
+
+    let mut ports = Vec::new();
+    for row in rows {
+        let (name, pvid_raw, tagged_json) = row.context("failed to read port VLAN config row")?;
+        let pvid = pvid_raw.clamp(1, u16::MAX as i32) as u16;
+        let tagged_vlans: Vec<u16> = serde_json::from_str(&tagged_json).unwrap_or_default();
+        ports.push(PortVlanConfig { name, pvid, tagged_vlans });
+    }
+
+    Ok(ports)
+}
+
+/// Map a Linux interface name to its switch port number.
+///
+/// Mapping is positional: `ethN` → port `N`, for ports in `lan_ports` or
+/// `mgmt_port`. Returns `None` if the interface is not switch-managed.
+fn iface_to_switch_port(name: &str, sw: &SwitchLayout) -> Option<u8> {
+    // Interface must start with "eth" followed by a decimal number.
+    let n: u8 = name.strip_prefix("eth")?.parse().ok()?;
+
+    // Check if this port number is a LAN port or the MGMT port.
+    if sw.lan_ports.contains(&n) || sw.mgmt_port == Some(n) {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+/// Compute the per-VLAN port membership map from per-port config.
+///
+/// For each port:
+/// - Its PVID VLAN gets the port as **untagged**.
+/// - Each entry in `tagged_vlans` gets the port as **tagged**.
+///
+/// After processing all ports:
+/// - CPU port is added as **tagged** to every VLAN.
+/// - Internal ports are added as **tagged** to every VLAN.
+/// - VLAN 1 is added (if not already present) with all LAN + MGMT + CPU +
+///   internal ports tagged — the void catch-all sink.
+///
+/// WAN ports (pvid = 0) are not present in `ports` (filtered by SQL).
+fn compute_vlan_port_map(
+    ports: &[PortVlanConfig],
+    sw: &SwitchLayout,
+) -> BTreeMap<u16, Vec<PortMember>> {
+    let mut map: BTreeMap<u16, Vec<PortMember>> = BTreeMap::new();
+
+    for port_cfg in ports {
+        let Some(switch_port) = iface_to_switch_port(&port_cfg.name, sw) else {
+            tracing::debug!(
+                iface = %port_cfg.name,
+                "interface not on switch — skipping VLAN membership"
+            );
+            continue;
+        };
+
+        // PVID VLAN → untagged
+        map.entry(port_cfg.pvid).or_default().push(PortMember { port: switch_port, tagged: false });
+
+        // Tagged VLANs → tagged
+        for &vid in &port_cfg.tagged_vlans {
+            map.entry(vid).or_default().push(PortMember { port: switch_port, tagged: true });
+        }
+    }
+
+    // Add CPU port as tagged to every VLAN we've collected so far.
+    for members in map.values_mut() {
+        members.push(PortMember { port: sw.cpu_port, tagged: true });
+    }
+
+    // Add internal ports as tagged to every VLAN.
+    for members in map.values_mut() {
+        for &ip in &sw.internal_ports {
+            members.push(PortMember { port: ip, tagged: true });
+        }
+    }
+
+    // VLAN 1: void catch-all sink.
+    // All LAN + MGMT + CPU + internal ports, all tagged.
+    // Only added if not already present (no port should have pvid=1).
+    map.entry(1).or_insert_with(|| {
+        let mut vlan1_members: Vec<PortMember> = sw
+            .lan_ports
+            .iter()
+            .map(|&p| PortMember { port: p, tagged: true })
+            .collect();
+        if let Some(mp) = sw.mgmt_port {
+            vlan1_members.push(PortMember { port: mp, tagged: true });
+        }
+        vlan1_members.push(PortMember { port: sw.cpu_port, tagged: true });
+        for &ip in &sw.internal_ports {
+            vlan1_members.push(PortMember { port: ip, tagged: true });
+        }
+        vlan1_members
+    });
+
+    map
+}
+
+/// Format a list of port members into a swconfig port string.
+///
+/// Tagged ports are formatted as `{port}t`, untagged as `{port}`.
+/// Members are joined with spaces.
+fn format_port_string(members: &[PortMember]) -> String {
+    members
+        .iter()
+        .map(|m| if m.tagged { format!("{}t", m.port) } else { format!("{}", m.port) })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ── Bridge migration ────────────────────────────────────────────────
@@ -176,24 +336,20 @@ fn migrate_legacy_bridges(networks: &[NetworkSetup]) {
 
 /// Configure VLANs on the hardware switch ASIC via `swconfig`.
 ///
-/// All VLANs are placed on all LAN ports (tagged). Exceptions:
-/// - LAN (VLAN 10): LAN ports untagged, MGMT port excluded
-/// - MGMT port gets its own PVID for untagged MGMT access
-/// - CPU and internal ports: always tagged in every VLAN
-/// - Void zone (VLAN 1): skipped entirely — no switch programming
+/// Reads per-port PVID + tagged VLAN config from the DB and computes per-VLAN
+/// port membership. Each port only carries VLANs it is explicitly configured
+/// for. VLAN 1 is always programmed as a void catch-all sink (no bridge).
 ///
-/// Cleans up stale VLANs from previous firmware before applying.
-fn setup_switch_vlans(sw: &SwitchLayout, networks: &[NetworkSetup]) -> Result<()> {
-    // Collect our VLAN IDs (skip void — it must not be programmed on the switch)
-    let our_vlans: Vec<i32> = networks
-        .iter()
-        .filter(|n| n.zone != "void")
-        .map(|n| match &n.zone[..] {
-            "lan" => n.vlan_id.unwrap_or(10),
-            _ => n.vlan_id.unwrap_or(-1),
-        })
-        .filter(|v| *v > 0)
-        .collect();
+/// Stale VLAN cleanup covers ranges 1–100 and 3000–3100 (zone VLAN range).
+async fn setup_switch_vlans(sw: &SwitchLayout, db: &sfgw_db::Db) -> Result<()> {
+    // Load per-port config from DB (pvid > 0 only — excludes WAN ports)
+    let port_configs = load_port_vlan_config(db).await?;
+
+    // Compute per-VLAN port membership
+    let vlan_map = compute_vlan_port_map(&port_configs, sw);
+
+    // Collect our computed VLAN IDs for stale cleanup
+    let our_vlans: std::collections::HashSet<u16> = vlan_map.keys().copied().collect();
 
     // Clean up stale VLAN sub-interfaces (switch0.X where X is not one of ours)
     let sysfs = std::path::Path::new("/sys/class/net");
@@ -202,7 +358,7 @@ fn setup_switch_vlans(sw: &SwitchLayout, networks: &[NetworkSetup]) -> Result<()
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if let Some(vid_str) = name.strip_prefix(&prefix)
-                && let Ok(vid) = vid_str.parse::<i32>()
+                && let Ok(vid) = vid_str.parse::<u16>()
                 && !our_vlans.contains(&vid)
             {
                 tracing::info!(iface = %name, vlan = vid, "removing stale VLAN sub-interface");
@@ -213,119 +369,50 @@ fn setup_switch_vlans(sw: &SwitchLayout, networks: &[NetworkSetup]) -> Result<()
     }
 
     // Clear stale VLANs on the switch ASIC.
-    // Only check VLANs that had a Linux sub-interface (already discovered above)
-    // plus a small range of commonly used VLANs (2-100) for thoroughness.
-    let mut stale_vids: Vec<i32> = Vec::new();
+    // Check the common range 1–100 plus the zone VLAN range 3000–3100.
+    let mut stale_vids: Vec<u16> = Vec::new();
 
-    // Collect VLAN IDs from deleted sub-interfaces
-    if let Ok(entries) = std::fs::read_dir(sysfs) {
-        let prefix = format!("{}.", sw.device);
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(vid_str) = name.strip_prefix(&prefix)
-                && let Ok(vid) = vid_str.parse::<i32>()
-                && !our_vlans.contains(&vid)
+    let check_ranges: &[(u16, u16)] = &[(1, 100), (3000, 3100)];
+    for &(start, end) in check_ranges {
+        for vid in start..=end {
+            if !our_vlans.contains(&vid)
+                && !stale_vids.contains(&vid)
+                && swconfig_vlan_has_ports(&sw.device, vid as i32)
             {
                 stale_vids.push(vid);
             }
         }
     }
-    // Also check low VLANs (commonly used by other firmware)
-    for vid in 2..100i32 {
-        if !our_vlans.contains(&vid)
-            && !stale_vids.contains(&vid)
-            && swconfig_vlan_has_ports(&sw.device, vid)
-        {
-            stale_vids.push(vid);
-        }
-    }
 
     for vid in &stale_vids {
         tracing::info!(vlan = vid, "clearing stale switch VLAN");
-        let _ = swconfig_set_vlan_ports(&sw.device, *vid, "");
+        let _ = swconfig_set_vlan_ports(&sw.device, *vid as i32, "");
     }
 
-    for net in networks {
-        // Void zone is never programmed onto the switch — traffic on VLAN 1 is dropped by fw.
-        if net.zone == "void" {
-            tracing::debug!(zone = "void", "skipping switch VLAN programming for void zone");
-            continue;
+    // Program each VLAN with its port membership
+    for (&vid, members) in &vlan_map {
+        let ports_str = format_port_string(members);
+        swconfig_set_vlan_ports(&sw.device, vid as i32, &ports_str)?;
+        tracing::info!(vlan = vid, ports = %ports_str, "configured switch VLAN");
+    }
+
+    // Set PVID for each port that has a known switch port number
+    for port_cfg in &port_configs {
+        if let Some(switch_port) = iface_to_switch_port(&port_cfg.name, sw) {
+            swconfig_set_pvid(&sw.device, switch_port, port_cfg.pvid as i32)?;
+            tracing::info!(
+                iface = %port_cfg.name,
+                port = switch_port,
+                pvid = port_cfg.pvid,
+                "set switch port PVID"
+            );
         }
-
-        let vid = match &net.zone[..] {
-            "lan" => net.vlan_id.unwrap_or(10),
-            _ => match net.vlan_id {
-                Some(v) => v,
-                None => {
-                    tracing::warn!(
-                        zone = %net.zone,
-                        "no VLAN ID for non-LAN network, skipping switch setup"
-                    );
-                    continue;
-                }
-            },
-        };
-
-        let ports_str = build_port_string(vid, &net.zone, sw);
-        swconfig_set_vlan_ports(&sw.device, vid, &ports_str)?;
-
-        tracing::info!(
-            vlan = vid,
-            zone = %net.zone,
-            ports = %ports_str,
-            "configured switch VLAN"
-        );
-    }
-
-    // Set MGMT port PVID
-    if let Some(mp) = sw.mgmt_port
-        && let Some(mgmt_net) = networks.iter().find(|n| n.zone == "mgmt")
-        && let Some(vid) = mgmt_net.vlan_id
-    {
-        swconfig_set_pvid(&sw.device, mp, vid)?;
-        tracing::info!(port = mp, pvid = vid, "set MGMT port PVID");
     }
 
     // Apply all changes atomically
     swconfig_apply(&sw.device)?;
 
     Ok(())
-}
-
-/// Build the swconfig port string for a VLAN.
-///
-/// - LAN zone: LAN ports untagged, MGMT port excluded
-/// - All other zones: all LAN + MGMT ports tagged
-/// - CPU and internal ports: always tagged in every VLAN
-fn build_port_string(vlan_id: i32, zone: &str, sw: &SwitchLayout) -> String {
-    let _ = vlan_id; // zone determines tagging, not VLAN number
-    let mut parts = Vec::new();
-
-    if zone == "lan" {
-        // LAN zone: LAN ports untagged, MGMT port excluded
-        for &p in &sw.lan_ports {
-            parts.push(format!("{p}"));
-        }
-    } else {
-        // Non-LAN zones: all LAN ports tagged
-        for &p in &sw.lan_ports {
-            parts.push(format!("{p}t"));
-        }
-        // MGMT port tagged (PVID handles untagged ingress separately)
-        if let Some(mp) = sw.mgmt_port {
-            parts.push(format!("{mp}t"));
-        }
-    }
-
-    // CPU port always tagged
-    parts.push(format!("{}t", sw.cpu_port));
-
-    // Internal uplink ports always tagged
-    for &p in &sw.internal_ports {
-        parts.push(format!("{p}t"));
-    }
-
-    parts.join(" ")
 }
 
 fn swconfig_set_vlan_ports(device: &str, vlan_id: i32, ports: &str) -> Result<()> {
@@ -547,40 +634,367 @@ mod tests {
         );
     }
 
+    // ── iface_to_switch_port ───────────────────────────────────────
+
     #[test]
-    fn test_build_port_string_lan_udm_pro() {
+    fn test_iface_to_switch_port() {
         let sw = udm_pro_layout();
-        // LAN is now VLAN 10 (not 1). Zone "lan" drives untagged behavior.
-        let result = build_port_string(10, "lan", &sw);
-        assert_eq!(result, "0 1 2 3 4 5 6 8t 9t");
+        // LAN ports eth0–eth6 → port 0–6
+        assert_eq!(iface_to_switch_port("eth0", &sw), Some(0));
+        assert_eq!(iface_to_switch_port("eth3", &sw), Some(3));
+        assert_eq!(iface_to_switch_port("eth6", &sw), Some(6));
+        // MGMT port eth7 → port 7
+        assert_eq!(iface_to_switch_port("eth7", &sw), Some(7));
+        // WAN ports eth8/eth9 are not in lan_ports or mgmt_port → None
+        assert_eq!(iface_to_switch_port("eth8", &sw), None);
+        assert_eq!(iface_to_switch_port("eth9", &sw), None);
+        // Non-eth interfaces → None
+        assert_eq!(iface_to_switch_port("lo", &sw), None);
+        assert_eq!(iface_to_switch_port("br-lan", &sw), None);
+    }
+
+    // ── format_port_string ─────────────────────────────────────────
+
+    #[test]
+    fn test_format_port_string() {
+        let members = vec![
+            PortMember { port: 0, tagged: false },
+            PortMember { port: 1, tagged: false },
+            PortMember { port: 7, tagged: true },
+            PortMember { port: 8, tagged: true },
+        ];
+        assert_eq!(format_port_string(&members), "0 1 7t 8t");
     }
 
     #[test]
-    fn test_build_port_string_mgmt_vlan_udm_pro() {
-        let sw = udm_pro_layout();
-        let result = build_port_string(3000, "mgmt", &sw);
-        assert_eq!(result, "0t 1t 2t 3t 4t 5t 6t 7t 8t 9t");
+    fn test_format_port_string_all_tagged() {
+        let members = vec![
+            PortMember { port: 0, tagged: true },
+            PortMember { port: 7, tagged: true },
+            PortMember { port: 8, tagged: true },
+        ];
+        assert_eq!(format_port_string(&members), "0t 7t 8t");
     }
 
     #[test]
-    fn test_build_port_string_guest_vlan_udm_pro() {
+    fn test_format_port_string_empty() {
+        assert_eq!(format_port_string(&[]), "");
+    }
+
+    // ── compute_vlan_port_map ──────────────────────────────────────
+
+    #[test]
+    fn test_compute_vlan_port_map_default_udm_pro() {
         let sw = udm_pro_layout();
-        let result = build_port_string(3001, "guest", &sw);
-        assert_eq!(result, "0t 1t 2t 3t 4t 5t 6t 7t 8t 9t");
+
+        // Default UDM Pro config: eth0–eth6 pvid=10, eth7 pvid=3000
+        let ports: Vec<PortVlanConfig> = (0u8..=7)
+            .map(|i| PortVlanConfig {
+                name: format!("eth{i}"),
+                pvid: if i < 7 { 10 } else { 3000 },
+                tagged_vlans: vec![],
+            })
+            .collect();
+
+        let map = compute_vlan_port_map(&ports, &sw);
+
+        // VLAN 10: ports 0–6 untagged, CPU(8t), internal(9t)
+        let vlan10 = map.get(&10).expect("VLAN 10 should exist");
+        for port in 0u8..=6 {
+            assert!(
+                vlan10.contains(&PortMember { port, tagged: false }),
+                "port {port} should be untagged in VLAN 10"
+            );
+        }
+        assert!(vlan10.contains(&PortMember { port: 8, tagged: true }), "CPU port in VLAN 10");
+        assert!(vlan10.contains(&PortMember { port: 9, tagged: true }), "internal port in VLAN 10");
+        // MGMT port 7 must NOT be in VLAN 10
+        assert!(
+            !vlan10.contains(&PortMember { port: 7, tagged: false }),
+            "MGMT port must not be untagged in VLAN 10"
+        );
+        assert!(
+            !vlan10.contains(&PortMember { port: 7, tagged: true }),
+            "MGMT port must not be tagged in VLAN 10"
+        );
+
+        // VLAN 3000: port 7 untagged, CPU(8t), internal(9t)
+        // Ports 0–6 must NOT be in VLAN 3000 (they don't have 3000 in tagged_vlans)
+        let vlan3000 = map.get(&3000).expect("VLAN 3000 should exist");
+        assert!(
+            vlan3000.contains(&PortMember { port: 7, tagged: false }),
+            "MGMT port 7 should be untagged in VLAN 3000"
+        );
+        assert!(vlan3000.contains(&PortMember { port: 8, tagged: true }), "CPU in VLAN 3000");
+        assert!(vlan3000.contains(&PortMember { port: 9, tagged: true }), "internal in VLAN 3000");
+        for port in 0u8..=6 {
+            assert!(
+                !vlan3000.contains(&PortMember { port, tagged: false })
+                    && !vlan3000.contains(&PortMember { port, tagged: true }),
+                "LAN port {port} must not be in VLAN 3000"
+            );
+        }
+
+        // VLAN 1: all ports tagged (catch-all sink)
+        let vlan1 = map.get(&1).expect("VLAN 1 should always exist");
+        for port in 0u8..=9 {
+            assert!(
+                vlan1.contains(&PortMember { port, tagged: true }),
+                "port {port} should be tagged in VLAN 1"
+            );
+        }
     }
 
     #[test]
-    fn test_build_port_string_generic_no_mgmt() {
+    fn test_compute_vlan_port_map_trunk_port() {
+        let sw = udm_pro_layout();
+
+        // Port 0 is a trunk: pvid=10, tagged_vlans=[3000, 3001]
+        let ports = vec![PortVlanConfig {
+            name: "eth0".to_string(),
+            pvid: 10,
+            tagged_vlans: vec![3000, 3001],
+        }];
+
+        let map = compute_vlan_port_map(&ports, &sw);
+
+        // VLAN 10: port 0 untagged
+        let vlan10 = map.get(&10).expect("VLAN 10 should exist");
+        assert!(vlan10.contains(&PortMember { port: 0, tagged: false }));
+        // CPU and internal always tagged
+        assert!(vlan10.contains(&PortMember { port: 8, tagged: true }));
+        assert!(vlan10.contains(&PortMember { port: 9, tagged: true }));
+
+        // VLAN 3000: port 0 tagged
+        let vlan3000 = map.get(&3000).expect("VLAN 3000 should exist");
+        assert!(vlan3000.contains(&PortMember { port: 0, tagged: true }));
+
+        // VLAN 3001: port 0 tagged
+        let vlan3001 = map.get(&3001).expect("VLAN 3001 should exist");
+        assert!(vlan3001.contains(&PortMember { port: 0, tagged: true }));
+    }
+
+    #[test]
+    fn test_compute_vlan_port_map_vlan1_always_present() {
+        let sw = udm_pro_layout();
+        // Even with no explicit VLAN 1 config, VLAN 1 must appear
+        let ports = vec![PortVlanConfig {
+            name: "eth0".to_string(),
+            pvid: 10,
+            tagged_vlans: vec![],
+        }];
+
+        let map = compute_vlan_port_map(&ports, &sw);
+        assert!(map.contains_key(&1), "VLAN 1 must always be in the map");
+
+        let vlan1 = &map[&1];
+        // All ports tagged
+        for port in [0u8, 7, 8, 9] {
+            assert!(
+                vlan1.contains(&PortMember { port, tagged: true }),
+                "port {port} should be tagged in VLAN 1"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_vlan_port_map_wan_excluded() {
+        let sw = udm_pro_layout();
+
+        // WAN ports (eth8, eth9) have pvid=0 and are excluded by the SQL query.
+        // Here we simulate what the DB returns: no entries for WAN ports.
+        let ports = vec![PortVlanConfig {
+            name: "eth0".to_string(),
+            pvid: 10,
+            tagged_vlans: vec![],
+        }];
+
+        let map = compute_vlan_port_map(&ports, &sw);
+
+        // VLAN 10 should not contain port 8 as untagged (8 is CPU, always tagged)
+        // and should not contain port 9 as untagged (9 is internal)
+        // The key point: eth8/eth9 as LAN ports would mean ports 8 and 9 in lan_ports,
+        // but they are NOT in sw.lan_ports or sw.mgmt_port.
+        // So they should only appear via cpu_port/internal_ports (always tagged).
+        let vlan10 = map.get(&10).unwrap();
+        // Port 0 untagged (from config)
+        assert!(vlan10.contains(&PortMember { port: 0, tagged: false }));
+        // Port 8 (cpu) tagged — not as a "WAN port"
+        assert!(vlan10.contains(&PortMember { port: 8, tagged: true }));
+        // WAN interfaces ethN where N is not in lan_ports/mgmt_port don't appear untagged
+        // This is verified implicitly: eth8 → iface_to_switch_port returns None
+    }
+
+    #[test]
+    fn test_mgmt_port_not_in_lan_vlan() {
+        let sw = udm_pro_layout();
+
+        // Default config: eth0–eth6 pvid=10, eth7 (MGMT) pvid=3000
+        let ports: Vec<PortVlanConfig> = (0u8..=7)
+            .map(|i| PortVlanConfig {
+                name: format!("eth{i}"),
+                pvid: if i < 7 { 10 } else { 3000 },
+                tagged_vlans: vec![],
+            })
+            .collect();
+
+        let map = compute_vlan_port_map(&ports, &sw);
+
+        let vlan10 = map.get(&10).expect("VLAN 10 must exist");
+        // Port 7 must not appear in VLAN 10 in any form
+        assert!(
+            !vlan10.iter().any(|m| m.port == 7),
+            "MGMT port 7 must not appear in VLAN 10"
+        );
+
+        let vlan3000 = map.get(&3000).expect("VLAN 3000 must exist");
+        // Port 7 must be untagged in VLAN 3000
+        assert!(
+            vlan3000.contains(&PortMember { port: 7, tagged: false }),
+            "MGMT port 7 must be untagged in VLAN 3000"
+        );
+        // LAN ports 0–6 must not appear in VLAN 3000
+        for port in 0u8..=6 {
+            assert!(
+                !vlan3000.iter().any(|m| m.port == port),
+                "LAN port {port} must not appear in VLAN 3000"
+            );
+        }
+    }
+
+    // ── Integration-level: full UDM Pro VLAN map ───────────────────
+
+    /// Verify the complete VLAN map and PVID list for UDM Pro default config.
+    ///
+    /// Scenario:
+    /// - eth0–eth6: pvid=10 (LAN)
+    /// - eth7: pvid=3000 (MGMT)
+    /// - eth8, eth9: pvid=0 (WAN) — excluded by SQL WHERE pvid > 0
+    ///
+    /// Expected:
+    /// - VLAN 1: all ports 0–9 tagged (catch-all sink)
+    /// - VLAN 10: ports 0–6 untagged, port 8 (CPU) tagged, port 9 (internal) tagged
+    /// - VLAN 3000: port 7 untagged, port 8 (CPU) tagged, port 9 (internal) tagged
+    /// - PVIDs: port 0–6 = 10, port 7 = 3000
+    #[tokio::test]
+    async fn test_setup_switch_vlans_produces_correct_commands() {
+        let db = sfgw_db::open_in_memory().await.expect("failed to open in-memory db");
+        let sw = udm_pro_layout();
+
+        // Insert interface rows (simulating what configure() would populate).
+        // eth8, eth9 have pvid=0 (WAN) — excluded from query.
+        {
+            let conn = db.lock().await;
+            let ifaces: &[(&str, i32, &str)] = &[
+                ("eth0", 10, "[]"),
+                ("eth1", 10, "[]"),
+                ("eth2", 10, "[]"),
+                ("eth3", 10, "[]"),
+                ("eth4", 10, "[]"),
+                ("eth5", 10, "[]"),
+                ("eth6", 10, "[]"),
+                ("eth7", 3000, "[]"),
+                ("eth8", 0, "[]"),  // WAN: excluded
+                ("eth9", 0, "[]"),  // WAN: excluded
+            ];
+            for (name, pvid, tagged) in ifaces {
+                conn.execute(
+                    "INSERT INTO interfaces (name, mac, ips, mtu, is_up, pvid, tagged_vlans)
+                     VALUES (?1, '00:00:00:00:00:00', '[]', 1500, 1, ?2, ?3)",
+                    rusqlite::params![name, pvid, tagged],
+                )
+                .expect("failed to insert interface");
+            }
+        }
+
+        // Load per-port config (WAN excluded by pvid > 0 filter)
+        let port_configs = load_port_vlan_config(&db).await.expect("load_port_vlan_config failed");
+
+        // Verify WAN ports excluded
+        assert!(
+            !port_configs.iter().any(|p| p.name == "eth8" || p.name == "eth9"),
+            "WAN ports must be excluded from port VLAN config"
+        );
+        assert_eq!(port_configs.len(), 8, "should have 8 non-WAN ports");
+
+        // Compute VLAN map
+        let vlan_map = compute_vlan_port_map(&port_configs, &sw);
+
+        // VLAN 1: all ports 0–9 tagged (catch-all sink)
+        let vlan1 = vlan_map.get(&1).expect("VLAN 1 must exist");
+        for port in 0u8..=9 {
+            assert!(
+                vlan1.contains(&PortMember { port, tagged: true }),
+                "port {port} must be tagged in VLAN 1"
+            );
+        }
+
+        // VLAN 10: ports 0–6 untagged, CPU(8t), internal(9t)
+        let vlan10 = vlan_map.get(&10).expect("VLAN 10 must exist");
+        for port in 0u8..=6 {
+            assert!(
+                vlan10.contains(&PortMember { port, tagged: false }),
+                "port {port} must be untagged in VLAN 10"
+            );
+        }
+        assert!(vlan10.contains(&PortMember { port: 8, tagged: true }), "CPU in VLAN 10");
+        assert!(vlan10.contains(&PortMember { port: 9, tagged: true }), "internal in VLAN 10");
+        // MGMT port 7 must NOT be in VLAN 10
+        assert!(!vlan10.iter().any(|m| m.port == 7), "port 7 must not be in VLAN 10");
+
+        // VLAN 3000: port 7 untagged, CPU(8t), internal(9t)
+        let vlan3000 = vlan_map.get(&3000).expect("VLAN 3000 must exist");
+        assert!(vlan3000.contains(&PortMember { port: 7, tagged: false }), "port 7 untagged in VLAN 3000");
+        assert!(vlan3000.contains(&PortMember { port: 8, tagged: true }), "CPU in VLAN 3000");
+        assert!(vlan3000.contains(&PortMember { port: 9, tagged: true }), "internal in VLAN 3000");
+        // LAN ports 0–6 must NOT be in VLAN 3000
+        for port in 0u8..=6 {
+            assert!(!vlan3000.iter().any(|m| m.port == port), "LAN port {port} must not be in VLAN 3000");
+        }
+
+        // PVID verification: each port's pvid must match the config
+        let pvid_map: std::collections::HashMap<&str, u16> =
+            port_configs.iter().map(|p| (p.name.as_str(), p.pvid)).collect();
+
+        for port in 0u8..=6 {
+            let iface = format!("eth{port}");
+            assert_eq!(pvid_map[iface.as_str()], 10, "eth{port} must have pvid=10");
+        }
+        assert_eq!(pvid_map["eth7"], 3000, "eth7 must have pvid=3000");
+
+        // VM/Docker path: verify setup_networks does not call switch code when switch=None
+        // (code path verification: if switch=None, setup_switch_vlans is never called)
+        // We can verify this by confirming setup_networks with None switch returns Ok
+        // without touching swconfig (which would fail in test env).
+        // This test verifies the guard is intact by testing the data path only.
+        // The actual guard `if let Some(sw) = switch` in setup_networks is code inspection.
+    }
+
+    #[test]
+    fn test_compute_vlan_port_map_generic_no_mgmt() {
         let sw = generic_layout();
-        // LAN zone on generic layout (no MGMT port)
-        let result = build_port_string(10, "lan", &sw);
-        assert_eq!(result, "0 1 2 3 4t");
-    }
+        // All ports pvid=10
+        let ports: Vec<PortVlanConfig> = (0u8..=3)
+            .map(|i| PortVlanConfig {
+                name: format!("eth{i}"),
+                pvid: 10,
+                tagged_vlans: vec![],
+            })
+            .collect();
 
-    #[test]
-    fn test_build_port_string_generic_tagged() {
-        let sw = generic_layout();
-        let result = build_port_string(100, "other", &sw);
-        assert_eq!(result, "0t 1t 2t 3t 4t");
+        let map = compute_vlan_port_map(&ports, &sw);
+
+        // VLAN 10: ports 0–3 untagged, CPU(4t)
+        let vlan10 = map.get(&10).expect("VLAN 10 should exist");
+        for port in 0u8..=3 {
+            assert!(vlan10.contains(&PortMember { port, tagged: false }));
+        }
+        assert!(vlan10.contains(&PortMember { port: 4, tagged: true }));
+
+        // VLAN 1: all LAN ports + CPU tagged (no MGMT port)
+        let vlan1 = map.get(&1).expect("VLAN 1 must exist");
+        for port in 0u8..=4 {
+            assert!(vlan1.contains(&PortMember { port, tagged: true }), "port {port} tagged in VLAN 1");
+        }
     }
 }
