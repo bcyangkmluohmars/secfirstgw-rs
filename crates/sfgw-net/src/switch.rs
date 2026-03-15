@@ -84,6 +84,30 @@ struct PortMember {
     tagged: bool,
 }
 
+/// Re-run network setup after a port config change.
+///
+/// This is the entry point called by the API after a `PUT /api/v1/ports/{name}`
+/// request. It detects the board at call time (same pattern as
+/// `detect_interfaces_for_platform` in lib.rs) and delegates to [`setup_networks`].
+///
+/// On bare-metal platforms with a hardware switch the ASIC and Linux bridges are
+/// reprogrammed. On VM/Docker platforms only Linux bridges are updated.
+pub async fn reconfigure_networks(db: &sfgw_db::Db) -> Result<()> {
+    let switch_layout = if let Some(board) = sfgw_hal::detect_board() {
+        board.switch.map(|sw| SwitchLayout {
+            device: sw.device.to_string(),
+            lan_ports: sw.lan_ports.to_vec(),
+            cpu_port: sw.cpu_port,
+            internal_ports: sw.internal_ports.to_vec(),
+            mgmt_port: sw.mgmt_port,
+        })
+    } else {
+        None
+    };
+
+    setup_networks(db, switch_layout.as_ref()).await
+}
+
 /// Configure VLANs and bridges for all enabled networks.
 ///
 /// - With a [`SwitchLayout`]: configures hardware switch VLANs via swconfig,

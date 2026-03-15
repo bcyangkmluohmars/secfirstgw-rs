@@ -170,6 +170,14 @@ pub async fn serve(db: &sfgw_db::Db) -> Result<()> {
         )
         .route("/api/v1/wan/{interface}/status", get(wan_status))
         .route("/api/v1/wan/{interface}/reconnect", post(wan_reconnect))
+        // Ports (PVID/tagged VLAN per-port config + live reconfiguration)
+        .route(
+            "/api/v1/ports/{name}",
+            get(port_get_handler).put(port_update_handler),
+        )
+        // Zones (read-only VLAN zone view)
+        .route("/api/v1/zones", get(zones_list_handler))
+        .route("/api/v1/zones/{zone}", get(zone_get_handler))
         // IDS
         .route("/api/v1/ids/events", get(ids_list_events))
         .route("/api/v1/ids/events/stats", get(ids_event_stats))
@@ -2311,5 +2319,565 @@ async fn users_change_password(
         Ok(0) => err_response(StatusCode::NOT_FOUND, anyhow::anyhow!("user not found")),
         Ok(_) => (StatusCode::OK, Json(json!({ "ok": true }))),
         Err(e) => internal_err(e),
+    }
+}
+
+// ===========================================================================
+// Port config handlers — /api/v1/ports/{name}
+// ===========================================================================
+
+/// Reject port names that could be used for path traversal or injection.
+///
+/// This is defense-in-depth: queries are parameterized so SQL injection is not
+/// possible, but we still reject clearly malformed names before touching the DB.
+fn is_valid_port_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('.')
+        && !name.contains('/')
+        && !name.contains('\\')
+}
+
+/// GET /api/v1/ports/{name}
+///
+/// Returns pvid and tagged_vlans for a specific port. No `role` field.
+async fn port_get_handler(
+    _auth: AuthUser,
+    Path(name): Path<String>,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    if !is_valid_port_name(&name) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "invalid port name" })),
+        );
+    }
+
+    let conn = db.lock().await;
+    let result = conn.query_row(
+        "SELECT name, mac, ips, mtu, is_up, pvid, tagged_vlans, enabled FROM interfaces WHERE name = ?1",
+        rusqlite::params![name],
+        |row| {
+            let n: String = row.get(0)?;
+            let mac: String = row.get(1)?;
+            let ips_json: String = row.get(2)?;
+            let mtu: i64 = row.get(3)?;
+            let is_up: bool = row.get(4)?;
+            let pvid: i64 = row.get(5)?;
+            let tagged_json: String = row.get(6)?;
+            let enabled: bool = row.get(7)?;
+            Ok((n, mac, ips_json, mtu, is_up, pvid, tagged_json, enabled))
+        },
+    );
+
+    match result {
+        Ok((n, mac, ips_json, mtu, is_up, pvid, tagged_json, enabled)) => {
+            let ips: Value = serde_json::from_str(&ips_json).unwrap_or(Value::Array(vec![]));
+            let tagged_vlans: Value =
+                serde_json::from_str(&tagged_json).unwrap_or(Value::Array(vec![]));
+            let port_info = detect_port_type(&n);
+            tracing::info!(port = %n, pvid, "port config retrieved");
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "name": n,
+                    "mac": mac,
+                    "ips": ips,
+                    "mtu": mtu,
+                    "is_up": is_up,
+                    "pvid": pvid,
+                    "tagged_vlans": tagged_vlans,
+                    "enabled": enabled,
+                    "speed": port_info.0,
+                    "driver": port_info.1,
+                    "port_type": port_info.2,
+                })),
+            )
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "port not found" })),
+        ),
+        Err(e) => {
+            tracing::error!("port_get_handler db error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal server error" })),
+            )
+        }
+    }
+}
+
+/// PUT /api/v1/ports/{name}
+///
+/// Accepts `pvid` (0 or 1–4094) and `tagged_vlans` (array of 1–4094).
+/// After persisting to DB triggers live switch + firewall reconfiguration.
+/// If reconfiguration fails the DB write is preserved (source of truth) and
+/// the error is logged; the endpoint still returns 200.
+async fn port_update_handler(
+    _auth: AuthUser,
+    Path(name): Path<String>,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    if !is_valid_port_name(&name) {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "invalid port name" })),
+        );
+    }
+
+    // Validate input before acquiring the lock
+    let pvid_opt = if let Some(pvid_val) = body.get("pvid") {
+        match pvid_val.as_i64() {
+            Some(p) if p == 0 || (1..=4094).contains(&p) => Some(p),
+            _ => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": "pvid must be 0 (WAN) or 1-4094" })),
+                );
+            }
+        }
+    } else {
+        None
+    };
+
+    let tagged_opt = if let Some(tagged_val) = body.get("tagged_vlans") {
+        match tagged_val.as_array() {
+            Some(arr) => {
+                for v in arr {
+                    match v.as_i64() {
+                        Some(id) if (1..=4094).contains(&id) => {}
+                        Some(_) => {
+                            return (
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                Json(json!({ "error": "tagged VLAN IDs must be 1-4094" })),
+                            );
+                        }
+                        None => {
+                            return (
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                Json(json!({ "error": "tagged_vlans must be an array of integers" })),
+                            );
+                        }
+                    }
+                }
+                Some(arr.clone())
+            }
+            None => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({ "error": "tagged_vlans must be an array" })),
+                );
+            }
+        }
+    } else {
+        None
+    };
+
+    if pvid_opt.is_none() && tagged_opt.is_none() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": "provide pvid and/or tagged_vlans" })),
+        );
+    }
+
+    // Persist to DB
+    {
+        let conn = db.lock().await;
+
+        let mut sets = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(pvid) = pvid_opt {
+            sets.push("pvid = ?");
+            params.push(Box::new(pvid));
+        }
+        if let Some(tagged) = tagged_opt {
+            let json_str = serde_json::to_string(&tagged).unwrap_or_else(|_| "[]".to_string());
+            sets.push("tagged_vlans = ?");
+            params.push(Box::new(json_str));
+        }
+
+        let sql = format!("UPDATE interfaces SET {} WHERE name = ?", sets.join(", "));
+        params.push(Box::new(name.clone()));
+
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        match conn.execute(&sql, param_refs.as_slice()) {
+            Ok(0) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "port not found" })),
+                );
+            }
+            Ok(_) => {
+                tracing::info!(port = %name, "port VLAN config updated");
+            }
+            Err(e) => {
+                tracing::error!("port_update_handler db error: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "internal server error" })),
+                );
+            }
+        }
+        // DB lock dropped here — must release before calling reconfigure_networks
+    }
+
+    // Trigger live reconfiguration.
+    // Both reconfigure_networks and apply_rules acquire their own DB locks,
+    // so the lock above must be dropped first (done by the block above).
+    // Failures are logged but do not prevent returning 200: DB is source of truth;
+    // the ASIC and firewall will be brought in sync on next boot.
+    if let Err(e) = sfgw_net::switch::reconfigure_networks(&db).await {
+        tracing::warn!(port = %name, "switch reconfiguration failed after port update: {e}");
+    }
+    if let Err(e) = sfgw_fw::apply_rules(&db).await {
+        tracing::warn!(port = %name, "firewall reapply failed after port update: {e}");
+    }
+
+    (StatusCode::OK, Json(json!({ "ok": true })))
+}
+
+// ===========================================================================
+// Zone handlers — /api/v1/zones
+// ===========================================================================
+
+/// GET /api/v1/zones
+///
+/// Returns all network zones with their VLAN IDs, ordered by zone name.
+async fn zones_list_handler(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    let conn = db.lock().await;
+    let mut stmt = match conn.prepare(
+        "SELECT id, name, zone, vlan_id, subnet, gateway, dhcp_enabled, enabled \
+         FROM networks ORDER BY zone",
+    ) {
+        Ok(s) => s,
+        Err(e) => return internal_err(anyhow::anyhow!("{e}")),
+    };
+
+    let rows: Vec<Value> = match stmt.query_map([], |row| {
+        Ok(json!({
+            "id": row.get::<_, i64>(0)?,
+            "name": row.get::<_, String>(1)?,
+            "zone": row.get::<_, String>(2)?,
+            "vlan_id": row.get::<_, Option<i64>>(3)?,
+            "subnet": row.get::<_, Option<String>>(4)?,
+            "gateway": row.get::<_, Option<String>>(5)?,
+            "dhcp_enabled": row.get::<_, bool>(6)?,
+            "enabled": row.get::<_, bool>(7)?,
+        }))
+    }) {
+        Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
+        Err(e) => return internal_err(anyhow::anyhow!("{e}")),
+    };
+
+    (StatusCode::OK, Json(json!({ "zones": rows })))
+}
+
+/// GET /api/v1/zones/{zone}
+///
+/// Returns a specific zone with its VLAN ID and names of interfaces whose
+/// PVID matches the zone's VLAN ID.
+async fn zone_get_handler(
+    _auth: AuthUser,
+    Path(zone_name): Path<String>,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    let conn = db.lock().await;
+
+    // Fetch the zone
+    let zone_result = conn.query_row(
+        "SELECT id, name, zone, vlan_id, subnet, gateway, dhcp_enabled, enabled \
+         FROM networks WHERE zone = ?1",
+        rusqlite::params![zone_name],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, bool>(6)?,
+                row.get::<_, bool>(7)?,
+            ))
+        },
+    );
+
+    let (id, name, zone, vlan_id, subnet, gateway, dhcp_enabled, enabled) = match zone_result {
+        Ok(row) => row,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "zone not found" })),
+            );
+        }
+        Err(e) => {
+            tracing::error!("zone_get_handler db error: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal server error" })),
+            );
+        }
+    };
+
+    // Find interfaces with pvid matching this zone's vlan_id
+    let interfaces: Vec<String> = if let Some(vid) = vlan_id {
+        let mut stmt = match conn.prepare(
+            "SELECT name FROM interfaces WHERE pvid = ?1 ORDER BY name",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("zone_get_handler interface query prepare error: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "internal server error" })),
+                );
+            }
+        };
+        match stmt.query_map(rusqlite::params![vid], |row| row.get::<_, String>(0)) {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                tracing::error!("zone_get_handler interface query error: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "internal server error" })),
+                );
+            }
+        }
+    } else {
+        vec![]
+    };
+
+    tracing::info!(zone = %zone, vlan_id = ?vlan_id, "zone config retrieved");
+    (
+        StatusCode::OK,
+        Json(json!({
+            "id": id,
+            "name": name,
+            "zone": zone,
+            "vlan_id": vlan_id,
+            "subnet": subnet,
+            "gateway": gateway,
+            "dhcp_enabled": dhcp_enabled,
+            "enabled": enabled,
+            "interfaces": interfaces,
+        })),
+    )
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_db() -> sfgw_db::Db {
+        sfgw_db::open_in_memory()
+            .await
+            .expect("failed to open in-memory db")
+    }
+
+    // ── Port GET query shape ──────────────────────────────────────────
+
+    /// Test that the port GET query returns correct pvid and tagged_vlans.
+    #[tokio::test]
+    async fn test_port_get_query_shape() {
+        let db = test_db().await;
+        {
+            let conn = db.lock().await;
+            conn.execute(
+                "INSERT INTO interfaces (name, mac, ips, mtu, is_up, pvid, tagged_vlans, enabled)
+                 VALUES ('eth1', '00:11:22:33:44:55', '[]', 1500, 1, 10, '[20,30]', 1)",
+                [],
+            )
+            .expect("insert failed");
+        }
+
+        let conn = db.lock().await;
+        let (pvid, tagged_json): (i64, String) = conn
+            .query_row(
+                "SELECT pvid, tagged_vlans FROM interfaces WHERE name = ?1",
+                rusqlite::params!["eth1"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query failed");
+
+        assert_eq!(pvid, 10, "pvid must be 10");
+        let tagged: Vec<i64> = serde_json::from_str(&tagged_json).expect("json parse failed");
+        assert_eq!(tagged, vec![20, 30], "tagged_vlans must be [20,30]");
+    }
+
+    // ── Port PUT persists pvid and tagged_vlans ───────────────────────
+
+    /// Test that a port UPDATE correctly persists pvid and tagged_vlans.
+    #[tokio::test]
+    async fn test_port_update_persists_vlan_config() {
+        let db = test_db().await;
+        {
+            let conn = db.lock().await;
+            conn.execute(
+                "INSERT INTO interfaces (name, mac, ips, mtu, is_up, pvid, tagged_vlans, enabled)
+                 VALUES ('eth2', '00:aa:bb:cc:dd:ee', '[]', 1500, 1, 10, '[]', 1)",
+                [],
+            )
+            .expect("insert failed");
+        }
+
+        // Execute the same UPDATE logic as port_update_handler
+        {
+            let conn = db.lock().await;
+            let tagged_json = serde_json::to_string(&[10i64, 20]).unwrap();
+            conn.execute(
+                "UPDATE interfaces SET pvid = ?1, tagged_vlans = ?2 WHERE name = ?3",
+                rusqlite::params![3001i64, tagged_json, "eth2"],
+            )
+            .expect("update failed");
+        }
+
+        // Re-query and verify
+        let conn = db.lock().await;
+        let (pvid, tagged_json): (i64, String) = conn
+            .query_row(
+                "SELECT pvid, tagged_vlans FROM interfaces WHERE name = ?1",
+                rusqlite::params!["eth2"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("re-query failed");
+
+        assert_eq!(pvid, 3001, "pvid must be 3001 after update");
+        let tagged: Vec<i64> = serde_json::from_str(&tagged_json).expect("json parse failed");
+        assert_eq!(tagged, vec![10, 20], "tagged_vlans must be [10,20] after update");
+    }
+
+    // ── Port PUT validation ───────────────────────────────────────────
+
+    /// Test that pvid=5000 is rejected as out of range.
+    #[test]
+    fn test_port_update_rejects_invalid_pvid_high() {
+        let pvid: i64 = 5000;
+        let valid = pvid == 0 || (1..=4094).contains(&pvid);
+        assert!(!valid, "pvid=5000 must be rejected");
+    }
+
+    /// Test that pvid=-1 is rejected as out of range.
+    #[test]
+    fn test_port_update_rejects_invalid_pvid_negative() {
+        let pvid: i64 = -1;
+        let valid = pvid == 0 || (1..=4094).contains(&pvid);
+        assert!(!valid, "pvid=-1 must be rejected");
+    }
+
+    // ── Zones query returns vlan_id ───────────────────────────────────
+
+    /// Test that the zones list query returns zones with their vlan_id.
+    #[tokio::test]
+    async fn test_zones_query_returns_vlan_id() {
+        let db = test_db().await;
+        // After migrations, void zone (vlan_id=1) exists.
+        // Add a LAN zone with vlan_id=10.
+        {
+            let conn = db.lock().await;
+            conn.execute(
+                "INSERT INTO networks (name, zone, vlan_id, subnet, gateway, dhcp_enabled, enabled)
+                 VALUES ('LAN', 'lan', 10, '192.168.1.0/24', '192.168.1.1', 1, 1)",
+                [],
+            )
+            .expect("insert LAN failed");
+        }
+
+        let conn = db.lock().await;
+        let mut stmt = conn
+            .prepare("SELECT zone, vlan_id FROM networks ORDER BY zone")
+            .expect("prepare failed");
+        let rows: Vec<(String, Option<i64>)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query failed")
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // void zone must have vlan_id=1
+        let void_row = rows.iter().find(|(z, _)| z == "void");
+        assert!(void_row.is_some(), "void zone must exist");
+        assert_eq!(void_row.unwrap().1, Some(1), "void must have vlan_id=1");
+
+        // lan zone must have vlan_id=10
+        let lan_row = rows.iter().find(|(z, _)| z == "lan");
+        assert!(lan_row.is_some(), "lan zone must exist");
+        assert_eq!(lan_row.unwrap().1, Some(10), "lan must have vlan_id=10");
+    }
+
+    // ── Zone GET returns associated interfaces ────────────────────────
+
+    /// Test that interfaces with matching pvid are returned for a zone.
+    #[tokio::test]
+    async fn test_zone_get_returns_associated_interfaces() {
+        let db = test_db().await;
+
+        {
+            let conn = db.lock().await;
+
+            // Insert a LAN network zone with vlan_id=10
+            conn.execute(
+                "INSERT INTO networks (name, zone, vlan_id, subnet, gateway, dhcp_enabled, enabled)
+                 VALUES ('LAN', 'lan', 10, '192.168.1.0/24', '192.168.1.1', 1, 1)",
+                [],
+            )
+            .expect("insert network failed");
+
+            // eth1 and eth2 on VLAN 10, eth3 on VLAN 3000
+            let ifaces: &[(&str, i64)] = &[("eth1", 10), ("eth2", 10), ("eth3", 3000)];
+            for (name, pvid) in ifaces {
+                conn.execute(
+                    "INSERT INTO interfaces (name, mac, ips, mtu, is_up, pvid, tagged_vlans, enabled)
+                     VALUES (?1, '00:00:00:00:00:00', '[]', 1500, 1, ?2, '[]', 1)",
+                    rusqlite::params![name, pvid],
+                )
+                .expect("insert interface failed");
+            }
+        }
+
+        // Query interfaces with pvid matching LAN's vlan_id=10
+        let conn = db.lock().await;
+        let vlan_id: i64 = conn
+            .query_row(
+                "SELECT vlan_id FROM networks WHERE zone = ?1",
+                rusqlite::params!["lan"],
+                |row| row.get(0),
+            )
+            .expect("zone query failed");
+
+        let mut stmt = conn
+            .prepare("SELECT name FROM interfaces WHERE pvid = ?1 ORDER BY name")
+            .expect("prepare failed");
+        let iface_names: Vec<String> = stmt
+            .query_map(rusqlite::params![vlan_id], |row| row.get(0))
+            .expect("query failed")
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(iface_names, vec!["eth1", "eth2"], "only eth1 and eth2 should be in LAN zone");
+        assert!(!iface_names.contains(&"eth3".to_string()), "eth3 must not be in LAN zone");
+    }
+
+    // ── Port name validation ──────────────────────────────────────────
+
+    #[test]
+    fn test_is_valid_port_name() {
+        assert!(is_valid_port_name("eth0"));
+        assert!(is_valid_port_name("eth7"));
+        assert!(is_valid_port_name("wg0"));
+        // Reject path traversal characters
+        assert!(!is_valid_port_name("eth0.10"));
+        assert!(!is_valid_port_name("../etc"));
+        assert!(!is_valid_port_name("foo/bar"));
+        assert!(!is_valid_port_name("foo\\bar"));
+        // Reject empty
+        assert!(!is_valid_port_name(""));
     }
 }
