@@ -101,7 +101,7 @@ impl std::fmt::Display for FirewallZone {
 }
 
 impl FirewallZone {
-    /// Parse a zone from the `role` column in the interfaces table.
+    /// Parse a zone from a zone name string (e.g. from the `networks.zone` column).
     pub fn from_role(role: &str) -> Self {
         match role.to_lowercase().as_str() {
             "wan" => Self::Wan,
@@ -123,6 +123,8 @@ impl FirewallZone {
 pub struct ZonePolicy {
     pub zone: FirewallZone,
     pub interfaces: Vec<String>,
+    /// VLAN ID from the networks table. `None` for WAN (pvid=0, not an internal VLAN).
+    pub vlan_id: Option<u16>,
 }
 
 // ── WAN failover / load-balance ─────────────────────────────────────
@@ -458,33 +460,75 @@ pub async fn apply_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
 
 /// Load interface-to-zone assignments for firewall rule generation.
 ///
+/// Zones are derived from the PVID of each interface joined to the networks
+/// table, not from the removed `role` column:
+///
+/// - Internal interfaces (pvid > 0): zone and vlan_id come from
+///   `networks JOIN interfaces ON pvid = vlan_id`.
+/// - WAN interfaces (pvid = 0): placed in the WAN zone with `vlan_id: None`.
+///
 /// For bridged zones (LAN, MGMT, DMZ, GUEST), iptables sees traffic on
 /// the bridge interface (e.g. `br-lan`), not on individual switch ports.
 /// So we use `br-{zone}` as the interface when a network entry exists.
 ///
 /// For WAN, the raw interface names (eth8, eth9) are used directly since
 /// WAN interfaces are not bridged.
+///
+/// Interfaces whose pvid does not match any network's vlan_id are silently
+/// excluded — they have no zone assignment yet (user must configure).
 pub async fn load_interface_zones(db: &sfgw_db::Db) -> Result<Vec<ZonePolicy>, FwError> {
     let conn = db.lock().await;
 
-    // Load raw interface-to-role mappings for WAN (unbridged).
+    // ── Internal interfaces (pvid > 0): derive zone from networks JOIN ──
+
     let mut stmt = conn
-        .prepare("SELECT name, role FROM interfaces WHERE enabled = 1 ORDER BY role, name")
-        .context("failed to prepare interfaces query")?;
+        .prepare(
+            "SELECT i.name, n.zone, n.vlan_id \
+             FROM interfaces i \
+             JOIN networks n ON i.pvid = n.vlan_id \
+             WHERE i.enabled = 1 AND i.pvid > 0 \
+             ORDER BY n.zone, i.name",
+        )
+        .context("failed to prepare interfaces+networks JOIN query")?;
+
+    // zone_name -> (vlan_id, Vec<iface_name>)
+    let mut internal_map: HashMap<String, (u16, Vec<String>)> = HashMap::new();
 
     let rows = stmt
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u16>(2)?,
+            ))
         })
-        .context("failed to query interfaces")?;
+        .context("failed to query interfaces+networks JOIN")?;
 
-    let mut zone_map: HashMap<String, Vec<String>> = HashMap::new();
     for row in rows {
-        let (name, role) = row.context("failed to read interfaces row")?;
-        zone_map.entry(role).or_default().push(name);
+        let (iface_name, zone_name, vlan_id) = row.context("failed to read JOIN row")?;
+        internal_map
+            .entry(zone_name)
+            .and_modify(|(_, ifaces)| ifaces.push(iface_name.clone()))
+            .or_insert_with(|| (vlan_id, vec![iface_name]));
     }
 
-    // Load enabled networks — bridged zones use br-{zone} as their interface.
+    // ── WAN interfaces (pvid = 0) ──
+
+    let mut wan_stmt = conn
+        .prepare("SELECT name FROM interfaces WHERE enabled = 1 AND pvid = 0 ORDER BY name")
+        .context("failed to prepare WAN interfaces query")?;
+
+    let wan_rows = wan_stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .context("failed to query WAN interfaces")?;
+
+    let mut wan_ifaces: Vec<String> = Vec::new();
+    for row in wan_rows {
+        wan_ifaces.push(row.context("failed to read WAN interfaces row")?);
+    }
+
+    // ── Load enabled networks to determine which zones are bridged ──
+
     let mut net_stmt = conn
         .prepare("SELECT zone FROM networks WHERE enabled = 1")
         .context("failed to prepare networks query")?;
@@ -499,23 +543,41 @@ pub async fn load_interface_zones(db: &sfgw_db::Db) -> Result<Vec<ZonePolicy>, F
         bridged_zones.insert(zone);
     }
 
-    let zones = zone_map
-        .into_iter()
-        .map(|(role, interfaces)| {
-            // For bridged zones, replace individual port interfaces with the bridge.
-            let effective_ifaces =
-                if role != "wan" && role != "loopback" && bridged_zones.contains(&role) {
-                    vec![format!("br-{role}")]
-                } else {
-                    interfaces
-                };
-            ZonePolicy {
-                zone: FirewallZone::from_role(&role),
-                interfaces: effective_ifaces,
-            }
-        })
-        .collect();
+    // ── Build ZonePolicy list ──
 
+    let mut zones: Vec<ZonePolicy> = Vec::new();
+
+    for (zone_name, (vlan_id, ifaces)) in internal_map {
+        // For bridged zones, replace individual port interfaces with the bridge.
+        let effective_ifaces =
+            if zone_name != "void" && bridged_zones.contains(&zone_name) {
+                vec![format!("br-{zone_name}")]
+            } else {
+                ifaces
+            };
+
+        // Skip void zone — VLAN 1 is DROP-only, not a routable zone.
+        if zone_name == "void" {
+            continue;
+        }
+
+        zones.push(ZonePolicy {
+            zone: FirewallZone::from_role(&zone_name),
+            interfaces: effective_ifaces,
+            vlan_id: Some(vlan_id),
+        });
+    }
+
+    // WAN zone — unbridged, no vlan_id.
+    if !wan_ifaces.is_empty() {
+        zones.push(ZonePolicy {
+            zone: FirewallZone::Wan,
+            interfaces: wan_ifaces,
+            vlan_id: None,
+        });
+    }
+
+    tracing::info!("loaded {} zone policies from database (PVID-based)", zones.len());
     Ok(zones)
 }
 

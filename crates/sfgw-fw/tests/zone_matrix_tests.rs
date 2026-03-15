@@ -22,22 +22,27 @@ fn standard_zones() -> Vec<ZonePolicy> {
         ZonePolicy {
             zone: FirewallZone::Wan,
             interfaces: vec!["eth0".to_string(), "ppp0".to_string()],
+            vlan_id: None,
         },
         ZonePolicy {
             zone: FirewallZone::Lan,
             interfaces: vec!["br-lan".to_string(), "eth1".to_string()],
+            vlan_id: Some(10),
         },
         ZonePolicy {
             zone: FirewallZone::Dmz,
             interfaces: vec!["eth2".to_string()],
+            vlan_id: Some(3002),
         },
         ZonePolicy {
             zone: FirewallZone::Mgmt,
             interfaces: vec!["br-mgmt".to_string()],
+            vlan_id: Some(3000),
         },
         ZonePolicy {
             zone: FirewallZone::Guest,
             interfaces: vec!["br-guest".to_string()],
+            vlan_id: Some(3001),
         },
     ]
 }
@@ -1077,15 +1082,18 @@ fn zone_with_no_interfaces_produces_no_rules() {
         ZonePolicy {
             zone: FirewallZone::Wan,
             interfaces: vec!["eth0".to_string()],
+            vlan_id: None,
         },
         ZonePolicy {
             zone: FirewallZone::Lan,
             interfaces: vec!["br-lan".to_string()],
+            vlan_id: Some(10),
         },
         // GUEST zone has no interfaces assigned.
         ZonePolicy {
             zone: FirewallZone::Guest,
             interfaces: vec![],
+            vlan_id: Some(3001),
         },
     ];
 
