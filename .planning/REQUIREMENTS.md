@@ -19,9 +19,9 @@ Requirements for VLAN Trunk Model milestone. Each maps to roadmap phases.
 
 ### Switch ASIC (hardware addon)
 
-- [ ] **ASIC-01**: swconfig VLAN programming driven by per-port PVID + tagged VLAN config (only when board detected)
-- [ ] **ASIC-02**: MGMT port PVID set to MGMT VLAN (3000), tagged VLANs configurable
-- [ ] **ASIC-03**: Void VLAN 1 programmed on switch with no bridge attachment
+- [x] **ASIC-01**: swconfig VLAN programming driven by per-port PVID + tagged VLAN config (only when board detected)
+- [x] **ASIC-02**: MGMT port PVID set to MGMT VLAN (3000), tagged VLANs configurable
+- [x] **ASIC-03**: Void VLAN 1 programmed on switch with no bridge attachment
 
 ### WAN Isolation
 
@@ -84,9 +84,9 @@ Deferred to future release.
 | DATA-05 | Phase 1 | ✓ Done |
 | DATA-06 | Phase 1 | ✓ Done |
 | DATA-07 | Phase 1 | ✓ Done |
-| ASIC-01 | Phase 2 | Pending |
-| ASIC-02 | Phase 2 | Pending |
-| ASIC-03 | Phase 2 | Pending |
+| ASIC-01 | Phase 2 | ✓ Done |
+| ASIC-02 | Phase 2 | ✓ Done |
+| ASIC-03 | Phase 2 | ✓ Done |
 | WAN-01 | Phase 3 | Pending |
 | WAN-02 | Phase 3 | Pending |
 | WAN-03 | Phase 3 | Pending |

@@ -18,7 +18,7 @@ Replace the broken single-role port model with a proper VLAN trunk model where z
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Data Model** — DB migration to PVID + tagged VLAN list, void VLAN 1, LAN VLAN 10 defaults *(completed 2026-03-15)*
-- [ ] **Phase 2: Switch ASIC** — swconfig programming driven by per-port config (UDM Pro hardware addon)
+- [x] **Phase 2: Switch ASIC** — swconfig programming driven by per-port config (UDM Pro hardware addon) *(completed 2026-03-15)*
 - [ ] **Phase 3: Network Enforcement** — WAN isolation + firewall rules updated for new VLAN ID scheme
 - [ ] **Phase 4: API** — REST endpoints exposing PVID, tagged VLANs, and zone→VLAN relationships
 - [ ] **Phase 5: Web UI** — Switch visualization with port VLAN config, colored zone dots, board-specific layout
@@ -57,7 +57,7 @@ Plans:
 **Plans:** 1 plan
 
 Plans:
-- [ ] 02-01-PLAN.md — Rewrite switch ASIC programming: per-port VLAN computation from DB, VLAN 1 catch-all sink, MGMT isolation
+- [x] 02-01-PLAN.md — Rewrite switch ASIC programming: per-port VLAN computation from DB, VLAN 1 catch-all sink, MGMT isolation
 
 ---
 
@@ -120,7 +120,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Data Model | 2/2 | ✓ Complete | 2026-03-15 |
-| 2. Switch ASIC | 0/1 | Not started | - |
+| 2. Switch ASIC | 1/1 | ✓ Complete | 2026-03-15 |
 | 3. Network Enforcement | 0/? | Not started | - |
 | 4. API | 0/? | Not started | - |
 | 5. Web UI | 0/? | Not started | - |
