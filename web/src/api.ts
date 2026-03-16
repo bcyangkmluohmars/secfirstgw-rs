@@ -126,6 +126,20 @@ export interface NetIoStats {
   interfaces: { name: string; rx_bytes: number; tx_bytes: number }[];
 }
 
+export interface QueueStats {
+  queue: number;
+  rx_packets: number;
+  rx_bytes: number;
+  tx_packets: number;
+  tx_bytes: number;
+}
+
+export interface NicQueueStats {
+  name: string;
+  driver: string;
+  queues: QueueStats[];
+}
+
 export interface SystemStatus {
   status: string;
   uptime_secs: number;
@@ -134,6 +148,7 @@ export interface SystemStatus {
   load_average: [number, number, number];
   memory: { total_mb: number; used_mb: number; free_mb: number };
   network: NetIoStats;
+  nic_queues?: NicQueueStats[];
   services: Record<string, string>;
 }
 
@@ -375,6 +390,19 @@ export interface WanStatus {
   tx_bytes: number
 }
 
+// WAN failover/health types
+export interface WanFailoverConfig {
+  mode: 'failover' | 'loadbalance'
+  groups: { name: string; mode: string; interfaces: { interface: string; weight: number; gateway: string; priority: number; check_target: string; enabled: boolean }[] }[]
+}
+
+export interface WanHealthEntry {
+  interface: string
+  healthy: boolean
+  enabled: boolean
+  latency_ms: number | null
+}
+
 // User management types
 export interface UserInfo {
   id: number;
@@ -495,6 +523,9 @@ export const api = {
   deleteWanConfig: (iface: string) => request<void>(`/api/v1/wan/${encodeURIComponent(iface)}`, { method: 'DELETE' }),
   getWanStatus: (iface: string) => request<{ wan_status: WanStatus }>(`/api/v1/wan/${encodeURIComponent(iface)}/status`),
   reconnectWan: (iface: string) => request<void>(`/api/v1/wan/${encodeURIComponent(iface)}/reconnect`, { method: 'POST' }),
+  getWanFailover: () => request<WanFailoverConfig>('/api/v1/wan/failover'),
+  setWanFailover: (mode: 'failover' | 'loadbalance') => request<void>('/api/v1/wan/failover', { method: 'PUT', body: { mode } }),
+  getWanHealth: () => request<{ health: WanHealthEntry[] }>('/api/v1/wan/health'),
 };
 
 export { BASE_URL };

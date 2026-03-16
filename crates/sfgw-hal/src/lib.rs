@@ -2,8 +2,8 @@
 #![deny(unsafe_code)]
 
 use std::fmt;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Errors from the hardware abstraction layer.
 #[derive(Debug, thiserror::Error)]

@@ -718,6 +718,161 @@ pub struct NetIoStats {
     pub interfaces: Vec<IfaceIoStats>,
 }
 
+/// Per-queue (per-core) statistics for a single UDMA/NIC hardware queue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueStats {
+    pub queue: u32,
+    pub rx_packets: u64,
+    pub rx_bytes: u64,
+    pub tx_packets: u64,
+    pub tx_bytes: u64,
+}
+
+/// Per-NIC queue statistics (one entry per physical interface that has
+/// multi-queue support).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NicQueueStats {
+    pub name: String,
+    pub driver: String,
+    pub queues: Vec<QueueStats>,
+}
+
+/// Read per-queue NIC statistics from `ethtool -S` for all physical
+/// interfaces that expose `queue_N_{rx,tx}_{packets,bytes}` counters.
+///
+/// Works with any NIC driver that follows this naming convention
+/// (Annapurna Labs `al_eth`, Intel `igb`/`ixgbe`/`ice`, Mellanox `mlx5`, etc.).
+///
+/// Returns an empty Vec on systems without multi-queue NICs.
+pub fn read_nic_queue_stats() -> Vec<NicQueueStats> {
+    let mut result = Vec::new();
+
+    // Find physical interfaces (those with a PCI device backing)
+    let net_dir = Path::new("/sys/class/net");
+    let Ok(entries) = fs::read_dir(net_dir) else {
+        return result;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        // Skip virtual/bridge/vlan interfaces
+        if name.starts_with("br-")
+            || name.starts_with("lo")
+            || name.starts_with("dummy")
+            || name.starts_with("veth")
+            || name.starts_with("ifb")
+            || name.starts_with("gre")
+            || name.starts_with("sit")
+            || name.starts_with("ip6")
+            || name.starts_with("ip_")
+            || name.starts_with("erspan")
+            || name.starts_with("wg")
+            || name.contains('.')
+        {
+            continue;
+        }
+
+        // Must have a device/driver symlink (physical NIC)
+        let driver_path = entry.path().join("device/driver");
+        let driver = match fs::read_link(&driver_path) {
+            Ok(p) => p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            Err(_) => continue,
+        };
+
+        // Check for multi-queue support (queues/ directory with >1 rx queue)
+        let queues_dir = entry.path().join("queues");
+        let queue_count = fs::read_dir(&queues_dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("rx-"))
+                    .count()
+            })
+            .unwrap_or(0);
+
+        if queue_count < 2 {
+            continue;
+        }
+
+        // Run ethtool -S and parse queue counters
+        if let Some(nic_stats) = parse_ethtool_queue_stats(&name, &driver, queue_count as u32) {
+            result.push(nic_stats);
+        }
+    }
+
+    result
+}
+
+/// Parse `ethtool -S <iface>` output for per-queue packet/byte counters.
+fn parse_ethtool_queue_stats(iface: &str, driver: &str, queue_count: u32) -> Option<NicQueueStats> {
+    let output = std::process::Command::new("ethtool")
+        .args(["-S", iface])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut queues: Vec<QueueStats> = (0..queue_count)
+        .map(|q| QueueStats {
+            queue: q,
+            rx_packets: 0,
+            rx_bytes: 0,
+            tx_packets: 0,
+            tx_bytes: 0,
+        })
+        .collect();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        // Match patterns like "queue_0_rx_packets: 12345"
+        let Some((key, val_str)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let val: u64 = val_str.trim().parse().unwrap_or(0);
+
+        // Parse queue_N_<stat> pattern
+        if let Some(rest) = key.strip_prefix("queue_") {
+            let parts: Vec<&str> = rest.splitn(2, '_').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            let Ok(q_idx) = parts[0].parse::<usize>() else {
+                continue;
+            };
+            if q_idx >= queues.len() {
+                continue;
+            }
+            match parts[1] {
+                "rx_packets" => queues[q_idx].rx_packets = val,
+                "rx_bytes" => queues[q_idx].rx_bytes = val,
+                "tx_packets" => queues[q_idx].tx_packets = val,
+                "tx_bytes" => queues[q_idx].tx_bytes = val,
+                _ => {}
+            }
+        }
+    }
+
+    // Only return if we got actual data
+    let has_data = queues.iter().any(|q| q.rx_packets > 0 || q.tx_packets > 0);
+    if !has_data {
+        return None;
+    }
+
+    Some(NicQueueStats {
+        name: iface.to_string(),
+        driver: driver.to_string(),
+        queues,
+    })
+}
+
 /// Read aggregate network I/O counters from `/proc/net/dev`.
 ///
 /// Returns per-interface rx/tx bytes (excluding loopback and zero-traffic

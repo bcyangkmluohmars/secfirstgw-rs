@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import {
   api,
   type WanPortConfig,
   type WanConnectionType,
   type WanStatus,
+  type WanHealthEntry,
   type NetworkInterface,
 } from '../api'
 import { PageHeader, Card, Button, Badge, Modal, Input, Toggle, EmptyState, Spinner } from '../components/ui'
@@ -250,26 +251,107 @@ const PRESETS: Preset[] = [
   },
 ]
 
+const HOLD_DURATION = 800 // ms
+
+function HoldButton({ active, color, onConfirm, children }: {
+  active: boolean
+  color: 'emerald' | 'blue'
+  onConfirm: () => void
+  children: React.ReactNode
+}) {
+  const [progress, setProgress] = useState(0)
+  const [holding, setHolding] = useState(false)
+  const timerRef = useRef<number | null>(null)
+  const startRef = useRef(0)
+  const firedRef = useRef(false)
+
+  const startHold = () => {
+    if (active) return // already active, no-op
+    firedRef.current = false
+    setHolding(true)
+    startRef.current = performance.now()
+    const tick = () => {
+      const elapsed = performance.now() - startRef.current
+      const pct = Math.min(elapsed / HOLD_DURATION, 1)
+      setProgress(pct)
+      if (pct >= 1) {
+        if (!firedRef.current) {
+          firedRef.current = true
+          onConfirm()
+        }
+        setHolding(false)
+        setProgress(0)
+        return
+      }
+      timerRef.current = requestAnimationFrame(tick)
+    }
+    timerRef.current = requestAnimationFrame(tick)
+  }
+
+  const cancelHold = () => {
+    if (timerRef.current) cancelAnimationFrame(timerRef.current)
+    timerRef.current = null
+    setHolding(false)
+    setProgress(0)
+  }
+
+  const colors = color === 'emerald'
+    ? { active: 'bg-emerald-500/15 text-emerald-400 shadow-sm', fill: 'bg-emerald-500/25' }
+    : { active: 'bg-blue-500/15 text-blue-400 shadow-sm', fill: 'bg-blue-500/25' }
+
+  return (
+    <button
+      onMouseDown={startHold}
+      onMouseUp={cancelHold}
+      onMouseLeave={cancelHold}
+      onTouchStart={startHold}
+      onTouchEnd={cancelHold}
+      onTouchCancel={cancelHold}
+      className={`relative overflow-hidden px-3 py-1.5 text-xs font-medium rounded-md transition-all select-none ${
+        active
+          ? colors.active
+          : holding
+            ? 'text-gray-200'
+            : 'text-navy-400 hover:text-gray-300'
+      }`}
+    >
+      {/* Fill animation */}
+      {holding && !active && (
+        <span
+          className={`absolute inset-0 ${colors.fill} origin-left transition-none`}
+          style={{ transform: `scaleX(${progress})`, transformOrigin: 'left' }}
+        />
+      )}
+      <span className="relative z-10">{children}</span>
+    </button>
+  )
+}
+
 export default function Wan() {
   const [configs, setConfigs] = useState<WanPortConfig[]>([])
   const [statuses, setStatuses] = useState<Record<string, WanStatus>>({})
+  const [healthMap, setHealthMap] = useState<Record<string, WanHealthEntry>>({})
+  const [wanMode, setWanMode] = useState<'failover' | 'loadbalance'>('failover')
   const [hwInterfaces, setHwInterfaces] = useState<NetworkInterface[]>([])
   const [loading, setLoading] = useState(true)
   const [showForm, setShowForm] = useState(false)
   const [editIface, setEditIface] = useState<string | null>(null)
   const [form, setForm] = useState<WanFormState>({ ...emptyForm })
   const [showPresets, setShowPresets] = useState(false)
+  const [healthLoading, setHealthLoading] = useState(false)
   const toast = useToast()
 
   const load = useCallback(async () => {
     try {
-      const [wanRes, ifRes] = await Promise.all([
+      const [wanRes, ifRes, failoverRes] = await Promise.all([
         api.getWanConfigs(),
         api.getInterfaces(),
+        api.getWanFailover().catch(() => null),
       ])
       const cfgs = wanRes?.configs ?? []
       setConfigs(cfgs)
       setHwInterfaces((ifRes.interfaces ?? []).filter((i) => i.vlan_id == null))
+      if (failoverRes) setWanMode(failoverRes.mode)
 
       const statusMap: Record<string, WanStatus> = {}
       for (const c of cfgs) {
@@ -283,7 +365,26 @@ export default function Wan() {
     finally { setLoading(false) }
   }, [toast])
 
-  useEffect(() => { load() }, [load])
+  const refreshHealth = useCallback(async () => {
+    setHealthLoading(true)
+    try {
+      const res = await api.getWanHealth()
+      const map: Record<string, WanHealthEntry> = {}
+      for (const h of res.health) map[h.interface] = h
+      setHealthMap(map)
+    } catch { /* ignore */ }
+    finally { setHealthLoading(false) }
+  }, [])
+
+  const handleModeChange = async (mode: 'failover' | 'loadbalance') => {
+    try {
+      await api.setWanFailover(mode)
+      setWanMode(mode)
+      toast.success(`WAN mode set to ${mode === 'failover' ? 'Failover' : 'Load Balance'}`)
+    } catch (e: unknown) { toast.error((e as Error).message) }
+  }
+
+  useEffect(() => { load(); refreshHealth() }, [load, refreshHealth])
 
   const configuredIfaces = new Set(configs.map((c) => c.interface))
   const availableInterfaces = hwInterfaces.filter((i) => !configuredIfaces.has(i.name) && i.pvid === 0)
@@ -348,6 +449,93 @@ export default function Wan() {
         title="WAN"
         subtitle="Internet uplinks, failover, and load balancing"
       />
+
+      {/* Failover / Load-Balance mode + Health */}
+      {configs.length > 1 && (
+        <Card noPadding>
+          <div className="px-5 py-4">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <p className="text-sm font-semibold text-gray-200">
+                  Active Mode: <span className={wanMode === 'failover' ? 'text-emerald-400' : 'text-blue-400'}>
+                    {wanMode === 'failover' ? 'Failover' : 'Load Balance'}
+                  </span>
+                </p>
+                <p className="text-[10px] text-navy-600 mt-0.5">
+                  {wanMode === 'failover'
+                    ? 'Automatic failover — traffic uses highest-priority healthy uplink'
+                    : 'Load balance — traffic distributed across uplinks by weight'}
+                </p>
+              </div>
+              <div className="flex flex-col items-end gap-1">
+                <div className="flex items-center bg-navy-800/50 rounded-lg p-0.5">
+                  <HoldButton
+                    active={wanMode === 'failover'}
+                    color="emerald"
+                    onConfirm={() => handleModeChange('failover')}
+                  >
+                    Failover
+                  </HoldButton>
+                  <HoldButton
+                    active={wanMode === 'loadbalance'}
+                    color="blue"
+                    onConfirm={() => handleModeChange('loadbalance')}
+                  >
+                    Load Balance
+                  </HoldButton>
+                </div>
+                <p className="text-[9px] text-navy-600">Click and hold to switch mode</p>
+              </div>
+            </div>
+
+            {/* Health status strip */}
+            <div className="flex items-center gap-2 pt-3 border-t border-navy-800/30">
+              <p className="text-[10px] text-navy-500 uppercase tracking-wider mr-2">Health</p>
+              {configs.filter((c) => c.enabled).map((cfg) => {
+                const h = healthMap[cfg.interface]
+                const healthy = h?.healthy ?? false
+                const latency = h?.latency_ms
+                return (
+                  <div
+                    key={cfg.interface}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-mono ${
+                      !h
+                        ? 'bg-navy-800/50 text-navy-500'
+                        : healthy
+                          ? 'bg-emerald-500/10 text-emerald-400'
+                          : 'bg-red-500/10 text-red-400'
+                    }`}
+                  >
+                    <span className={`block w-1.5 h-1.5 rounded-full ${
+                      !h ? 'bg-navy-600' : healthy ? 'bg-emerald-400' : 'bg-red-400'
+                    }`} />
+                    {cfg.interface}
+                    {latency != null && (
+                      <span className="text-[10px] text-navy-500">{latency}ms</span>
+                    )}
+                    {wanMode === 'failover' && (
+                      <span className="text-[10px] text-navy-600">pri:{cfg.priority}</span>
+                    )}
+                    {wanMode === 'loadbalance' && (
+                      <span className="text-[10px] text-navy-600">w:{cfg.weight}</span>
+                    )}
+                  </div>
+                )
+              })}
+              <button
+                onClick={refreshHealth}
+                disabled={healthLoading}
+                className="ml-auto text-[10px] text-navy-500 hover:text-navy-300 transition-colors flex items-center gap-1"
+              >
+                <svg className={`w-3 h-3 ${healthLoading ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M23 4v6h-6M1 20v-6h6" /><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+                </svg>
+                {healthLoading ? 'Checking...' : 'Refresh'}
+              </button>
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* Create / Edit Modal */}
       <Modal open={showForm} onClose={() => setShowForm(false)} title={editIface ? `Edit WAN: ${editIface}` : 'Add WAN Port'} size="lg">
@@ -565,6 +753,8 @@ export default function Wan() {
             const isUp = status?.link_up ?? false
             const hwIface = hwInterfaces.find((i) => i.name === cfg.interface)
             const stack = describeStack(cfg)
+            const health = healthMap[cfg.interface]
+            const isHealthy = health?.healthy ?? null
 
             return (
               <Card key={cfg.interface} noPadding>
@@ -585,6 +775,14 @@ export default function Wan() {
                       <p className="text-[10px] text-navy-500 font-mono mt-0.5">{stack}</p>
                     </div>
                     <Badge variant={isUp ? 'success' : 'danger'}>{isUp ? 'UP' : 'DOWN'}</Badge>
+                    {isHealthy !== null && (
+                      <Badge variant={isHealthy ? 'success' : 'danger'}>
+                        {isHealthy ? 'HEALTHY' : 'UNHEALTHY'}
+                      </Badge>
+                    )}
+                    {health?.latency_ms != null && (
+                      <span className="text-[10px] text-navy-500 font-mono">{health.latency_ms}ms</span>
+                    )}
                     {!cfg.enabled && <Badge variant="neutral">Disabled</Badge>}
                     {configs.length > 1 && (
                       <span className="text-[10px] text-navy-500 font-mono">pri:{cfg.priority} w:{cfg.weight}</span>

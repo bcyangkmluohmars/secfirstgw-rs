@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef } from 'react'
 import { Card, PageHeader, Spinner, Sparkline, MiniGauge, StatCard } from '../components/ui'
 import { useStatus } from '../hooks/useStatus'
+import type { NicQueueStats } from '../api'
 
 const MAX_HISTORY = 60 // 10 min at 10s interval
 
@@ -130,6 +131,84 @@ function ServiceGrid({ services }: { services: Record<string, string> }) {
       </div>
     </div>
   )
+}
+
+function NicQueueViz({ nic }: { nic: NicQueueStats }) {
+  const totalRx = nic.queues.reduce((s, q) => s + q.rx_packets, 0) || 1
+  const totalTx = nic.queues.reduce((s, q) => s + q.tx_packets, 0) || 1
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-xs font-mono font-semibold text-gray-300">{nic.name}</span>
+        <span className="text-[10px] text-navy-500 font-mono">{nic.driver}</span>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        {/* RX distribution */}
+        <div>
+          <p className="text-[10px] text-navy-400 uppercase tracking-wider font-medium mb-1">
+            <span className="text-emerald-400">↓</span> RX per Core
+          </p>
+          <div className="space-y-1">
+            {nic.queues.map((q) => {
+              const pct = (q.rx_packets / totalRx) * 100
+              return (
+                <div key={q.queue} className="flex items-center gap-2">
+                  <span className="text-[10px] text-navy-500 font-mono w-8">C{q.queue}</span>
+                  <div className="flex-1 h-3 bg-navy-800/50 rounded-sm overflow-hidden">
+                    <div
+                      className="h-full bg-emerald-500/70 rounded-sm transition-all duration-500"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] font-mono text-emerald-400/70 tabular-nums w-14 text-right">
+                    {pct.toFixed(1)}%
+                  </span>
+                  <span className="text-[10px] font-mono text-navy-500 tabular-nums w-16 text-right">
+                    {fmtPkts(q.rx_packets)}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+        {/* TX distribution */}
+        <div>
+          <p className="text-[10px] text-navy-400 uppercase tracking-wider font-medium mb-1">
+            <span className="text-blue-400">↑</span> TX per Core
+          </p>
+          <div className="space-y-1">
+            {nic.queues.map((q) => {
+              const pct = (q.tx_packets / totalTx) * 100
+              return (
+                <div key={q.queue} className="flex items-center gap-2">
+                  <span className="text-[10px] text-navy-500 font-mono w-8">C{q.queue}</span>
+                  <div className="flex-1 h-3 bg-navy-800/50 rounded-sm overflow-hidden">
+                    <div
+                      className="h-full bg-blue-500/70 rounded-sm transition-all duration-500"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] font-mono text-blue-400/70 tabular-nums w-14 text-right">
+                    {pct.toFixed(1)}%
+                  </span>
+                  <span className="text-[10px] font-mono text-navy-500 tabular-nums w-16 text-right">
+                    {fmtPkts(q.tx_packets)}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const fmtPkts = (n: number) => {
+  if (n < 1000) return `${n}`
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`
+  return `${(n / 1_000_000).toFixed(1)}M`
 }
 
 export default function Dashboard() {
@@ -307,6 +386,18 @@ export default function Dashboard() {
             </div>
           )}
         </Card>
+
+        {/* Per-Core NIC Queue Distribution */}
+        {status.nic_queues && status.nic_queues.length > 0 && (
+          <Card title="NIC Queue Distribution">
+            <p className="text-[10px] text-navy-500 mb-3">Per-core hardware queue packet distribution across CPU cores</p>
+            <div className="space-y-4">
+              {status.nic_queues.map((nic: NicQueueStats) => (
+                <NicQueueViz key={nic.name} nic={nic} />
+              ))}
+            </div>
+          </Card>
+        )}
 
         {/* Gauges */}
         <Card>

@@ -274,13 +274,15 @@ pub fn init(
             let display = ulcmd::init(Path::new(socket_path))?;
             Ok(Some(Box::new(display)))
         }
-        DisplayConfig::Lcm { board_id, mac } => match lcm::init_for_board(board_id, mac, sys_stats)? {
-            Some(display) => Ok(Some(Box::new(display))),
-            None => {
-                tracing::warn!(board_id, "LCM display not supported for this board");
-                Ok(None)
+        DisplayConfig::Lcm { board_id, mac } => {
+            match lcm::init_for_board(board_id, mac, sys_stats)? {
+                Some(display) => Ok(Some(Box::new(display))),
+                None => {
+                    tracing::warn!(board_id, "LCM display not supported for this board");
+                    Ok(None)
+                }
             }
-        },
+        }
     }
 }
 

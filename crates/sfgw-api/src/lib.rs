@@ -33,7 +33,11 @@ use crate::ratelimit::RateLimiter;
 /// Shared system stats handle for the status endpoint.
 pub type SysStats = Arc<sfgw_hal::SystemStats>;
 
-pub async fn serve(db: &sfgw_db::Db, event_tx: events::EventTx, sys_stats: &SysStats) -> Result<()> {
+pub async fn serve(
+    db: &sfgw_db::Db,
+    event_tx: events::EventTx,
+    sys_stats: &SysStats,
+) -> Result<()> {
     let listen_addr: SocketAddr = std::env::var("SFGW_LISTEN_ADDR")
         .unwrap_or_else(|_| "[::]:443".to_string())
         .parse()
@@ -170,6 +174,11 @@ pub async fn serve(db: &sfgw_db::Db, event_tx: events::EventTx, sys_stats: &SysS
         )
         // WAN
         .route("/api/v1/wan", get(wan_list))
+        .route(
+            "/api/v1/wan/failover",
+            get(wan_failover_get).put(wan_failover_set),
+        )
+        .route("/api/v1/wan/health", get(wan_health))
         .route(
             "/api/v1/wan/{interface}",
             get(wan_get).put(wan_set).delete(wan_delete),
@@ -839,7 +848,6 @@ fn read_arch() -> &'static str {
     std::env::consts::ARCH
 }
 
-
 // ---------------------------------------------------------------------------
 // Protected handlers
 // ---------------------------------------------------------------------------
@@ -942,6 +950,7 @@ async fn status_handler(
     };
 
     let net_io = sfgw_net::read_net_io();
+    let nic_queues = sfgw_net::read_nic_queue_stats();
 
     let cpu_count = read_cpu_count();
 
@@ -957,6 +966,7 @@ async fn status_handler(
             "free_mb": mem.free_mb,
         },
         "network": net_io,
+        "nic_queues": nic_queues,
         "services": {
             "firewall": fw_status,
             "dns": dns_status,
@@ -2079,6 +2089,148 @@ async fn wan_reconnect(
         Ok(()) => (StatusCode::OK, Json(json!({ "status": "reconnecting" }))),
         Err(e) => internal_err(e),
     }
+}
+
+// ---------------------------------------------------------------------------
+// WAN failover / load-balance group + health
+// ---------------------------------------------------------------------------
+
+async fn wan_failover_get(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_fw::load_wan_groups(&db).await {
+        Ok(groups) => {
+            // Return the first group (single WAN group model) or defaults
+            let mode = groups
+                .first()
+                .map(|g| match g.mode {
+                    sfgw_fw::WanMode::LoadBalance => "loadbalance",
+                    sfgw_fw::WanMode::Failover => "failover",
+                })
+                .unwrap_or("failover");
+            (
+                StatusCode::OK,
+                Json(json!({ "mode": mode, "groups": groups })),
+            )
+        }
+        Err(e) => internal_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct WanFailoverBody {
+    mode: String,
+}
+
+async fn wan_failover_set(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(body): Json<WanFailoverBody>,
+) -> impl IntoResponse {
+    let mode = match body.mode.as_str() {
+        "failover" => sfgw_fw::WanMode::Failover,
+        "loadbalance" => sfgw_fw::WanMode::LoadBalance,
+        _ => {
+            return err_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                anyhow::anyhow!("invalid mode: must be 'failover' or 'loadbalance'"),
+            );
+        }
+    };
+
+    // Load existing groups, update mode, rebuild members from wan_configs
+    let configs = match sfgw_net::wan::list_wan_configs(&db).await {
+        Ok(c) => c,
+        Err(e) => return internal_err(e),
+    };
+
+    // Build WAN group from per-port configs, populating gateways from live status
+    let mut members: Vec<sfgw_fw::WanMember> = Vec::new();
+    for c in configs.iter().filter(|c| c.enabled) {
+        // Get live gateway from WAN status
+        let gateway = match sfgw_net::wan::detect_wan_status(&c.interface).await {
+            Ok(status) => status.gateway_v4.unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+        // Skip members without a gateway (interface not connected)
+        if gateway.is_empty() {
+            tracing::warn!(
+                "WAN {} has no gateway, skipping from failover group",
+                c.interface
+            );
+            continue;
+        }
+        members.push(sfgw_fw::WanMember {
+            interface: c.interface.clone(),
+            weight: c.weight.min(255) as u8,
+            gateway,
+            priority: c.priority.min(255) as u8,
+            check_target: c.health_check.clone(),
+            enabled: c.enabled,
+        });
+    }
+
+    let group = sfgw_fw::WanGroup {
+        name: "default".to_string(),
+        mode,
+        interfaces: members,
+    };
+
+    match sfgw_fw::save_wan_groups(&db, &[group]).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "saved" }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn wan_health(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) -> impl IntoResponse {
+    let configs = match sfgw_net::wan::list_wan_configs(&db).await {
+        Ok(c) => c,
+        Err(e) => return internal_err(e),
+    };
+
+    let mut results = Vec::new();
+
+    for cfg in &configs {
+        if !cfg.enabled {
+            results.push(json!({
+                "interface": cfg.interface,
+                "healthy": false,
+                "enabled": false,
+                "latency_ms": null,
+            }));
+            continue;
+        }
+
+        // On-demand ping health check
+        let start = std::time::Instant::now();
+        let healthy = match tokio::process::Command::new("ping")
+            .args([
+                "-I",
+                &cfg.interface,
+                "-c",
+                "1",
+                "-W",
+                "2",
+                &cfg.health_check,
+            ])
+            .output()
+            .await
+        {
+            Ok(output) => output.status.success(),
+            Err(_) => false,
+        };
+        let latency = start.elapsed().as_millis() as u64;
+
+        results.push(json!({
+            "interface": cfg.interface,
+            "healthy": healthy,
+            "enabled": true,
+            "latency_ms": if healthy { Some(latency) } else { None::<u64> },
+        }));
+    }
+
+    (StatusCode::OK, Json(json!({ "health": results })))
 }
 
 // ---------------------------------------------------------------------------

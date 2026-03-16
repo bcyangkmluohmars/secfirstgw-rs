@@ -570,7 +570,6 @@ fn read_uptime_secs() -> u64 {
         .unwrap_or(0)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

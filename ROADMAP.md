@@ -35,6 +35,12 @@ Current version: **v0.2.0**
 - **IDS active response** — Auto-block on detection threshold (notify sfgw-fw to insert DROP rules).
 - **Honeypot integration** — Wire honeypot connections into IDS event pipeline for correlation.
 - **Custom zones** — IoT, VPN, Custom zone types with configurable policies.
+- **WAN Failover/Load-Balancing Improvements**
+  - Health-Check erweitern — HTTP-Check, DNS-Resolve-Check (nicht nur ICMP Ping)
+  - Hysterese / Flap-Detection (Interface flapped 10x in 1 Min → nicht sofort re-route)
+  - Sticky-Sessions (bei Failover bestehende Connections nicht brechen)
+  - Per-Zone WAN-Pinning ("DMZ immer über eth8, LAN über switch0")
+  - Web UI — WAN-Bereich mit Failover/LB-Konfiguration, Health-Check-Status, Interface-Prioritäten
 - **DDNS** — Dynamic DNS client for WAN IP updates.
 - **UPnP/NAT-PMP** — Optional, disabled by default.
 - **Traffic shaping** — QoS via tc/nftables.
