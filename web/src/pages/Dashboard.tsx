@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useEffect, useState, useRef } from 'react'
-import { Card, PageHeader, Spinner, Sparkline, MiniGauge, StatCard } from '../components/ui'
+import { Card, PageHeader, Spinner, Sparkline, StatCard } from '../components/ui'
 import { useStatus } from '../hooks/useStatus'
-import type { NicQueueStats } from '../api'
+import { api, type NicQueueStats, type WanStatus } from '../api'
 
 const MAX_HISTORY = 60 // 10 min at 10s interval
 
@@ -22,7 +22,7 @@ const fmtBytes = (b: number) => {
   return `${(b / 1099511627776).toFixed(2)} TB`
 }
 
-function UptimeDisplay({ initialSecs }: { initialSecs: number }) {
+function useUptime(initialSecs: number) {
   const [secs, setSecs] = useState(initialSecs)
   const startRef = useRef(0)
   const baseRef = useRef(initialSecs)
@@ -46,22 +46,14 @@ function UptimeDisplay({ initialSecs }: { initialSecs: number }) {
   const m = Math.floor((secs % 3600) / 60)
   const s = secs % 60
 
-  return (
-    <StatCard
-      label="Uptime"
-      value={
-        <div className="flex items-baseline gap-0.5 font-mono">
-          {d > 0 && <><span>{d}</span><span className="text-sm text-navy-500 mr-1">d</span></>}
-          <span>{h.toString().padStart(2, '0')}</span>
-          <span className="text-lg text-navy-600 animate-pulse">:</span>
-          <span>{m.toString().padStart(2, '0')}</span>
-          <span className="text-lg text-navy-600 animate-pulse">:</span>
-          <span>{s.toString().padStart(2, '0')}</span>
-        </div>
-      }
-      icon={<svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>}
-    />
-  )
+  return { d, h, m, s }
+}
+
+function fmtUptime(d: number, h: number, m: number, s: number) {
+  const parts: string[] = []
+  if (d > 0) parts.push(`${d}d`)
+  parts.push(`${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`)
+  return parts.join(' ')
 }
 
 const statusLabel = (s: string) => {
@@ -215,6 +207,7 @@ export default function Dashboard() {
   const { status } = useStatus()
   const [loadHistory, setLoadHistory] = useState<number[]>([])
   const [memHistory, setMemHistory] = useState<number[]>([])
+  const [cpuHistory, setCpuHistory] = useState<number[]>([])
   const [rxRateHistory, setRxRateHistory] = useState<number[]>([])
   const [txRateHistory, setTxRateHistory] = useState<number[]>([])
   const [currentRxRate, setCurrentRxRate] = useState(0)
@@ -233,6 +226,8 @@ export default function Dashboard() {
     setLoadHistory((prev) => [...prev.slice(-(MAX_HISTORY - 1)), status.load_average[0]])
     const memPct = status.memory.total_mb > 0 ? (status.memory.used_mb / status.memory.total_mb) * 100 : 0
     setMemHistory((prev) => [...prev.slice(-(MAX_HISTORY - 1)), memPct])
+    const cpuPct = status.cpu_percent ?? Math.min((status.load_average[0] / (status.cpu_count || 4)) * 100, 100)
+    setCpuHistory((prev) => [...prev.slice(-(MAX_HISTORY - 1)), cpuPct])
 
     // Compute net I/O rate (bytes/sec delta)
     const now = Date.now()
@@ -254,6 +249,32 @@ export default function Dashboard() {
     prevTx.current = tx
     prevTime.current = now
   }, [status])
+
+  const [wanStatuses, setWanStatuses] = useState<WanStatus[]>([])
+
+  // Load WAN status on mount and periodically
+  useEffect(() => {
+    let cancelled = false
+    const loadWan = async () => {
+      try {
+        const res = await api.getWanConfigs()
+        const cfgs = res?.configs ?? []
+        const statuses: WanStatus[] = []
+        for (const c of cfgs) {
+          try {
+            const r = await api.getWanStatus(c.interface)
+            statuses.push(r?.wan_status ?? r as unknown as WanStatus)
+          } catch { /* skip */ }
+        }
+        if (!cancelled) setWanStatuses(statuses)
+      } catch { /* ignore */ }
+    }
+    loadWan()
+    const interval = setInterval(loadWan, 30000)
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [])
+
+  const uptime = useUptime(status?.uptime_secs ?? 0)
 
   if (!status) return <Spinner label="Loading system status..." />
 
@@ -292,17 +313,26 @@ export default function Dashboard() {
                 <span className="text-emerald-400">Online</span>
               </div>
             }
+            subtitle={fmtUptime(uptime.d, uptime.h, uptime.m, uptime.s)}
             icon={<svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 2L4 6v6c0 5.25 3.4 10.15 8 11.43C16.6 22.15 20 17.25 20 12V6l-8-4z" /></svg>}
             accentColor="#34d399"
           />
 
-          <UptimeDisplay initialSecs={status.uptime_secs} />
+          <StatCard
+            label="CPU Usage"
+            value={<span className="font-mono">{Math.round(cpuPercent)}%</span>}
+            subtitle={`${status.load_average[0].toFixed(2)} / ${status.load_average[1].toFixed(2)} / ${status.load_average[2].toFixed(2)}`}
+            icon={<svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg>}
+            accentColor={cpuPercent > 80 ? '#f87171' : cpuPercent > 50 ? '#fbbf24' : '#34d399'}
+          >
+            <Sparkline data={cpuHistory} width={180} height={32} color={cpuPercent > 80 ? '#f87171' : '#34d399'} strokeWidth={1.5} />
+          </StatCard>
 
           <StatCard
             label="Load Average"
             value={<span className="font-mono">{status.load_average[0].toFixed(2)}</span>}
-            subtitle={`${status.load_average[0].toFixed(2)} / ${status.load_average[1].toFixed(2)} / ${status.load_average[2].toFixed(2)}`}
-            icon={<svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg>}
+            subtitle={`${cores} cores`}
+            icon={<svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="4" y="4" width="16" height="16" rx="2" /><line x1="9" y1="4" x2="9" y2="20" /><line x1="15" y1="4" x2="15" y2="20" /><line x1="4" y1="9" x2="20" y2="9" /><line x1="4" y1="15" x2="20" y2="15" /></svg>}
             accentColor={status.load_average[0] > cores * 2 ? '#f87171' : status.load_average[0] > cores ? '#fbbf24' : '#34d399'}
           >
             <Sparkline data={loadHistory} width={180} height={32} color={status.load_average[0] > cores * 2 ? '#f87171' : '#34d399'} strokeWidth={1.5} />
@@ -318,6 +348,93 @@ export default function Dashboard() {
             <Sparkline data={memHistory} width={180} height={32} color={ramPercent > 85 ? '#f87171' : '#34d399'} strokeWidth={1.5} />
           </StatCard>
         </div>
+
+        {/* WAN Status */}
+        {wanStatuses.length > 0 && (
+          <Card noPadding>
+            <div className="px-5 py-4">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-8 h-8 rounded-lg bg-navy-800/80 border border-navy-700/30 flex items-center justify-center">
+                  <svg className="w-4 h-4 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="4" ry="9" /><line x1="3" y1="12" x2="21" y2="12" />
+                  </svg>
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-gray-200">WAN Uplinks</p>
+                  <p className="text-[10px] text-navy-500">{wanStatuses.filter((w) => w.link_up).length} / {wanStatuses.length} connected</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {wanStatuses.map((wan) => {
+                  const wanUpSecs = wan.uptime_secs ?? 0
+                  const wanDays = Math.floor(wanUpSecs / 86400)
+                  const wanHrs = Math.floor((wanUpSecs % 86400) / 3600)
+                  const wanMins = Math.floor((wanUpSecs % 3600) / 60)
+                  return (
+                    <div
+                      key={wan.interface}
+                      className={`rounded-lg border p-4 transition-all ${
+                        wan.link_up
+                          ? 'bg-emerald-500/5 border-emerald-500/20'
+                          : 'bg-red-500/5 border-red-500/20'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <div className="relative">
+                            <span className={`block w-2.5 h-2.5 rounded-full ${wan.link_up ? 'bg-emerald-400' : 'bg-red-400'}`} />
+                            {wan.link_up && <span className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping opacity-30" />}
+                          </div>
+                          <span className="text-sm font-mono font-semibold text-gray-200">{wan.interface}</span>
+                          <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${
+                            wan.link_up ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'
+                          }`}>
+                            {wan.link_up ? 'CONNECTED' : 'DOWN'}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-navy-500 font-mono uppercase">{wan.connection_type}</span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-3">
+                        <div>
+                          <p className="text-[10px] text-navy-500 uppercase">IPv4</p>
+                          <p className="text-xs font-mono text-gray-300 tabular-nums mt-0.5">{wan.ipv4 ?? '---'}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-navy-500 uppercase">Gateway</p>
+                          <p className="text-xs font-mono text-gray-300 tabular-nums mt-0.5">{wan.gateway_v4 ?? '---'}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-navy-500 uppercase">Uptime</p>
+                          <p className="text-xs font-mono text-gray-300 tabular-nums mt-0.5">
+                            {wanDays > 0 ? `${wanDays}d ` : ''}{wanHrs}h {wanMins}m
+                          </p>
+                        </div>
+                      </div>
+                      {wan.link_up && (
+                        <div className="flex items-center gap-4 mt-3 pt-3 border-t border-navy-800/30">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-emerald-400 text-xs">↓</span>
+                            <span className="text-[11px] font-mono text-emerald-400/80 tabular-nums">{fmtBytes(wan.rx_bytes)}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-blue-400 text-xs">↑</span>
+                            <span className="text-[11px] font-mono text-blue-400/80 tabular-nums">{fmtBytes(wan.tx_bytes)}</span>
+                          </div>
+                          {wan.dns_servers.length > 0 && (
+                            <div className="ml-auto">
+                              <span className="text-[10px] text-navy-500">DNS: </span>
+                              <span className="text-[10px] font-mono text-navy-400">{wan.dns_servers.join(', ')}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </Card>
+        )}
 
         {/* Network I/O */}
         <Card title="Network I/O">
@@ -398,36 +515,6 @@ export default function Dashboard() {
             </div>
           </Card>
         )}
-
-        {/* Gauges */}
-        <Card>
-          <div className="flex items-center justify-around py-2">
-            <MiniGauge
-              value={status.load_average[0]}
-              max={cores}
-              label="CPU Load"
-              unit="avg"
-              thresholds={{ warn: 75, error: 100 }}
-              subtitle={`${status.load_average[0].toFixed(2)} / ${cores} cores`}
-            />
-            <div className="w-px h-20 bg-navy-800/50" />
-            <MiniGauge
-              value={Math.round(ramPercent)}
-              max={100}
-              label="Memory"
-              unit="%"
-              subtitle={`${status.memory.free_mb} MB free`}
-            />
-            <div className="w-px h-20 bg-navy-800/50" />
-            <MiniGauge
-              value={Math.round(cpuPercent)}
-              max={100}
-              label="CPU Usage"
-              unit="%"
-              thresholds={{ warn: 50, error: 80 }}
-            />
-          </div>
-        </Card>
 
         {/* Services */}
         <ServiceGrid services={status.services} />
