@@ -448,10 +448,8 @@ pub async fn apply_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
     iptables::apply_ruleset(&config).await?;
 
     // Apply WAN routing if groups are configured (non-fatal — don't block startup).
-    if !wan_groups.is_empty() {
-        if let Err(e) = wan::apply_wan_routing(&wan_groups).await {
-            tracing::error!("WAN routing failed (continuing): {e}");
-        }
+    if !wan_groups.is_empty() && let Err(e) = wan::apply_wan_routing(&wan_groups).await {
+        tracing::error!("WAN routing failed (continuing): {e}");
     }
 
     tracing::info!("iptables rules applied successfully (zone-aware)");
