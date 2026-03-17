@@ -107,10 +107,10 @@ pub fn validate(net: &WirelessNetwork) -> std::result::Result<(), String> {
     // PSK requirements
     match net.security {
         WirelessSecurity::Wpa2 | WirelessSecurity::Wpa3 => {
-            if let Some(ref psk) = net.psk {
-                if psk.len() < 8 || psk.len() > 63 {
-                    return Err("PSK must be 8-63 characters".into());
-                }
+            if let Some(ref psk) = net.psk
+                && (psk.len() < 8 || psk.len() > 63)
+            {
+                return Err("PSK must be 8-63 characters".into());
             }
             // PSK can be None on update (keep existing)
         }
@@ -122,10 +122,10 @@ pub fn validate(net: &WirelessNetwork) -> std::result::Result<(), String> {
     }
 
     // VLAN range
-    if let Some(vlan) = net.vlan_id {
-        if vlan == 0 || vlan > 4094 {
-            return Err("VLAN ID must be 1-4094".into());
-        }
+    if let Some(vlan) = net.vlan_id
+        && (vlan == 0 || vlan > 4094)
+    {
+        return Err("VLAN ID must be 1-4094".into());
     }
 
     Ok(())
