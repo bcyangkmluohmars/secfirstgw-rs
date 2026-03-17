@@ -355,6 +355,10 @@ pub async fn adopt_device(db: &sfgw_db::Db, mac: &str) -> Result<()> {
                     error = %e,
                     "adoption failed — device stays in Adopting state (retryable)"
                 );
+
+                // Mark ssh_provision_failed in DB so handler knows to send setdefault
+                mark_ssh_failed(&db_clone, &device.mac).await;
+
                 // Log to IDS as a warning
                 if let Err(ids_err) = sfgw_ids::log_event(
                     &db_clone,
@@ -503,6 +507,35 @@ pub async fn ignore_device(db: &sfgw_db::Db, mac: &str) -> Result<bool> {
 
     tracing::info!(mac = %mac, "device ignored");
     Ok(true)
+}
+
+/// Mark a device's `ssh_provision_failed` flag in the database.
+///
+/// Called after SSH provisioning fails so the handler knows to send
+/// a `setdefault` response on the next inform cycle.
+async fn mark_ssh_failed(db: &sfgw_db::Db, mac: &str) {
+    let config_json = {
+        let conn = db.lock().await;
+        match conn.query_row(
+            "SELECT config FROM devices WHERE mac = ?1",
+            rusqlite::params![mac],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(c) => c,
+            Err(_) => return,
+        }
+    };
+    if let Ok(mut dev) = serde_json::from_str::<state::UbntDevice>(&config_json) {
+        dev.ssh_provision_failed = true;
+        if let Ok(json) = serde_json::to_string(&dev) {
+            let conn = db.lock().await;
+            conn.execute(
+                "UPDATE devices SET config = ?1 WHERE mac = ?2",
+                rusqlite::params![json, mac],
+            )
+            .ok();
+        }
+    }
 }
 
 /// List Ubiquiti devices in a specific state.

@@ -9,6 +9,7 @@ license.workspace = true
 sfgw-db = { path = "../sfgw-db" }
 sfgw-dns = { path = "../sfgw-dns" }
 sfgw-ids = { path = "../sfgw-ids" }
+sfgw-net = { path = "../sfgw-net" }
 
 # Async
 tokio.workspace = true

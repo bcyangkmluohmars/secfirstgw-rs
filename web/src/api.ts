@@ -643,6 +643,37 @@ export const api = {
   removeInformDevice: (mac: string) => request<{ status: string; mac: string }>(`/api/v1/inform/devices/${encodeURIComponent(mac)}`, { method: 'DELETE' }),
   getInformDevicePorts: (mac: string) => request<{ ports: SwitchConfig | null }>(`/api/v1/inform/devices/${encodeURIComponent(mac)}/ports`),
   setInformDevicePorts: (mac: string, config: SwitchConfig) => request<{ status: string; mac: string }>(`/api/v1/inform/devices/${encodeURIComponent(mac)}/ports`, { method: 'PUT', body: config }),
+
+  // Wireless networks
+  getWirelessNetworks: () => request<{ networks: WirelessNetwork[] }>('/api/v1/wireless'),
+  getWirelessNetwork: (id: number) => request<{ network: WirelessNetwork }>(`/api/v1/wireless/${id}`),
+  createWirelessNetwork: (net: WirelessNetworkCreate) => request<{ status: string; id: number }>('/api/v1/wireless', { method: 'POST', body: net }),
+  updateWirelessNetwork: (id: number, net: WirelessNetworkCreate) => request<{ status: string }>(`/api/v1/wireless/${id}`, { method: 'PUT', body: net }),
+  deleteWirelessNetwork: (id: number) => request<{ status: string }>(`/api/v1/wireless/${id}`, { method: 'DELETE' }),
 };
+
+export interface WirelessNetwork {
+  id: number;
+  ssid: string;
+  security: 'open' | 'wpa2' | 'wpa3';
+  hidden: boolean;
+  band: 'both' | '2g' | '5g';
+  vlan_id: number | null;
+  is_guest: boolean;
+  l2_isolation: boolean;
+  enabled: boolean;
+}
+
+export interface WirelessNetworkCreate {
+  ssid: string;
+  security: 'open' | 'wpa2' | 'wpa3';
+  psk?: string;
+  hidden?: boolean;
+  band?: 'both' | '2g' | '5g';
+  vlan_id?: number | null;
+  is_guest?: boolean;
+  l2_isolation?: boolean;
+  enabled?: boolean;
+}
 
 export { BASE_URL };

@@ -12,6 +12,7 @@ import Vpn from './pages/Vpn'
 import Devices from './pages/Devices'
 import Inform from './pages/Inform'
 import Ids from './pages/Ids'
+import Wireless from './pages/Wireless'
 import Settings from './pages/Settings'
 import Logs from './pages/Logs'
 import Login from './pages/Login'
@@ -110,6 +111,7 @@ export default function App() {
               <Route path="/interfaces" element={<Interfaces />} />
               <Route path="/wan" element={<Wan />} />
               <Route path="/network" element={<Network />} />
+              <Route path="/wireless" element={<Wireless />} />
               <Route path="/firewall" element={<Firewall />} />
               <Route path="/vpn" element={<Vpn />} />
               <Route path="/devices" element={<Devices />} />

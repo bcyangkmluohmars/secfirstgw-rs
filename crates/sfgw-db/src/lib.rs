@@ -144,6 +144,10 @@ fn run_migrations(conn: &Connection) -> Result<(), DbError> {
             "005",
             include_str!("../migrations/005_vlan_trunk_model.sql"),
         ),
+        (
+            "006",
+            include_str!("../migrations/006_wireless_networks.sql"),
+        ),
     ];
 
     for (version_str, sql) in migrations {
@@ -201,7 +205,7 @@ mod tests {
             )
             .expect("schema_version should exist");
         // After all migrations, schema version should be "5"
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
     }
 
     #[tokio::test]
@@ -224,6 +228,7 @@ mod tests {
             "firmware_manifests",
             "wan_configs",
             "networks",
+            "wireless_networks",
         ];
 
         for table in &expected_tables {
@@ -258,7 +263,7 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("schema_version should exist after second init");
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
     }
 
     #[tokio::test]
@@ -279,7 +284,7 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("schema_version should exist");
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
     }
 
     #[tokio::test]

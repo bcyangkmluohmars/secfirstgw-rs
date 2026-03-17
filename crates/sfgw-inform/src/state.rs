@@ -96,6 +96,11 @@ pub struct UbntDevice {
     /// Reset to 0 on successful verification. After 3 failures, alert admin.
     #[serde(default)]
     pub config_delivery_attempts: u32,
+    /// SSH provisioning failed (e.g. device not in factory default state).
+    /// When true + device reports `default=false`, handler sends `setdefault` response
+    /// to force the device to reset its config before retrying SSH.
+    #[serde(default)]
+    pub ssh_provision_failed: bool,
     /// Hardware fingerprint from `/proc/ubnthal/system.info`. None until SSH-verified.
     pub fingerprint: Option<HardwareFingerprint>,
     /// Last seen timestamp (RFC 3339).

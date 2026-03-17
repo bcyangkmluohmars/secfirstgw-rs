@@ -361,8 +361,10 @@ function SwitchPortEditor({ device, onSaved }: { device: UbntDevice; onSaved: ()
 
   const stats = device.stats!
 
-  // Initialize config from device or generate defaults
+  // Initialize config from device or generate defaults.
+  // Skip reset while user has unsaved edits (dirty state).
   useEffect(() => {
+    if (dirty) return
     if (device.port_config) {
       setConfig(device.port_config)
     } else {
@@ -381,7 +383,7 @@ function SwitchPortEditor({ device, onSaved }: { device: UbntDevice; onSaved: ()
         }))
       })
     }
-  }, [device.port_config, stats.port_table])
+  }, [device.port_config, stats.port_table, dirty])
 
   const portConfig = (idx: number): SwitchPortConfig | undefined =>
     config?.ports.find(p => p.port_idx === idx)
@@ -508,7 +510,7 @@ function SwitchPortEditor({ device, onSaved }: { device: UbntDevice; onSaved: ()
 
       {/* Selected port detail / editor */}
       {selectedPort != null && sel && selStats && (
-        <div className="mt-3 bg-navy-950/50 border border-navy-800/50 rounded-lg p-4">
+        <div key={selectedPort} className="mt-3 bg-navy-950/50 border border-navy-800/50 rounded-lg p-4">
           <div className="flex items-center justify-between mb-3">
             <h5 className="text-sm text-gray-200 font-medium">
               Port {sel.port_idx}
@@ -586,6 +588,38 @@ function SwitchPortEditor({ device, onSaved }: { device: UbntDevice; onSaved: ()
                     </select>
                   </div>
                 )}
+
+                {/* Tagged VLANs (trunk) */}
+                <div>
+                  <label className="text-[10px] text-navy-400 uppercase block mb-1">Tagged VLANs</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      { vid: 10, label: 'LAN' },
+                      { vid: 3000, label: 'MGMT' },
+                      { vid: 3001, label: 'DMZ' },
+                      { vid: 3002, label: 'Guest' },
+                    ].map(({ vid, label }) => {
+                      const active = sel.tagged_vlans.includes(vid)
+                      return (
+                        <button
+                          key={vid}
+                          onClick={() => updatePort(sel.port_idx, {
+                            tagged_vlans: active
+                              ? sel.tagged_vlans.filter(v => v !== vid)
+                              : [...sel.tagged_vlans, vid],
+                          })}
+                          className={`px-2 py-1 rounded text-[10px] font-mono border transition-all ${
+                            active
+                              ? 'bg-cyan-500/15 border-cyan-500/30 text-cyan-400'
+                              : 'bg-navy-800 border-navy-700 text-navy-400 hover:border-navy-500'
+                          }`}
+                        >
+                          {label} ({vid})
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
 
                 {/* Port enabled */}
                 <div className="flex items-center gap-3">

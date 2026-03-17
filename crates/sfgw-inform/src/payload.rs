@@ -357,6 +357,27 @@ impl InformResponse {
         }
     }
 
+    /// Create a "cmd" response with "set-default" — tells the device to factory reset.
+    ///
+    /// Uses `_type: "cmd"` with `cmd: "set-default"` which is the correct mcad
+    /// protocol command (NOT `_type: "setdefault"` which is ignored by mcad).
+    ///
+    /// Used when a device reports `default=false` but SSH with factory credentials
+    /// fails (previous controller left custom credentials). The device will clear
+    /// its persistent config (including SSH creds) and re-inform with `default=true`.
+    pub fn set_default() -> Self {
+        let mut extra = serde_json::Map::new();
+        extra.insert("cmd".into(), serde_json::Value::String("set-default".into()));
+        Self {
+            response_type: "cmd".into(),
+            interval: Some(30),
+            server_time_in_utc: Some(now_millis()),
+            mgmt_cfg: None,
+            system_cfg: None,
+            extra,
+        }
+    }
+
     /// Create a "setparam" response with full system configuration.
     pub fn setparam_with_system_cfg(mgmt_cfg: String, system_cfg: String, interval: u64) -> Self {
         Self {

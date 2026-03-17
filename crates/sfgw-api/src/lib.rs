@@ -195,6 +195,15 @@ pub async fn serve(
         // Zones (read-only VLAN zone view)
         .route("/api/v1/zones", get(zones_list_handler))
         .route("/api/v1/zones/{zone}", get(zone_get_handler))
+        // Wireless
+        .route(
+            "/api/v1/wireless",
+            get(wireless_list).post(wireless_create),
+        )
+        .route(
+            "/api/v1/wireless/{id}",
+            get(wireless_get).put(wireless_update).delete(wireless_delete),
+        )
         // IDS
         .route("/api/v1/ids/events", get(ids_list_events))
         .route("/api/v1/ids/events/stats", get(ids_event_stats))
@@ -2661,6 +2670,77 @@ async fn users_change_password(
 /// possible, but we still reject clearly malformed names before touching the DB.
 fn is_valid_port_name(name: &str) -> bool {
     !name.is_empty() && !name.contains('.') && !name.contains('/') && !name.contains('\\')
+}
+
+// ---------------------------------------------------------------------------
+// Wireless networks
+// ---------------------------------------------------------------------------
+
+async fn wireless_list(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_net::wireless::list(&db).await {
+        Ok(networks) => (StatusCode::OK, Json(json!({ "networks": networks }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn wireless_get(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match sfgw_net::wireless::get(&db, id).await {
+        Ok(Some(net)) => (StatusCode::OK, Json(json!({ "network": net }))),
+        Ok(None) => err_response(
+            StatusCode::NOT_FOUND,
+            anyhow::anyhow!("wireless network not found"),
+        ),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn wireless_create(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(net): Json<sfgw_net::wireless::WirelessNetwork>,
+) -> impl IntoResponse {
+    match sfgw_net::wireless::create(&db, &net).await {
+        Ok(id) => (StatusCode::CREATED, Json(json!({ "status": "created", "id": id }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn wireless_update(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+    Json(net): Json<sfgw_net::wireless::WirelessNetwork>,
+) -> impl IntoResponse {
+    match sfgw_net::wireless::update(&db, id, &net).await {
+        Ok(true) => (StatusCode::OK, Json(json!({ "status": "updated" }))),
+        Ok(false) => err_response(
+            StatusCode::NOT_FOUND,
+            anyhow::anyhow!("wireless network not found"),
+        ),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn wireless_delete(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match sfgw_net::wireless::delete(&db, id).await {
+        Ok(true) => (StatusCode::OK, Json(json!({ "status": "removed" }))),
+        Ok(false) => err_response(
+            StatusCode::NOT_FOUND,
+            anyhow::anyhow!("wireless network not found"),
+        ),
+        Err(e) => internal_err(e),
+    }
 }
 
 /// GET /api/v1/ports/{name}

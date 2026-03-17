@@ -3,6 +3,7 @@
 
 pub mod switch;
 pub mod wan;
+pub mod wireless;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};

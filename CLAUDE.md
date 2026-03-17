@@ -147,11 +147,10 @@ scripts/dev-deploy.sh <IP>
 
 ### Database Changes (Schema / Seed / Migration)
 **If you changed anything in `sfgw-db/migrations/` or seed data:**
-1. Delete the DB on the device: `ssh root@10.0.0.1 rm /data/sfgw/sfgw.db`
-   Then `scripts/dev-deploy.sh 10.0.0.1` — it recreates and seeds automatically
-2. **DO NOT** manually inspect the DB trying to figure out why old data looks wrong
+1. **DO NOT** Delete the DB on the device without ASKING: `ssh root@10.0.0.1 rm /data/sfgw/sfgw.db`
+   the dev deployment script `scripts/dev-deploy.sh 10.0.0.1` recreates and seeds automatically if seeds scripts are defined propperly so keep them clean!
+2. **DO NOT** manually change data inside the DB - inspection is OK
 3. **DO NOT** try manual SSH deploys
-4. **JUST:** delete DB → `scripts/dev-deploy.sh <IP>` → done.
 
 ### After Context Compaction
 If you lost context and don't know the project state:
@@ -171,3 +170,4 @@ Before every PR, ask:
 - [ ] Is this reachable from zones that shouldn't access it?
 - [ ] Does the error message leak implementation details?
 - [ ] Would `replace("../", "")` be a valid description of my input sanitization? (If yes, start over.)
+- [ ] For sfgw-inform crate: Is pre-adoption validation and post-adoption validation via ssh active? DO NOT REMOVE THEM

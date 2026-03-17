@@ -1,0 +1,14 @@
+/run/media/kevin/KioxiaNVMe/sec/secfirstgw-rs/tools/ssh-diag/target/release/deps/thiserror-87607a6922ac84dd.d: /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /run/media/kevin/KioxiaNVMe/sec/secfirstgw-rs/tools/ssh-diag/target/release/build/thiserror-693d6698d04547a2/out/private.rs
+
+/run/media/kevin/KioxiaNVMe/sec/secfirstgw-rs/tools/ssh-diag/target/release/deps/libthiserror-87607a6922ac84dd.rlib: /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /run/media/kevin/KioxiaNVMe/sec/secfirstgw-rs/tools/ssh-diag/target/release/build/thiserror-693d6698d04547a2/out/private.rs
+
+/run/media/kevin/KioxiaNVMe/sec/secfirstgw-rs/tools/ssh-diag/target/release/deps/libthiserror-87607a6922ac84dd.rmeta: /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /run/media/kevin/KioxiaNVMe/sec/secfirstgw-rs/tools/ssh-diag/target/release/build/thiserror-693d6698d04547a2/out/private.rs
+
+/home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs:
+/home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs:
+/home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs:
+/home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs:
+/home/kevin/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs:
+/run/media/kevin/KioxiaNVMe/sec/secfirstgw-rs/tools/ssh-diag/target/release/build/thiserror-693d6698d04547a2/out/private.rs:
+
+# env-dep:OUT_DIR=/run/media/kevin/KioxiaNVMe/sec/secfirstgw-rs/tools/ssh-diag/target/release/build/thiserror-693d6698d04547a2/out

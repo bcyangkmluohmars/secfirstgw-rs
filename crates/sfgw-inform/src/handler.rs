@@ -163,6 +163,11 @@ pub async fn handle_inform(
     // Process the inform and generate response
     let response = match process_inform(&state, &source_ip, &mac_str, &pkt, &inform).await {
         Ok(resp) => resp,
+        Err(e) if e.to_string() == "__pending_401__" => {
+            // Pending device: return 401 so mcad stays in factory-default state
+            debug!(mac = %mac_str, "pending device — returning 401 to preserve factory default");
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
         Err(e) => {
             warn!(
                 source_ip = %source_ip,
@@ -349,7 +354,24 @@ async fn process_inform(
                             .await
                             .unwrap_or_else(|_| "10.0.0.1".into());
 
-                        let sys_cfg_str = system_cfg::generate_system_cfg(&system_cfg::SystemCfg {
+                        let device_type = system_cfg::DeviceType::from_model(&dev.model);
+                        let wireless_networks = if device_type == system_cfg::DeviceType::Ap {
+                            let nets = system_cfg::load_wireless_networks(&state.db).await;
+                            debug!(
+                                mac = %mac,
+                                wlan_count = nets.len(),
+                                wlans = ?nets.iter().map(|n| format!(
+                                    "{}(sec={},psk={},vlan={:?})",
+                                    n.ssid, n.security, n.psk.is_some(), n.vlan_id
+                                )).collect::<Vec<_>>(),
+                                "loaded wireless networks for AP system_cfg"
+                            );
+                            nets
+                        } else {
+                            Vec::new()
+                        };
+
+                        let sys_cfg_str = match system_cfg::generate_system_cfg(&system_cfg::SystemCfg {
                             mgmt_ip: mgmt_ip.clone(),
                             authkey: authkey.clone(),
                             cfgversion: String::new(),
@@ -358,7 +380,15 @@ async fn process_inform(
                                 .clone()
                                 .unwrap_or_else(|| format!("sfgw_{}", &mac.replace(':', "")[6..])),
                             ssh_password_hash: dev.ssh_password_hash.clone().unwrap_or_default(),
-                        });
+                            device_type,
+                            wireless_networks,
+                        }) {
+                            Some(s) => s,
+                            None => {
+                                warn!(mac = %mac, model = %dev.model, "unknown device type — no system_cfg template, skipping config delivery");
+                                return Ok(InformResponse::noop(30));
+                            }
+                        };
 
                         let expected_cfgversion = system_cfg::generate_cfgversion(&sys_cfg_str);
 
@@ -466,6 +496,8 @@ async fn process_inform(
                                 cfgversion: expected_cfgversion.clone(),
                                 ssh_username: String::new(),
                                 ssh_password_hash: String::new(),
+                                device_type: system_cfg::DeviceType::from_model(&dev.model),
+                                wireless_networks: Vec::new(),
                             },
                             false,
                         );
@@ -504,6 +536,8 @@ async fn process_inform(
                                 cfgversion: "0000000000000000".into(),
                                 ssh_username: String::new(),
                                 ssh_password_hash: String::new(),
+                                device_type: system_cfg::DeviceType::from_model(&dev.model),
+                                wireless_networks: Vec::new(),
                             },
                             true, // include authkey
                         );
@@ -516,10 +550,9 @@ async fn process_inform(
                 }
             }
             UbntDeviceState::Adopting => {
-                // SSH provisioning is running. If authkey is already set (provisioning
-                // completed between this inform and state update), deliver it.
-                // Otherwise tell device to check back soon.
+                // SSH provisioning is running or has completed.
                 if let Some(ref authkey) = dev.authkey {
+                    // Authkey is set — provisioning succeeded, deliver it.
                     let mgmt_ip = resolve_mgmt_ip(&state.db)
                         .await
                         .unwrap_or_else(|_| "10.0.0.1".into());
@@ -531,11 +564,98 @@ async fn process_inform(
                             cfgversion: "0000000000000000".into(),
                             ssh_username: String::new(),
                             ssh_password_hash: String::new(),
+                            device_type: system_cfg::DeviceType::from_model(&dev.model),
+                            wireless_networks: Vec::new(),
                         },
                         true,
                     );
                     info!(mac = %mac, "delivering authkey during adoption");
                     Ok(InformResponse::setparam(mgmt_cfg, 10))
+                } else if dev.ssh_provision_failed {
+                    // SSH provisioning failed. Handle based on device default state.
+                    if !inform.default {
+                        // Device still has old controller credentials.
+                        // Send "setdefault" to make it factory-reset via protocol.
+                        // Limit to 3 attempts to avoid infinite loop.
+                        let attempts = dev.config_delivery_attempts;
+                        if attempts >= 3 {
+                            warn!(mac = %mac, attempts, "setdefault exhausted — moving to Pending for manual retry");
+                            dev.state = UbntDeviceState::Pending;
+                            dev.ssh_provision_failed = false;
+                            dev.config_delivery_attempts = 0;
+                            drop(devices);
+                            persist_device(state, mac).await.ok();
+                            return Ok(InformResponse::noop(30));
+                        }
+                        dev.config_delivery_attempts += 1;
+                        info!(
+                            mac = %mac,
+                            attempt = attempts + 1,
+                            "SSH provisioning failed + device not factory-default — sending setdefault"
+                        );
+                        Ok(InformResponse::set_default())
+                    } else {
+                        // Device IS in factory-default — retry SSH provisioning.
+                        // Add delay: device just rebooted from setdefault, SSH may not be ready.
+                        info!(mac = %mac, "device now reports default=true — retrying SSH provisioning (with delay)");
+                        dev.ssh_provision_failed = false;
+                        dev.config_delivery_attempts = 0;
+                        let dev_clone = dev.clone();
+                        let db_clone = state.db.clone();
+                        let state_clone = state.clone();
+                        let mac_owned = mac.to_string();
+                        drop(devices);
+                        persist_device(state, mac).await.ok();
+                        tokio::spawn(async move {
+                            // Wait for device to finish booting after setdefault reset
+                            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                            match crate::provision::provision_device(&db_clone, &dev_clone).await {
+                                Ok(result) => {
+                                    tracing::info!(
+                                        mac = %dev_clone.mac,
+                                        serial = %result.fingerprint.serialno,
+                                        "adoption complete after setdefault — device verified"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        mac = %dev_clone.mac,
+                                        error = %e,
+                                        "SSH provisioning failed after setdefault — reverting to Pending"
+                                    );
+                                    // Revert to Pending so admin can retry manually
+                                    let config_json = {
+                                        let conn = db_clone.lock().await;
+                                        conn.query_row(
+                                            "SELECT config FROM devices WHERE mac = ?1",
+                                            rusqlite::params![dev_clone.mac],
+                                            |r| r.get::<_, String>(0),
+                                        ).ok()
+                                    };
+                                    if let Some(json_str) = config_json {
+                                        if let Ok(mut d) = serde_json::from_str::<UbntDevice>(&json_str) {
+                                            d.state = UbntDeviceState::Pending;
+                                            d.ssh_provision_failed = false;
+                                            if let Ok(json) = serde_json::to_string(&d) {
+                                                let conn = db_clone.lock().await;
+                                                conn.execute(
+                                                    "UPDATE devices SET config = ?1 WHERE mac = ?2",
+                                                    rusqlite::params![json, dev_clone.mac],
+                                                ).ok();
+                                            }
+                                        }
+                                    }
+                                    // Also update in-memory
+                                    let mut devs = state_clone.devices.lock().await;
+                                    if let Some(d) = devs.get_mut(&mac_owned) {
+                                        d.state = UbntDeviceState::Pending;
+                                        d.ssh_provision_failed = false;
+                                    }
+                                }
+                            }
+                        });
+                        Ok(InformResponse::noop(30))
+                    }
                 } else {
                     debug!(mac = %mac, "adoption in progress — waiting for SSH provisioning");
                     Ok(InformResponse::noop(10))
@@ -547,8 +667,11 @@ async fn process_inform(
                 Ok(InformResponse::noop(60))
             }
             UbntDeviceState::Pending => {
-                // Still pending — keep heartbeat
-                Ok(InformResponse::noop(30))
+                // Signal caller to return 401 — device stays in factory-default
+                // state (white LED). mcad only transitions to "managed" on HTTP 200.
+                // This keeps SSH factory creds (ubnt/ubnt) intact until admin
+                // clicks Adopt.
+                return Err(anyhow::anyhow!("__pending_401__"));
             }
             UbntDeviceState::Phantom => {
                 // Re-validate — if the device now passes (e.g. model code was added),
@@ -646,6 +769,7 @@ async fn process_inform(
                 ssh_password_hash: None,
                 config_applied: false,
                 config_delivery_attempts: 0,
+                ssh_provision_failed: false,
                 fingerprint: None,
                 last_seen: now.clone(),
                 first_seen: now,
@@ -682,6 +806,7 @@ async fn process_inform(
             ssh_password_hash: None,
             config_applied: false,
             config_delivery_attempts: 0,
+            ssh_provision_failed: false,
             fingerprint: None,
             last_seen: now.clone(),
             first_seen: now,
@@ -881,3 +1006,4 @@ fn build_response_packet(
 
     Ok(packet::serialize(&final_pkt))
 }
+
