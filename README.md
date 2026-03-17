@@ -18,6 +18,7 @@ A single Rust binary replacing bloated gateway stacks:
 
 - **Firewall & Router** — iptables-legacy (UDM Pro / kernel 4.19) + nftables (modern kernels), dual-stack IPv4/IPv6
 - **Network Controller** — device adoption, provisioning, monitoring
+- **UniFi Inform** — TNBU protocol, AES-128-CBC/GCM, SSH fingerprint verification, system_cfg hardening
 - **Multi-Core VPN** — WireGuard (boringtun) across all cores
 - **DNS & DHCP** — dnsmasq config generation
 - **Encrypted Storage** — LUKS2 FDE with hardware-bound key derivation
@@ -197,20 +198,20 @@ Every design decision prioritizes security:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                   sfgw-cli                       │  ← Single binary entry point
-├──────────┬──────────┬──────────┬────────────────┤
-│ sfgw-fw  │ sfgw-net │ sfgw-vpn │   sfgw-api     │  ← Core services
-├──────────┼──────────┼──────────┼────────────────┤
-│ sfgw-dns │sfgw-adopt│ sfgw-nas │ sfgw-display   │  ← Peripheral services
-├──────────┼──────────┼──────────┼────────────────┤
-│ sfgw-ids │sfgw-personality     │ sfgw-controller │  ← Detection & orchestration
-├──────────┴─────────────────────┴────────────────┤
-│ sfgw-crypto  │   sfgw-db   │   sfgw-log         │  ← Foundation
-├──────────────┴─────────────┴────────────────────┤
-│                  sfgw-hal                        │  ← Hardware abstraction
-│    bare_metal    │     vm     │     docker       │     (compile-time or runtime)
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                      sfgw-cli                         │  ← Single binary entry point
+├──────────┬──────────┬──────────┬─────────────────────┤
+│ sfgw-fw  │ sfgw-net │ sfgw-vpn │      sfgw-api       │  ← Core services
+├──────────┼──────────┼──────────┼─────────────────────┤
+│ sfgw-dns │sfgw-adopt│ sfgw-nas │    sfgw-display     │  ← Peripheral services
+├──────────┼──────────┴──────────┼─────────────────────┤
+│sfgw-inform│  sfgw-personality  │   sfgw-controller   │  ← Protocol & orchestration
+├──────────┼─────────────────────┼─────────────────────┤
+│ sfgw-ids │     sfgw-crypto     │      sfgw-log       │  ← Detection & foundation
+├──────────┴─────────────────────┴─────────────────────┤
+│                sfgw-db  │  sfgw-hal                   │  ← Storage & hardware
+│   bare_metal   │    vm    │    docker                 │     (compile-time or runtime)
+└──────────────────────────────────────────────────────┘
 ```
 
 ## License

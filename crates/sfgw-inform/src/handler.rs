@@ -98,12 +98,14 @@ pub async fn handle_inform(
     // while in-memory may still be Pending from the last inform cycle.
     {
         let mut devices = state.devices.lock().await;
-        if let Some(dev) = devices.get(&mac_str) {
-            if matches!(dev.state, UbntDeviceState::Adopting | UbntDeviceState::Pending) {
-                if let Ok(fresh) = reload_device_from_db(&state.db, &mac_str).await {
-                    devices.insert(mac_str.clone(), fresh);
-                }
-            }
+        if let Some(dev) = devices.get(&mac_str)
+            && matches!(
+                dev.state,
+                UbntDeviceState::Adopting | UbntDeviceState::Pending
+            )
+            && let Ok(fresh) = reload_device_from_db(&state.db, &mac_str).await
+        {
+            devices.insert(mac_str.clone(), fresh);
         }
     }
 
@@ -113,7 +115,9 @@ pub async fn handle_inform(
         Err(e) => {
             // Dump enough info to reproduce the failure in a test
             let header_hex: String = body[..body.len().min(40)]
-                .iter().map(|b| format!("{b:02x}")).collect();
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
             warn!(
                 source_ip = %source_ip,
                 mac = %mac_str,
@@ -239,7 +243,7 @@ async fn decrypt_inform(
 
     // Try primary key first
     match try_decrypt(&primary_key) {
-        Ok(data) => return Ok((data, primary_key)),
+        Ok(data) => Ok((data, primary_key)),
         Err(e) => {
             // Try the other key as fallback
             let fallback_key = if has_authkey {
@@ -273,12 +277,11 @@ async fn resolve_authkey_from_db(state: &Arc<InformState>, mac: &str) -> Option<
 /// Get the encryption key + whether an authkey was found in memory.
 async fn resolve_key_with_info(state: &Arc<InformState>, mac: &str) -> ([u8; 16], bool) {
     let devices = state.devices.lock().await;
-    if let Some(dev) = devices.get(mac) {
-        if let Some(ref authkey) = dev.authkey {
-            if let Ok(key) = crypto::parse_authkey(authkey) {
-                return (key, true);
-            }
-        }
+    if let Some(dev) = devices.get(mac)
+        && let Some(ref authkey) = dev.authkey
+        && let Ok(key) = crypto::parse_authkey(authkey)
+    {
+        return (key, true);
     }
     (crypto::default_key(), false)
 }
@@ -299,12 +302,14 @@ async fn process_inform(
     let mut devices = state.devices.lock().await;
 
     // Refresh device from DB if state may have changed (provisioning writes directly to DB)
-    if let Some(dev) = devices.get(mac) {
-        if matches!(dev.state, UbntDeviceState::Adopting | UbntDeviceState::Pending) {
-            if let Ok(fresh) = reload_device_from_db(&state.db, mac).await {
-                devices.insert(mac.to_string(), fresh);
-            }
-        }
+    if let Some(dev) = devices.get(mac)
+        && matches!(
+            dev.state,
+            UbntDeviceState::Adopting | UbntDeviceState::Pending
+        )
+        && let Ok(fresh) = reload_device_from_db(&state.db, mac).await
+    {
+        devices.insert(mac.to_string(), fresh);
     }
 
     if let Some(dev) = devices.get_mut(mac) {
@@ -340,20 +345,20 @@ async fn process_inform(
                     // Device is using GCM with authkey — fully adopted
                     if let Some(ref authkey) = dev.authkey {
                         // Generate current system_cfg to compute expected cfgversion
-                        let mgmt_ip = resolve_mgmt_ip(&state.db).await
+                        let mgmt_ip = resolve_mgmt_ip(&state.db)
+                            .await
                             .unwrap_or_else(|_| "10.0.0.1".into());
 
-                        let sys_cfg_str = system_cfg::generate_system_cfg(
-                            &system_cfg::SystemCfg {
-                                mgmt_ip: mgmt_ip.clone(),
-                                authkey: authkey.clone(),
-                                cfgversion: String::new(),
-                                ssh_username: dev.ssh_username.clone()
-                                    .unwrap_or_else(|| format!("sfgw_{}", &mac.replace(':', "")[6..])),
-                                ssh_password_hash: dev.ssh_password_hash.clone()
-                                    .unwrap_or_default(),
-                            },
-                        );
+                        let sys_cfg_str = system_cfg::generate_system_cfg(&system_cfg::SystemCfg {
+                            mgmt_ip: mgmt_ip.clone(),
+                            authkey: authkey.clone(),
+                            cfgversion: String::new(),
+                            ssh_username: dev
+                                .ssh_username
+                                .clone()
+                                .unwrap_or_else(|| format!("sfgw_{}", &mac.replace(':', "")[6..])),
+                            ssh_password_hash: dev.ssh_password_hash.clone().unwrap_or_default(),
+                        });
 
                         let expected_cfgversion = system_cfg::generate_cfgversion(&sys_cfg_str);
 
@@ -371,7 +376,8 @@ async fn process_inform(
                                     // Small delay — let the device finish applying config
                                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-                                    match crate::provision::verify_config_applied(&dev_clone).await {
+                                    match crate::provision::verify_config_applied(&dev_clone).await
+                                    {
                                         Ok(result) if result.is_ok() => {
                                             // Verification passed — mark config as applied
                                             let mut devices = state_clone.devices.lock().await;
@@ -386,13 +392,14 @@ async fn process_inform(
                                         Ok(result) => {
                                             // Verification failed — increment counter, maybe alert
                                             let mut devices = state_clone.devices.lock().await;
-                                            let attempts = if let Some(d) = devices.get_mut(&mac_owned) {
-                                                d.config_applied = false;
-                                                d.config_delivery_attempts += 1;
-                                                d.config_delivery_attempts
-                                            } else {
-                                                0
-                                            };
+                                            let attempts =
+                                                if let Some(d) = devices.get_mut(&mac_owned) {
+                                                    d.config_applied = false;
+                                                    d.config_delivery_attempts += 1;
+                                                    d.config_delivery_attempts
+                                                } else {
+                                                    0
+                                                };
                                             drop(devices);
                                             persist_device(&state_clone, &mac_owned).await.ok();
 
@@ -467,7 +474,9 @@ async fn process_inform(
                         dev.config_applied = false;
                         dev.config_delivery_attempts += 1;
                         Ok(InformResponse::setparam_with_system_cfg(
-                            mgmt_cfg_str, sys_cfg_str, 10,
+                            mgmt_cfg_str,
+                            sys_cfg_str,
+                            10,
                         ))
                     } else {
                         debug!(mac = %mac, "adopted device heartbeat (no authkey?)");
@@ -480,7 +489,8 @@ async fn process_inform(
                     // - We deliver the authkey in mgmt_cfg so mcad switches to GCM
                     // - Also handles recovery if device lost its authkey (reboot, factory reset)
                     if let Some(ref authkey) = dev.authkey {
-                        let mgmt_ip = resolve_mgmt_ip(&state.db).await
+                        let mgmt_ip = resolve_mgmt_ip(&state.db)
+                            .await
                             .unwrap_or_else(|_| "10.0.0.1".into());
 
                         // Use a zero cfgversion in the initial mgmt_cfg delivery.
@@ -510,7 +520,8 @@ async fn process_inform(
                 // completed between this inform and state update), deliver it.
                 // Otherwise tell device to check back soon.
                 if let Some(ref authkey) = dev.authkey {
-                    let mgmt_ip = resolve_mgmt_ip(&state.db).await
+                    let mgmt_ip = resolve_mgmt_ip(&state.db)
+                        .await
                         .unwrap_or_else(|_| "10.0.0.1".into());
 
                     let mgmt_cfg = system_cfg::generate_mgmt_cfg(
@@ -563,19 +574,20 @@ async fn process_inform(
         // Device not in memory — but it might be in the DB (e.g. after service restart,
         // or if GCM decrypt failed on a previous cycle for an adopted device).
         // Check DB BEFORE creating a new Pending record to avoid overwriting adopted config.
-        if let Ok(db_dev) = reload_device_from_db(&state.db, mac).await {
-            if db_dev.state == UbntDeviceState::Adopted || db_dev.state == UbntDeviceState::Adopting {
-                info!(
-                    mac = %mac,
-                    state = %db_dev.state,
-                    "found existing {} device in DB — restoring to memory (not overwriting with Pending)",
-                    db_dev.state
-                );
-                devices.insert(mac.to_string(), db_dev);
-                drop(devices);
-                // Return noop — device will re-inform and hit the correct branch
-                return Ok(InformResponse::noop(10));
-            }
+        if let Ok(db_dev) = reload_device_from_db(&state.db, mac).await
+            && (db_dev.state == UbntDeviceState::Adopted
+                || db_dev.state == UbntDeviceState::Adopting)
+        {
+            info!(
+                mac = %mac,
+                state = %db_dev.state,
+                "found existing {} device in DB — restoring to memory (not overwriting with Pending)",
+                db_dev.state
+            );
+            devices.insert(mac.to_string(), db_dev);
+            drop(devices);
+            // Return noop — device will re-inform and hit the correct branch
+            return Ok(InformResponse::noop(10));
         }
 
         // New device — passive validation
@@ -788,18 +800,23 @@ async fn persist_device(state: &Arc<InformState>, mac: &str) -> Result<()> {
 /// Reload a single device from the database (used to pick up provisioning updates).
 async fn reload_device_from_db(db: &sfgw_db::Db, mac: &str) -> Result<UbntDevice> {
     let conn = db.lock().await;
-    let config_json: String = conn.query_row(
-        "SELECT config FROM devices WHERE mac = ?1",
-        rusqlite::params![mac],
-        |r| r.get(0),
-    ).context("device not in DB")?;
+    let config_json: String = conn
+        .query_row(
+            "SELECT config FROM devices WHERE mac = ?1",
+            rusqlite::params![mac],
+            |r| r.get(0),
+        )
+        .context("device not in DB")?;
 
     serde_json::from_str(&config_json).context("failed to parse device config from DB")
 }
 
 /// Format first N bytes as hex for debug logging.
 fn hex_prefix(data: &[u8]) -> String {
-    data.iter().take(16).map(|b| format!("{b:02x}")).collect::<String>()
+    data.iter()
+        .take(16)
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
 }
 
 /// Get the MGMT gateway IP from the database.
@@ -827,7 +844,11 @@ fn build_response_packet(
 
     // Response uses same encryption mode as request
     let use_gcm = request.flags.is_gcm();
-    let flags = if use_gcm { PacketFlags::GCM_ONLY } else { PacketFlags::CBC };
+    let flags = if use_gcm {
+        PacketFlags::GCM_ONLY
+    } else {
+        PacketFlags::CBC
+    };
 
     let encrypted = if use_gcm {
         // GCM encrypted length = plaintext + 16-byte auth tag

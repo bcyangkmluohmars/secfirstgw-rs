@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use russh::client;
 use russh::ChannelMsg;
+use russh::client;
 
 use crate::crypto;
 use crate::state::{HardwareFingerprint, UbntDevice, UbntDeviceState};
@@ -63,10 +63,7 @@ pub struct ProvisionResult {
 /// 5. Store everything in database, state → Adopted
 /// 6. Next inform from device (CBC, default key) → handler delivers authkey in mgmt_cfg
 /// 7. Device switches to GCM with our authkey → handler delivers system_cfg
-pub async fn provision_device(
-    db: &sfgw_db::Db,
-    device: &UbntDevice,
-) -> Result<ProvisionResult> {
+pub async fn provision_device(db: &sfgw_db::Db, device: &UbntDevice) -> Result<ProvisionResult> {
     let addr: SocketAddr = format!("{}:22", device.source_ip)
         .parse()
         .with_context(|| format!("invalid device IP for SSH: {}", device.source_ip))?;
@@ -79,11 +76,13 @@ pub async fn provision_device(
     );
 
     // Step 1: Connect via SSH with factory creds
-    let mut session = ssh_connect(addr).await
+    let mut session = ssh_connect(addr)
+        .await
         .with_context(|| format!("SSH connection failed to {}", device.source_ip))?;
 
     // Step 2: Read hardware fingerprint
-    let fp_output = ssh_exec(&mut session, "cat /proc/ubnthal/system.info").await
+    let fp_output = ssh_exec(&mut session, "cat /proc/ubnthal/system.info")
+        .await
         .context("failed to read system.info")?;
     let fingerprint = parse_system_info(&fp_output)?;
 
@@ -98,8 +97,7 @@ pub async fn provision_device(
     );
 
     // Step 4: Generate per-device credentials
-    let authkey = crypto::generate_authkey()
-        .context("failed to generate authkey")?;
+    let authkey = crypto::generate_authkey().context("failed to generate authkey")?;
 
     let ssh_username = generate_ssh_username(&device.mac);
     let ssh_password = generate_ssh_password()?;
@@ -107,7 +105,9 @@ pub async fn provision_device(
 
     // Step 5: Disconnect SSH — authkey delivery happens via inform response, not SSH
     // Disconnect SSH
-    let _ = session.disconnect(russh::Disconnect::ByApplication, "", "en").await;
+    let _ = session
+        .disconnect(russh::Disconnect::ByApplication, "", "en")
+        .await;
 
     // Step 6: Store in database — next inform will pick up the authkey via handler
     let result = ProvisionResult {
@@ -135,13 +135,10 @@ async fn ssh_connect(addr: SocketAddr) -> Result<client::Handle<SshHandler>> {
     });
 
     let handler = SshHandler;
-    let mut session = tokio::time::timeout(
-        SSH_TIMEOUT,
-        client::connect(config, addr, handler),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("SSH connection timed out to {addr}"))?
-    .with_context(|| format!("SSH connection failed to {addr}"))?;
+    let mut session = tokio::time::timeout(SSH_TIMEOUT, client::connect(config, addr, handler))
+        .await
+        .map_err(|_| anyhow::anyhow!("SSH connection timed out to {addr}"))?
+        .with_context(|| format!("SSH connection failed to {addr}"))?;
 
     // Authenticate with factory credentials.
     // Try password auth first, then keyboard-interactive as fallback
@@ -170,7 +167,9 @@ async fn ssh_connect(addr: SocketAddr) -> Result<client::Handle<SshHandler>> {
     };
 
     if !auth_ok {
-        bail!("SSH authentication rejected (factory creds ubnt/ubnt not accepted — device may already be provisioned)");
+        bail!(
+            "SSH authentication rejected (factory creds ubnt/ubnt not accepted — device may already be provisioned)"
+        );
     }
 
     Ok(session)
@@ -224,8 +223,7 @@ async fn ssh_exec(session: &mut client::Handle<SshHandler>, cmd: &str) -> Result
         }
     }
 
-    String::from_utf8(output)
-        .with_context(|| format!("non-UTF8 output from: {cmd}"))
+    String::from_utf8(output).with_context(|| format!("non-UTF8 output from: {cmd}"))
 }
 
 /// Parse `/proc/ubnthal/system.info` key=value format.
@@ -310,8 +308,8 @@ fn generate_ssh_username(mac: &str) -> String {
 fn hash_password_crypt(password: &str) -> Result<String> {
     let params = sha_crypt::Sha512Params::new(10_000)
         .map_err(|e| anyhow::anyhow!("invalid sha-crypt params: {e:?}"))?;
-    Ok(sha_crypt::sha512_simple(password, &params)
-        .map_err(|e| anyhow::anyhow!("sha-crypt hash failed: {e:?}"))?)
+    sha_crypt::sha512_simple(password, &params)
+        .map_err(|e| anyhow::anyhow!("sha-crypt hash failed: {e:?}"))
 }
 
 /// Generate a random 24-char alphanumeric SSH password.
@@ -337,14 +335,16 @@ async fn update_device_adopted(
     let conn = db.lock().await;
 
     // Read current device config
-    let config_json: String = conn.query_row(
-        "SELECT config FROM devices WHERE mac = ?1",
-        rusqlite::params![mac],
-        |r| r.get(0),
-    ).context("device not found in DB during adoption")?;
+    let config_json: String = conn
+        .query_row(
+            "SELECT config FROM devices WHERE mac = ?1",
+            rusqlite::params![mac],
+            |r| r.get(0),
+        )
+        .context("device not found in DB during adoption")?;
 
-    let mut device: UbntDevice = serde_json::from_str(&config_json)
-        .context("failed to parse device config")?;
+    let mut device: UbntDevice =
+        serde_json::from_str(&config_json).context("failed to parse device config")?;
 
     device.state = UbntDeviceState::Adopted;
     device.authkey = Some(result.authkey.clone());
@@ -354,8 +354,8 @@ async fn update_device_adopted(
     device.config_applied = false;
     device.fingerprint = Some(result.fingerprint.clone());
 
-    let updated_json = serde_json::to_string(&device)
-        .context("failed to serialize updated device")?;
+    let updated_json =
+        serde_json::to_string(&device).context("failed to serialize updated device")?;
 
     conn.execute(
         "UPDATE devices SET config = ?1 WHERE mac = ?2",
@@ -419,13 +419,10 @@ async fn ssh_connect_with_creds(
     });
 
     let handler = SshHandler;
-    let mut session = tokio::time::timeout(
-        SSH_TIMEOUT,
-        client::connect(config, addr, handler),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("SSH connection timed out to {addr}"))?
-    .with_context(|| format!("SSH connection failed to {addr}"))?;
+    let mut session = tokio::time::timeout(SSH_TIMEOUT, client::connect(config, addr, handler))
+        .await
+        .map_err(|_| anyhow::anyhow!("SSH connection timed out to {addr}"))?
+        .with_context(|| format!("SSH connection failed to {addr}"))?;
 
     let auth_ok = match tokio::time::timeout(
         CHANNEL_TIMEOUT,
@@ -484,11 +481,17 @@ impl VerifyResult {
 /// - `users.2.shell=/bin/false` (ubnt disabled)
 /// - `iptables` has ACCEPT for gateway + DROP for rest
 pub async fn verify_config_applied(device: &UbntDevice) -> Result<VerifyResult> {
-    let username = device.ssh_username.as_deref()
+    let username = device
+        .ssh_username
+        .as_deref()
         .context("no SSH username for verification")?;
-    let password = device.ssh_password.as_deref()
+    let password = device
+        .ssh_password
+        .as_deref()
         .context("no SSH password for verification")?;
-    let authkey = device.authkey.as_deref()
+    let authkey = device
+        .authkey
+        .as_deref()
         .context("no authkey for verification")?;
 
     let addr: SocketAddr = format!("{}:22", device.source_ip)
@@ -497,13 +500,17 @@ pub async fn verify_config_applied(device: &UbntDevice) -> Result<VerifyResult> 
 
     tracing::info!(mac = %device.mac, ip = %device.source_ip, "starting post-adoption SSH verification");
 
-    let mut session = ssh_connect_with_creds(addr, username, password).await
+    let mut session = ssh_connect_with_creds(addr, username, password)
+        .await
         .context("SSH verification connect failed")?;
 
-    let system_cfg = ssh_exec(&mut session, "cat /tmp/system.cfg").await
+    let system_cfg = ssh_exec(&mut session, "cat /tmp/system.cfg")
+        .await
         .context("failed to read system.cfg")?;
 
-    let _ = session.disconnect(russh::Disconnect::ByApplication, "", "en").await;
+    let _ = session
+        .disconnect(russh::Disconnect::ByApplication, "", "en")
+        .await;
 
     let mut errors = Vec::new();
 
@@ -524,9 +531,7 @@ pub async fn verify_config_applied(device: &UbntDevice) -> Result<VerifyResult> 
     }
 
     // Check ubnt disabled
-    let ubnt_disabled = system_cfg
-        .lines()
-        .any(|l| l == "users.2.shell=/bin/false");
+    let ubnt_disabled = system_cfg.lines().any(|l| l == "users.2.shell=/bin/false");
     if !ubnt_disabled && username != "ubnt" {
         errors.push("ubnt user not disabled (users.2.shell=/bin/false missing)".into());
     }

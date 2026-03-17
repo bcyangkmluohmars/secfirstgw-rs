@@ -226,6 +226,7 @@ pub async fn start(db: &sfgw_db::Db, role: IdsRole) -> Result<()> {
 ///
 /// Convenience function for other crates (e.g. sfgw-inform) to record
 /// security events without going through the full alert pipeline.
+#[allow(clippy::too_many_arguments)]
 pub async fn log_event(
     db: &sfgw_db::Db,
     severity: &str,

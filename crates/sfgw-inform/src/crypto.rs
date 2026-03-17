@@ -12,8 +12,8 @@
 //! GCM mode uses the 40-byte TNBU header as Additional Authenticated Data.
 
 use aes_gcm::aead::{Aead, Payload};
-use aes_gcm::{AesGcm, KeyInit};
 use aes_gcm::aes::Aes128;
+use aes_gcm::{AesGcm, KeyInit};
 
 /// AES-128-GCM with 16-byte nonce (UniFi uses full 16-byte IV as GCM nonce,
 /// matching Java's GCMParameterSpec(128, iv)).
@@ -72,7 +72,7 @@ pub fn decrypt_cbc(payload: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Result<Vec<
         bail!("empty CBC payload");
     }
     // AES-128-CBC requires payload length to be a multiple of 16
-    if payload.len() % 16 != 0 {
+    if !payload.len().is_multiple_of(16) {
         bail!(
             "CBC payload length {} is not a multiple of 16",
             payload.len()
@@ -238,7 +238,8 @@ mod tests {
     #[test]
     fn gcm_snappy_roundtrip() {
         let key = default_key();
-        let json = br#"{"mac":"ac:8b:a9:a8:a5:e1","model":"USXG","hostname":"UBNT","version":"6.6.65"}"#;
+        let json =
+            br#"{"mac":"ac:8b:a9:a8:a5:e1","model":"USXG","hostname":"UBNT","version":"6.6.65"}"#;
 
         // Compress with Snappy (like the real device does)
         let mut encoder = snap::raw::Encoder::new();
@@ -266,7 +267,11 @@ mod tests {
 
         // Now encrypt
         let encrypted = encrypt_gcm(&compressed, &key, &pkt).expect("gcm encrypt");
-        assert_eq!(encrypted.len(), ciphertext_len, "GCM output should be plaintext + 16 tag");
+        assert_eq!(
+            encrypted.len(),
+            ciphertext_len,
+            "GCM output should be plaintext + 16 tag"
+        );
 
         // Put the real ciphertext in the packet
         pkt.payload = encrypted;
@@ -282,10 +287,14 @@ mod tests {
 
         // Decrypt GCM (using raw_header as AAD, just like real packets)
         let decrypted = decrypt_gcm(&parsed, &key).expect("gcm decrypt");
-        assert_eq!(decrypted, compressed, "GCM decrypt should yield compressed data");
+        assert_eq!(
+            decrypted, compressed,
+            "GCM decrypt should yield compressed data"
+        );
 
         // Decompress
-        let decompressed = crate::codec::decompress(&decrypted, parsed.flags).expect("snappy decompress");
+        let decompressed =
+            crate::codec::decompress(&decrypted, parsed.flags).expect("snappy decompress");
         assert_eq!(decompressed, json);
     }
 
@@ -314,6 +323,9 @@ mod tests {
         // raw_header from parse() must match header_bytes() from the original
         let constructed_header = pkt.header_bytes();
         let parsed_header = parsed.raw_header.as_ref().unwrap();
-        assert_eq!(&constructed_header, parsed_header, "AAD mismatch: constructed vs parsed header");
+        assert_eq!(
+            &constructed_header, parsed_header,
+            "AAD mismatch: constructed vs parsed header"
+        );
     }
 }

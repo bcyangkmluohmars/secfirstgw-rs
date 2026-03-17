@@ -70,6 +70,12 @@ pub struct RateLimiter {
     state: Mutex<HashMap<String, IpState>>,
 }
 
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RateLimiter {
     pub fn new() -> Self {
         Self {
