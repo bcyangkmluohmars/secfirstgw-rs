@@ -146,8 +146,7 @@ pub async fn list(db: &sfgw_db::Db) -> Result<Vec<WirelessNetwork>> {
                 .unwrap_or(WirelessSecurity::Wpa2),
             psk: None,
             hidden: row.get::<_, i64>(3)? != 0,
-            band: WirelessBand::from_str(&row.get::<_, String>(4)?)
-                .unwrap_or(WirelessBand::Both),
+            band: WirelessBand::from_str(&row.get::<_, String>(4)?).unwrap_or(WirelessBand::Both),
             vlan_id: row.get::<_, Option<i64>>(5)?.map(|v| v as u16),
             is_guest: row.get::<_, i64>(6)? != 0,
             l2_isolation: row.get::<_, i64>(7)? != 0,
@@ -176,8 +175,7 @@ pub async fn get(db: &sfgw_db::Db, id: i64) -> Result<Option<WirelessNetwork>> {
                 .unwrap_or(WirelessSecurity::Wpa2),
             psk: None,
             hidden: row.get::<_, i64>(3)? != 0,
-            band: WirelessBand::from_str(&row.get::<_, String>(4)?)
-                .unwrap_or(WirelessBand::Both),
+            band: WirelessBand::from_str(&row.get::<_, String>(4)?).unwrap_or(WirelessBand::Both),
             vlan_id: row.get::<_, Option<i64>>(5)?.map(|v| v as u16),
             is_guest: row.get::<_, i64>(6)? != 0,
             l2_isolation: row.get::<_, i64>(7)? != 0,
@@ -206,8 +204,7 @@ pub async fn list_with_psk(db: &sfgw_db::Db) -> Result<Vec<WirelessNetwork>> {
                 .unwrap_or(WirelessSecurity::Wpa2),
             psk: row.get(3)?,
             hidden: row.get::<_, i64>(4)? != 0,
-            band: WirelessBand::from_str(&row.get::<_, String>(5)?)
-                .unwrap_or(WirelessBand::Both),
+            band: WirelessBand::from_str(&row.get::<_, String>(5)?).unwrap_or(WirelessBand::Both),
             vlan_id: row.get::<_, Option<i64>>(6)?.map(|v| v as u16),
             is_guest: row.get::<_, i64>(7)? != 0,
             l2_isolation: row.get::<_, i64>(8)? != 0,
@@ -226,7 +223,10 @@ pub async fn create(db: &sfgw_db::Db, net: &WirelessNetwork) -> Result<i64> {
     validate(net).map_err(|e| crate::NetError::Internal(anyhow::anyhow!(e)))?;
 
     // WPA2/WPA3 must have a PSK on create
-    if matches!(net.security, WirelessSecurity::Wpa2 | WirelessSecurity::Wpa3) && net.psk.is_none()
+    if matches!(
+        net.security,
+        WirelessSecurity::Wpa2 | WirelessSecurity::Wpa3
+    ) && net.psk.is_none()
     {
         return Err(crate::NetError::Internal(anyhow::anyhow!(
             "PSK required for WPA2/WPA3 networks"
@@ -390,22 +390,32 @@ mod tests {
         let db = test_db().await;
 
         // Create
-        let id = create(&db, &wpa2_network()).await.expect("create should succeed");
+        let id = create(&db, &wpa2_network())
+            .await
+            .expect("create should succeed");
         assert!(id > 0);
 
         // List (no PSK)
         let networks = list(&db).await.expect("list should succeed");
         assert_eq!(networks.len(), 1);
         assert_eq!(networks[0].ssid, "TestNet");
-        assert!(networks[0].psk.is_none(), "PSK must not be in list response");
+        assert!(
+            networks[0].psk.is_none(),
+            "PSK must not be in list response"
+        );
 
         // Get (no PSK)
-        let net = get(&db, id).await.expect("get should succeed").expect("network should exist");
+        let net = get(&db, id)
+            .await
+            .expect("get should succeed")
+            .expect("network should exist");
         assert_eq!(net.ssid, "TestNet");
         assert!(net.psk.is_none());
 
         // List with PSK (internal only)
-        let with_psk = list_with_psk(&db).await.expect("list_with_psk should succeed");
+        let with_psk = list_with_psk(&db)
+            .await
+            .expect("list_with_psk should succeed");
         assert_eq!(with_psk.len(), 1);
         assert_eq!(with_psk[0].psk.as_deref(), Some("supersecret123"));
 
@@ -413,7 +423,9 @@ mod tests {
         let mut updated = wpa2_network();
         updated.ssid = "UpdatedNet".into();
         updated.psk = None; // keep existing
-        let ok = update(&db, id, &updated).await.expect("update should succeed");
+        let ok = update(&db, id, &updated)
+            .await
+            .expect("update should succeed");
         assert!(ok);
 
         let net = get(&db, id).await.unwrap().unwrap();
@@ -451,7 +463,10 @@ mod tests {
         let db = test_db().await;
         create(&db, &wpa2_network()).await.unwrap();
         let result = create(&db, &wpa2_network()).await;
-        assert!(result.is_err(), "duplicate SSID should be rejected by unique index");
+        assert!(
+            result.is_err(),
+            "duplicate SSID should be rejected by unique index"
+        );
     }
 
     #[tokio::test]
