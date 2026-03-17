@@ -367,7 +367,10 @@ impl InformResponse {
     /// its persistent config (including SSH creds) and re-inform with `default=true`.
     pub fn set_default() -> Self {
         let mut extra = serde_json::Map::new();
-        extra.insert("cmd".into(), serde_json::Value::String("set-default".into()));
+        extra.insert(
+            "cmd".into(),
+            serde_json::Value::String("set-default".into()),
+        );
         Self {
             response_type: "cmd".into(),
             interval: Some(30),

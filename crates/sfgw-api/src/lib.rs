@@ -196,13 +196,12 @@ pub async fn serve(
         .route("/api/v1/zones", get(zones_list_handler))
         .route("/api/v1/zones/{zone}", get(zone_get_handler))
         // Wireless
-        .route(
-            "/api/v1/wireless",
-            get(wireless_list).post(wireless_create),
-        )
+        .route("/api/v1/wireless", get(wireless_list).post(wireless_create))
         .route(
             "/api/v1/wireless/{id}",
-            get(wireless_get).put(wireless_update).delete(wireless_delete),
+            get(wireless_get)
+                .put(wireless_update)
+                .delete(wireless_delete),
         )
         // IDS
         .route("/api/v1/ids/events", get(ids_list_events))
@@ -2707,7 +2706,10 @@ async fn wireless_create(
     Json(net): Json<sfgw_net::wireless::WirelessNetwork>,
 ) -> impl IntoResponse {
     match sfgw_net::wireless::create(&db, &net).await {
-        Ok(id) => (StatusCode::CREATED, Json(json!({ "status": "created", "id": id }))),
+        Ok(id) => (
+            StatusCode::CREATED,
+            Json(json!({ "status": "created", "id": id })),
+        ),
         Err(e) => internal_err(e),
     }
 }

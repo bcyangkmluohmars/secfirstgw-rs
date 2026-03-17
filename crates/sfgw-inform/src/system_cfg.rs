@@ -194,7 +194,11 @@ fn push_aaa_wireless(
     let i = idx;
     let hidden = if net.hidden { "true" } else { "false" };
     let guest = if net.is_guest { "true" } else { "false" };
-    let l2_iso = if net.l2_isolation { "enabled" } else { "disabled" };
+    let l2_iso = if net.l2_isolation {
+        "enabled"
+    } else {
+        "disabled"
+    };
 
     // aaa.N — authentication/encryption config
     let (wpa_ver, key_mgmt, pmf_status, pmf_mode) = match net.security.as_str() {
@@ -253,7 +257,10 @@ fn push_aaa_wireless(
     lines.push(format!("wireless.{i}.uapsd=disabled"));
     lines.push(format!("wireless.{i}.parent={parent}"));
     lines.push(format!("wireless.{i}.puren=0"));
-    lines.push(format!("wireless.{i}.pureg={}", if is_5ghz { "1" } else { "0" }));
+    lines.push(format!(
+        "wireless.{i}.pureg={}",
+        if is_5ghz { "1" } else { "0" }
+    ));
     lines.push(format!("wireless.{i}.usage=user"));
     lines.push(format!("wireless.{i}.wds=disabled"));
     lines.push(format!("wireless.{i}.mcast.enhance=0"));
@@ -263,7 +270,10 @@ fn push_aaa_wireless(
     lines.push(format!("wireless.{i}.schedule_enabled=disabled"));
     lines.push(format!("wireless.{i}.element_adopt=disabled"));
     lines.push(format!("wireless.{i}.mcastrate=auto"));
-    lines.push(format!("wireless.{i}.dtim_period={}", if is_5ghz { "3" } else { "1" }));
+    lines.push(format!(
+        "wireless.{i}.dtim_period={}",
+        if is_5ghz { "3" } else { "1" }
+    ));
 }
 
 /// AP system_cfg — based on real UAP-AC-Pro dump from adopted device.

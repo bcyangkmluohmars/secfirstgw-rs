@@ -371,18 +371,22 @@ async fn process_inform(
                             Vec::new()
                         };
 
-                        let sys_cfg_str = match system_cfg::generate_system_cfg(&system_cfg::SystemCfg {
-                            mgmt_ip: mgmt_ip.clone(),
-                            authkey: authkey.clone(),
-                            cfgversion: String::new(),
-                            ssh_username: dev
-                                .ssh_username
-                                .clone()
-                                .unwrap_or_else(|| format!("sfgw_{}", &mac.replace(':', "")[6..])),
-                            ssh_password_hash: dev.ssh_password_hash.clone().unwrap_or_default(),
-                            device_type,
-                            wireless_networks,
-                        }) {
+                        let sys_cfg_str = match system_cfg::generate_system_cfg(
+                            &system_cfg::SystemCfg {
+                                mgmt_ip: mgmt_ip.clone(),
+                                authkey: authkey.clone(),
+                                cfgversion: String::new(),
+                                ssh_username: dev.ssh_username.clone().unwrap_or_else(|| {
+                                    format!("sfgw_{}", &mac.replace(':', "")[6..])
+                                }),
+                                ssh_password_hash: dev
+                                    .ssh_password_hash
+                                    .clone()
+                                    .unwrap_or_default(),
+                                device_type,
+                                wireless_networks,
+                            },
+                        ) {
                             Some(s) => s,
                             None => {
                                 warn!(mac = %mac, model = %dev.model, "unknown device type — no system_cfg template, skipping config delivery");
@@ -630,10 +634,13 @@ async fn process_inform(
                                             "SELECT config FROM devices WHERE mac = ?1",
                                             rusqlite::params![dev_clone.mac],
                                             |r| r.get::<_, String>(0),
-                                        ).ok()
+                                        )
+                                        .ok()
                                     };
                                     if let Some(json_str) = config_json {
-                                        if let Ok(mut d) = serde_json::from_str::<UbntDevice>(&json_str) {
+                                        if let Ok(mut d) =
+                                            serde_json::from_str::<UbntDevice>(&json_str)
+                                        {
                                             d.state = UbntDeviceState::Pending;
                                             d.ssh_provision_failed = false;
                                             if let Ok(json) = serde_json::to_string(&d) {
@@ -641,7 +648,8 @@ async fn process_inform(
                                                 conn.execute(
                                                     "UPDATE devices SET config = ?1 WHERE mac = ?2",
                                                     rusqlite::params![json, dev_clone.mac],
-                                                ).ok();
+                                                )
+                                                .ok();
                                             }
                                         }
                                     }
@@ -1006,4 +1014,3 @@ fn build_response_packet(
 
     Ok(packet::serialize(&final_pkt))
 }
-
