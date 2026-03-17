@@ -209,6 +209,23 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
     tracing::info!("starting adoption service");
     sfgw_adopt::start(&db).await?;
 
+    // Phase 10b: Ubiquiti Inform listener (if enabled in settings)
+    let inform_handle = sfgw_inform::new_handle();
+    let inform_state_handle = sfgw_inform::new_state_handle();
+    if sfgw_inform::is_enabled(&db).await.unwrap_or(false) {
+        tracing::info!("starting Ubiquiti Inform listener (port 8080, MGMT only)");
+        match sfgw_inform::start(&db, &inform_handle, &inform_state_handle).await {
+            Ok(()) => {
+                tracing::info!("Ubiquiti Inform listener running");
+            }
+            Err(e) => {
+                tracing::warn!("Ubiquiti Inform listener failed to start: {e}");
+            }
+        }
+    } else {
+        tracing::info!("Ubiquiti Inform disabled (enable via settings)");
+    }
+
     // Phase 11: Intrusion Detection
     tracing::info!("starting IDS engine");
     sfgw_ids::start(&db, sfgw_ids::IdsRole::Gateway).await?;
@@ -235,7 +252,7 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
 
     // Phase 14: API server (blocks)
     tracing::info!("starting API server");
-    sfgw_api::serve(&db, event_tx, &sys_stats).await?;
+    sfgw_api::serve(&db, event_tx, &sys_stats, &inform_handle, &inform_state_handle).await?;
 
     Ok(())
 }

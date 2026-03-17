@@ -355,6 +355,113 @@ export interface DeviceSummary {
   state: string;
 }
 
+// Ubiquiti Inform types
+export interface UbntValidation {
+  oui_valid: boolean
+  ip_matches: boolean
+  model_known: boolean
+  reason: string | null
+}
+
+export interface UbntFingerprint {
+  cpuid: string
+  serialno: string
+  device_hashid: string
+  systemid: string
+  boardrevision: string
+  vendorid: string
+  manufid: string
+  mfgweek: string
+}
+
+export type UbntDeviceState = 'pending' | 'ignored' | 'adopting' | 'adopted' | 'phantom'
+
+export interface SwitchPortStats {
+  port_idx: number
+  up: boolean
+  enable: boolean
+  speed: number
+  full_duplex: boolean
+  media: string
+  is_uplink: boolean
+  rx_bytes: number
+  rx_packets: number
+  rx_errors: number
+  rx_dropped: number
+  tx_bytes: number
+  tx_packets: number
+  tx_errors: number
+  tx_dropped: number
+  port_poe: boolean
+  poe_enable?: boolean
+  poe_good?: boolean
+  poe_mode?: string
+  poe_class?: string
+  poe_current?: string
+  poe_voltage?: string
+  poe_power?: string
+  stp_state: string
+  mac_table: { mac: string; age: number; vlan: number }[]
+  satisfaction: number
+}
+
+export interface DeviceStats {
+  port_table: SwitchPortStats[]
+  sys_stats?: { loadavg_1: string; loadavg_5: string; loadavg_15: string; mem_total: number; mem_used: number }
+  system_stats?: { cpu: string; mem: string; uptime: string }
+  if_table: { name: string; ip: string; mac: string; netmask: string; up: boolean; speed: number; num_port: number }[]
+  uptime: number
+  uptime_str: string
+  satisfaction: number
+  power_source_voltage?: string
+  total_max_power?: number
+  overheating: boolean
+  internet: boolean
+  kernel_version: string
+  architecture: string
+  serial: string
+  total_mac_in_used: number
+  gateway_ip: string
+  updated_at: string
+}
+
+export interface SwitchPortConfig {
+  port_idx: number
+  name: string
+  enabled: boolean
+  pvid: number
+  poe_mode: string
+  egress_mode: string
+  tagged_vlans: number[]
+  isolation: boolean
+  egress_rate_limit_kbps: number
+}
+
+export interface SwitchConfig {
+  ports: SwitchPortConfig[]
+}
+
+export interface UbntDevice {
+  mac: string
+  model: string
+  model_display: string
+  source_ip: string
+  claimed_ip: string
+  firmware_version: string
+  hostname: string
+  state: UbntDeviceState
+  authkey: string | null
+  ssh_username: string | null
+  ssh_password_hash: string | null
+  config_applied: boolean
+  fingerprint: UbntFingerprint | null
+  last_seen: string
+  first_seen: string
+  validation: UbntValidation
+  port_config?: SwitchConfig | null
+  stats?: DeviceStats
+}
+
 // WAN types
 export interface WanPortConfig {
   interface: string
@@ -526,6 +633,16 @@ export const api = {
   getWanFailover: () => request<WanFailoverConfig>('/api/v1/wan/failover'),
   setWanFailover: (mode: 'failover' | 'loadbalance') => request<void>('/api/v1/wan/failover', { method: 'PUT', body: { mode } }),
   getWanHealth: () => request<{ health: WanHealthEntry[] }>('/api/v1/wan/health'),
+
+  // Ubiquiti Inform
+  getInformSettings: () => request<{ ubiquiti_inform_enabled: boolean }>('/api/v1/inform/settings'),
+  setInformSettings: (enabled: boolean) => request<{ ubiquiti_inform_enabled: boolean }>('/api/v1/inform/settings', { method: 'PUT', body: { enabled } }),
+  getInformDevices: () => request<{ devices: UbntDevice[] }>('/api/v1/inform/devices'),
+  adoptInformDevice: (mac: string) => request<{ status: string; mac: string }>(`/api/v1/inform/devices/${encodeURIComponent(mac)}/adopt`, { method: 'POST' }),
+  ignoreInformDevice: (mac: string) => request<{ status: string; mac: string }>(`/api/v1/inform/devices/${encodeURIComponent(mac)}/ignore`, { method: 'POST' }),
+  removeInformDevice: (mac: string) => request<{ status: string; mac: string }>(`/api/v1/inform/devices/${encodeURIComponent(mac)}`, { method: 'DELETE' }),
+  getInformDevicePorts: (mac: string) => request<{ ports: SwitchConfig | null }>(`/api/v1/inform/devices/${encodeURIComponent(mac)}/ports`),
+  setInformDevicePorts: (mac: string, config: SwitchConfig) => request<{ status: string; mac: string }>(`/api/v1/inform/devices/${encodeURIComponent(mac)}/ports`, { method: 'PUT', body: config }),
 };
 
 export { BASE_URL };

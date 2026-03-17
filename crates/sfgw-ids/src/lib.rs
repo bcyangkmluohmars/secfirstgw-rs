@@ -222,6 +222,48 @@ pub async fn start(db: &sfgw_db::Db, role: IdsRole) -> Result<()> {
     Ok(())
 }
 
+/// Log an IDS event directly to the database.
+///
+/// Convenience function for other crates (e.g. sfgw-inform) to record
+/// security events without going through the full alert pipeline.
+pub async fn log_event(
+    db: &sfgw_db::Db,
+    severity: &str,
+    detector: &'static str,
+    source_mac: Option<&str>,
+    source_ip: Option<&str>,
+    interface: Option<&str>,
+    vlan: Option<u16>,
+    description: &str,
+) -> Result<()> {
+    let conn = db.lock().await;
+    conn.execute(
+        "INSERT INTO ids_events (timestamp, severity, detector, source_mac, source_ip, interface, vlan, description)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            chrono::Utc::now().to_rfc3339(),
+            severity,
+            detector,
+            source_mac,
+            source_ip,
+            interface.unwrap_or(""),
+            vlan,
+            description,
+        ],
+    )
+    .map_err(IdsError::Database)?;
+
+    tracing::warn!(
+        severity,
+        detector,
+        source_mac,
+        source_ip,
+        description,
+        "IDS event logged"
+    );
+    Ok(())
+}
+
 /// Process an IDS event reported by a remote node.
 /// Used by the API endpoint that receives events from switches/APs.
 pub async fn process_remote_event(db: &sfgw_db::Db, event: IdsEvent) -> Result<ResponseAction> {

@@ -15,6 +15,7 @@ sfgw-ids = { path = "../sfgw-ids" }
 sfgw-adopt = { path = "../sfgw-adopt" }
 sfgw-hal = { path = "../sfgw-hal" }
 sfgw-personality = { path = "../sfgw-personality" }
+sfgw-inform = { path = "../sfgw-inform" }
 anyhow.workspace = true
 tokio.workspace = true
 axum.workspace = true

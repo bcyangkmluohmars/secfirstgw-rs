@@ -39,12 +39,12 @@ rebind-localhost-ok
 # {% endif %}
 
 # ---------- Security: No Open Resolver ----------
-# Bind only to LAN/MGMT interfaces, never WAN
+# Bind only to LAN/MGMT interfaces + loopback (for system resolver), never WAN
 {% for iface in bind_interfaces %}
 interface={{ iface }}
 {% endfor %}
+listen-address=127.0.0.1
 bind-interfaces
-except-interface=lo
 
 # ---------- Cache ----------
 cache-size={{ cache_size }}

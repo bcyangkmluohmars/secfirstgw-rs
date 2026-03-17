@@ -566,6 +566,37 @@ pub async fn reload(proc: &DnsmasqProcess, db: &sfgw_db::Db) -> Result<()> {
     Ok(())
 }
 
+/// Standalone reload: regenerate config and SIGHUP dnsmasq via PID file.
+///
+/// Use this when you don't have a `DnsmasqProcess` reference (e.g. from
+/// another crate that modified DNS overrides in the database).
+/// No-op if dnsmasq is not running.
+pub async fn reload_by_pid_file(db: &sfgw_db::Db) -> Result<()> {
+    write_config(db, None).await?;
+
+    match tokio::fs::read_to_string(DEFAULT_PID_FILE).await {
+        Ok(contents) => {
+            let pid: i32 = contents
+                .trim()
+                .parse()
+                .with_context(|| format!("invalid PID in {DEFAULT_PID_FILE}"))?;
+            signal::kill(Pid::from_raw(pid), Signal::SIGHUP)
+                .with_context(|| format!("failed to SIGHUP dnsmasq (pid {pid})"))?;
+            tracing::info!(pid, "dnsmasq reloaded via PID file (SIGHUP)");
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!("dnsmasq not running (no PID file) — skipping reload");
+        }
+        Err(e) => {
+            return Err(DnsError::Internal(
+                anyhow::Error::from(e).context("failed to read dnsmasq PID file"),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Stop the managed dnsmasq process.
 pub async fn stop(proc: &DnsmasqProcess) -> Result<()> {
     // Try graceful SIGTERM first via the child handle

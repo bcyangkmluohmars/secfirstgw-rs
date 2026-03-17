@@ -24,6 +24,7 @@ sfgw-db = { path = "../sfgw-db" }
 sfgw-log = { path = "../sfgw-log" }
 sfgw-adopt = { path = "../sfgw-adopt" }
 sfgw-ids = { path = "../sfgw-ids" }
+sfgw-inform = { path = "../sfgw-inform" }
 tokio.workspace = true
 clap.workspace = true
 tracing.workspace = true

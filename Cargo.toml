@@ -14,6 +14,7 @@ members = [
     "crates/sfgw-db",
     "crates/sfgw-log",
     "crates/sfgw-adopt",
+    "crates/sfgw-inform",
     "crates/sfgw-ids",
     "crates/sfgw-personality",
     "crates/sfgw-cli",
@@ -86,3 +87,6 @@ rcgen = "0.13"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 rustls-pki-types = "1"
 rustls-pemfile = "2"
+# SSH client (for Ubiquiti device provisioning)
+russh = "0.49"
+russh-keys = "0.49"

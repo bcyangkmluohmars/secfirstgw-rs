@@ -37,6 +37,8 @@ pub async fn serve(
     db: &sfgw_db::Db,
     event_tx: events::EventTx,
     sys_stats: &SysStats,
+    inform_handle: &sfgw_inform::InformHandle,
+    inform_state_handle: &sfgw_inform::StateHandle,
 ) -> Result<()> {
     let listen_addr: SocketAddr = std::env::var("SFGW_LISTEN_ADDR")
         .unwrap_or_else(|_| "[::]:443".to_string())
@@ -205,6 +207,28 @@ pub async fn serve(
             "/api/v1/devices/{mac}/config",
             get(devices_get_config).put(devices_push_config),
         )
+        // Ubiquiti Inform settings + device management
+        .route(
+            "/api/v1/inform/settings",
+            get(inform_settings_get).put(inform_settings_set),
+        )
+        .route("/api/v1/inform/devices", get(inform_devices_list))
+        .route(
+            "/api/v1/inform/devices/{mac}/adopt",
+            post(inform_device_adopt),
+        )
+        .route(
+            "/api/v1/inform/devices/{mac}/ignore",
+            post(inform_device_ignore),
+        )
+        .route(
+            "/api/v1/inform/devices/{mac}",
+            delete(inform_device_remove),
+        )
+        .route(
+            "/api/v1/inform/devices/{mac}/ports",
+            get(inform_device_ports_get).put(inform_device_ports_set),
+        )
         .layer(axum::middleware::from_fn(e2ee::e2ee_layer))
         .layer(axum::middleware::from_fn_with_state(
             general_limiter.clone(),
@@ -238,6 +262,8 @@ pub async fn serve(
             .layer(Extension(negotiate_store))
             .layer(Extension(envelope_key_store))
             .layer(Extension(sys_stats.clone()))
+            .layer(Extension(inform_handle.clone()))
+            .layer(Extension(inform_state_handle.clone()))
             .layer(tower_http::trace::TraceLayer::new_for_http())
             .fallback_service(serve_dir)
     } else {
@@ -252,6 +278,8 @@ pub async fn serve(
             .layer(Extension(negotiate_store))
             .layer(Extension(envelope_key_store))
             .layer(Extension(sys_stats.clone()))
+            .layer(Extension(inform_handle.clone()))
+            .layer(Extension(inform_state_handle.clone()))
             .layer(tower_http::trace::TraceLayer::new_for_http())
     };
 
@@ -2000,6 +2028,129 @@ async fn devices_push_config(
             Json(json!({ "status": "queued", "sequence_number": seq })),
         ),
         Err(e) => err_response(StatusCode::NOT_FOUND, e),
+    }
+}
+
+// ===========================================================================
+// Ubiquiti Inform handlers
+// ===========================================================================
+
+async fn inform_settings_get(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_inform::is_enabled(&db).await {
+        Ok(enabled) => (
+            StatusCode::OK,
+            Json(json!({ "ubiquiti_inform_enabled": enabled })),
+        ),
+        Err(e) => internal_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct InformSettingsBody {
+    enabled: bool,
+}
+
+async fn inform_settings_set(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Extension(inform_handle): Extension<sfgw_inform::InformHandle>,
+    Extension(state_handle): Extension<sfgw_inform::StateHandle>,
+    Json(body): Json<InformSettingsBody>,
+) -> impl IntoResponse {
+    match sfgw_inform::set_enabled(&db, body.enabled, &inform_handle, &state_handle).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "ubiquiti_inform_enabled": body.enabled })),
+        ),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn inform_devices_list(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Extension(state_handle): Extension<sfgw_inform::StateHandle>,
+) -> impl IntoResponse {
+    match sfgw_inform::list_devices(&db, &state_handle).await {
+        Ok(devices) => (StatusCode::OK, Json(json!({ "devices": devices }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn inform_device_adopt(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(mac): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_inform::adopt_device(&db, &mac).await {
+        Ok(()) => {
+            tracing::info!(mac = %mac, "device adoption initiated — SSH provisioning spawned");
+            (
+                StatusCode::OK,
+                Json(json!({ "status": "adopting", "mac": mac })),
+            )
+        }
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn inform_device_ignore(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(mac): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_inform::ignore_device(&db, &mac).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(json!({ "status": "ignored", "mac": mac })),
+        ),
+        Ok(false) => err_response(StatusCode::NOT_FOUND, anyhow::anyhow!("device not found")),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn inform_device_remove(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Extension(state_handle): Extension<sfgw_inform::StateHandle>,
+    Path(mac): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_inform::remove_device(&db, &mac, &state_handle).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(json!({ "status": "removed", "mac": mac })),
+        ),
+        Ok(false) => err_response(StatusCode::NOT_FOUND, anyhow::anyhow!("device not found")),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn inform_device_ports_get(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Extension(state_handle): Extension<sfgw_inform::StateHandle>,
+    Path(mac): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_inform::get_port_config(&db, &state_handle, &mac).await {
+        Ok(Some(config)) => (StatusCode::OK, Json(json!({ "ports": config }))),
+        Ok(None) => (StatusCode::OK, Json(json!({ "ports": null }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn inform_device_ports_set(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Extension(state_handle): Extension<sfgw_inform::StateHandle>,
+    Path(mac): Path<String>,
+    Json(body): Json<sfgw_inform::port_config::SwitchConfig>,
+) -> impl IntoResponse {
+    match sfgw_inform::set_port_config(&db, &state_handle, &mac, body).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "ok", "mac": mac }))),
+        Err(e) => internal_err(e),
     }
 }
 

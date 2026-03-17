@@ -1,0 +1,59 @@
+[package]
+name = "sfgw-inform"
+description = "Ubiquiti Inform protocol — TNBU packet handling, device discovery, adopt flow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sfgw-db = { path = "../sfgw-db" }
+sfgw-dns = { path = "../sfgw-dns" }
+sfgw-ids = { path = "../sfgw-ids" }
+
+# Async
+tokio.workspace = true
+
+# Web (port 8080 listener)
+axum.workspace = true
+
+# Serialization
+serde = { workspace = true }
+serde_json.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Crypto — Ubiquiti Inform uses AES-128-CBC (unadopted) and AES-128-GCM (adopted).
+# These are WEAKER than our own protocol (AES-256-GCM) but required for
+# stock UniFi device compatibility. All usage is clearly marked as interop code.
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+aes-gcm.workspace = true
+typenum = "1"
+md-5 = "0.10"
+ring.workspace = true
+
+# Compression
+flate2 = "1"
+snap = "1"
+
+# SSH (for device provisioning after adopt)
+russh.workspace = true
+russh-keys.workspace = true
+async-trait = "0.1"
+
+# Password hashing (for UniFi device SSH credentials — INTEROP CODE)
+sha-crypt = "0.5"
+
+# Misc
+chrono.workspace = true
+base64.workspace = true
+rusqlite.workspace = true
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
