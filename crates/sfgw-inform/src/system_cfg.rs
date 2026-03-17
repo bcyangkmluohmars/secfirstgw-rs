@@ -373,17 +373,17 @@ fn generate_ap_system_cfg(cfg: &SystemCfg) -> String {
         let mut vlan_idx = 1u32;
         let mut seen_vids: Vec<u16> = Vec::new();
         for net in &cfg.wireless_networks {
-            if let Some(vid) = net.vlan_id {
-                if !seen_vids.contains(&vid) {
-                    seen_vids.push(vid);
-                    // vlan.N.devname is the PARENT device — firmware runs
-                    // `vconfig add <devname> <id>`. With name type
-                    // DEV_PLUS_VID_NO_PAD, creates interface "eth0.{vid}".
-                    lines.push(format!("vlan.{vlan_idx}.devname=eth0"));
-                    lines.push(format!("vlan.{vlan_idx}.id={vid}"));
-                    lines.push(format!("vlan.{vlan_idx}.status=enabled"));
-                    vlan_idx += 1;
-                }
+            if let Some(vid) = net.vlan_id
+                && !seen_vids.contains(&vid)
+            {
+                seen_vids.push(vid);
+                // vlan.N.devname is the PARENT device — firmware runs
+                // `vconfig add <devname> <id>`. With name type
+                // DEV_PLUS_VID_NO_PAD, creates interface "eth0.{vid}".
+                lines.push(format!("vlan.{vlan_idx}.devname=eth0"));
+                lines.push(format!("vlan.{vlan_idx}.id={vid}"));
+                lines.push(format!("vlan.{vlan_idx}.status=enabled"));
+                vlan_idx += 1;
             }
         }
     } else {
@@ -411,26 +411,26 @@ fn generate_ap_system_cfg(cfg: &SystemCfg) -> String {
         let mut seen_vids: Vec<u16> = Vec::new();
         let mut bridge_idx = 2u32;
         for net in &cfg.wireless_networks {
-            if let Some(vid) = net.vlan_id {
-                if !seen_vids.contains(&vid) {
-                    seen_vids.push(vid);
-                    lines.push(format!("bridge.{bridge_idx}.devname=br0.{vid}"));
-                    lines.push(format!("bridge.{bridge_idx}.fd=1"));
-                    lines.push(format!("bridge.{bridge_idx}.stp.status=disabled"));
-                    // Port 1: VLAN sub-interface (uplink to switch/router)
-                    lines.push(format!("bridge.{bridge_idx}.port.1.devname=eth0.{vid}"));
-                    // Additional ports: wifi interfaces assigned to this VLAN
-                    let mut port_idx = 2u32;
-                    for &(ath_dev, ath_vid) in &ath_to_vlan {
-                        if ath_vid == Some(vid) {
-                            lines.push(format!(
-                                "bridge.{bridge_idx}.port.{port_idx}.devname={ath_dev}"
-                            ));
-                            port_idx += 1;
-                        }
+            if let Some(vid) = net.vlan_id
+                && !seen_vids.contains(&vid)
+            {
+                seen_vids.push(vid);
+                lines.push(format!("bridge.{bridge_idx}.devname=br0.{vid}"));
+                lines.push(format!("bridge.{bridge_idx}.fd=1"));
+                lines.push(format!("bridge.{bridge_idx}.stp.status=disabled"));
+                // Port 1: VLAN sub-interface (uplink to switch/router)
+                lines.push(format!("bridge.{bridge_idx}.port.1.devname=eth0.{vid}"));
+                // Additional ports: wifi interfaces assigned to this VLAN
+                let mut port_idx = 2u32;
+                for &(ath_dev, ath_vid) in &ath_to_vlan {
+                    if ath_vid == Some(vid) {
+                        lines.push(format!(
+                            "bridge.{bridge_idx}.port.{port_idx}.devname={ath_dev}"
+                        ));
+                        port_idx += 1;
                     }
-                    bridge_idx += 1;
                 }
+                bridge_idx += 1;
             }
         }
     }
@@ -457,25 +457,25 @@ fn generate_ap_system_cfg(cfg: &SystemCfg) -> String {
         let mut netconf_idx = 3u32;
         let mut seen_vids: Vec<u16> = Vec::new();
         for net in &cfg.wireless_networks {
-            if let Some(vid) = net.vlan_id {
-                if !seen_vids.contains(&vid) {
-                    seen_vids.push(vid);
-                    // br0.{vid} — VLAN bridge
-                    lines.push(format!("netconf.{netconf_idx}.status=enabled"));
-                    lines.push(format!("netconf.{netconf_idx}.devname=br0.{vid}"));
-                    lines.push(format!("netconf.{netconf_idx}.ip=0.0.0.0"));
-                    lines.push(format!("netconf.{netconf_idx}.autoip.status=disabled"));
-                    lines.push(format!("netconf.{netconf_idx}.up=enabled"));
-                    netconf_idx += 1;
-                    // eth0.{vid} — VLAN sub-interface
-                    lines.push(format!("netconf.{netconf_idx}.status=enabled"));
-                    lines.push(format!("netconf.{netconf_idx}.devname=eth0.{vid}"));
-                    lines.push(format!("netconf.{netconf_idx}.ip=0.0.0.0"));
-                    lines.push(format!("netconf.{netconf_idx}.autoip.status=disabled"));
-                    lines.push(format!("netconf.{netconf_idx}.promisc=enabled"));
-                    lines.push(format!("netconf.{netconf_idx}.up=enabled"));
-                    netconf_idx += 1;
-                }
+            if let Some(vid) = net.vlan_id
+                && !seen_vids.contains(&vid)
+            {
+                seen_vids.push(vid);
+                // br0.{vid} — VLAN bridge
+                lines.push(format!("netconf.{netconf_idx}.status=enabled"));
+                lines.push(format!("netconf.{netconf_idx}.devname=br0.{vid}"));
+                lines.push(format!("netconf.{netconf_idx}.ip=0.0.0.0"));
+                lines.push(format!("netconf.{netconf_idx}.autoip.status=disabled"));
+                lines.push(format!("netconf.{netconf_idx}.up=enabled"));
+                netconf_idx += 1;
+                // eth0.{vid} — VLAN sub-interface
+                lines.push(format!("netconf.{netconf_idx}.status=enabled"));
+                lines.push(format!("netconf.{netconf_idx}.devname=eth0.{vid}"));
+                lines.push(format!("netconf.{netconf_idx}.ip=0.0.0.0"));
+                lines.push(format!("netconf.{netconf_idx}.autoip.status=disabled"));
+                lines.push(format!("netconf.{netconf_idx}.promisc=enabled"));
+                lines.push(format!("netconf.{netconf_idx}.up=enabled"));
+                netconf_idx += 1;
             }
         }
     }

@@ -637,20 +637,19 @@ async fn process_inform(
                                         )
                                         .ok()
                                     };
-                                    if let Some(json_str) = config_json {
-                                        if let Ok(mut d) =
+                                    if let Some(json_str) = config_json
+                                        && let Ok(mut d) =
                                             serde_json::from_str::<UbntDevice>(&json_str)
-                                        {
-                                            d.state = UbntDeviceState::Pending;
-                                            d.ssh_provision_failed = false;
-                                            if let Ok(json) = serde_json::to_string(&d) {
-                                                let conn = db_clone.lock().await;
-                                                conn.execute(
-                                                    "UPDATE devices SET config = ?1 WHERE mac = ?2",
-                                                    rusqlite::params![json, dev_clone.mac],
-                                                )
-                                                .ok();
-                                            }
+                                    {
+                                        d.state = UbntDeviceState::Pending;
+                                        d.ssh_provision_failed = false;
+                                        if let Ok(json) = serde_json::to_string(&d) {
+                                            let conn = db_clone.lock().await;
+                                            conn.execute(
+                                                "UPDATE devices SET config = ?1 WHERE mac = ?2",
+                                                rusqlite::params![json, dev_clone.mac],
+                                            )
+                                            .ok();
                                         }
                                     }
                                     // Also update in-memory
@@ -679,7 +678,7 @@ async fn process_inform(
                 // state (white LED). mcad only transitions to "managed" on HTTP 200.
                 // This keeps SSH factory creds (ubnt/ubnt) intact until admin
                 // clicks Adopt.
-                return Err(anyhow::anyhow!("__pending_401__"));
+                Err(anyhow::anyhow!("__pending_401__"))
             }
             UbntDeviceState::Phantom => {
                 // Re-validate — if the device now passes (e.g. model code was added),
