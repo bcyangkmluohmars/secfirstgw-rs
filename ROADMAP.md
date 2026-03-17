@@ -1,6 +1,6 @@
 # Roadmap
 
-Current version: **v0.2.0**
+Current version: **v0.3.0**
 
 ## Status
 
@@ -14,10 +14,10 @@ Current version: **v0.2.0**
 - **Database** — SQLite, encrypted at rest, parameterized queries, migrations.
 - **Auth** — Argon2id password hashing, session tokens, E2EE envelope middleware.
 - **Display (LCM)** — Native serial driver for UDM Pro front panel (direct STM32F2 MCU communication via `/dev/ttyACM0`, replaces ulcmd). Live system stats (CPU, memory, fan RPM, uptime) pushed every 3s. Board-specific configs (UDM Pro verified, UDM SE + UDM prepared).
+- **UniFi Inform** — Full TNBU binary protocol (AES-128-CBC unadopted, AES-128-GCM adopted). 5-phase adoption flow: passive validation → SSH fingerprint → authkey delivery via inform response → system_cfg with SSH hardening (custom user, ubnt disabled, iptables gateway-only) → post-adoption SSH verification with 3-attempt retry and IDS alerting. Snappy/zlib decompression with bomb protection. Per-IP rate limiting. DB protection against adopted record overwrite on service restart. Live device stats (port table, PoE, CPU/mem). Web UI with adopt/ignore/remove and per-port switch config. Tested end-to-end on USW-Flex. See [docs/inform-adoption-flow.md](docs/inform-adoption-flow.md).
 - **Deploy** — clean-and-install.sh for production (masks all UniFi services including ulcmd). dev-deploy.sh for rapid iteration on UDM Pro (rsync + on-device build + restart with SSH lockout protection).
 
 ### Untested
-- **Device Adoption** — mTLS CA, Inform protocol handling, device approval/rejection workflow.
 - **VPN** — WireGuard tunnels via boringtun. Peer management, config generation. Multi-core.
 - **IDS** — ARP/DHCP/DNS/VLAN anomaly detection framework with alert correlation.
 - **Display (HD44780/Framebuffer)** — HD44780 LCD fallback, framebuffer touchscreen abstraction (untested without UDM Pro LCM hardware).
@@ -58,6 +58,32 @@ Current version: **v0.2.0**
 - Personality setting is not persisted across restarts (resets to "kevin")
 
 ## Version History
+
+### v0.3.0 (2026-03-17)
+
+- **sfgw-inform crate** — Complete UniFi Inform protocol implementation
+- TNBU binary packet parsing/serialization (40-byte header, AES IV, flags bitfield)
+- AES-128-CBC decryption/encryption (PKCS7, default key = MD5("ubnt"))
+- AES-128-GCM decryption/encryption (16-byte nonce, 40-byte header AAD, 16-byte tag)
+- Snappy + zlib decompression with 10 MiB bomb protection
+- Per-IP rate limiting (soft + hard thresholds, MAC tracking, IDS integration)
+- SSH provisioning: factory creds → hardware fingerprint from EEPROM → validate → generate authkey + SSH creds
+- Authkey delivery via Inform response mgmt_cfg (no mca-ctrl, no SSH config push)
+- system_cfg generation: SSH hardening (custom user, ubnt disabled, iptables gateway-only, syslog forwarding)
+- cfgversion hash tracking for config change detection
+- Post-adoption SSH verification (3-attempt retry, IDS critical alert on exhaustion)
+- Two-phase key resolution with DB fallback (handles service restarts, adoption transitions)
+- DB protection: check for existing Adopted/Adopting records before creating Pending (prevents overwrite on restart)
+- Inform JSON payload parsing (30+ fields: port_table, sys_stats, PoE, FDB, etc.)
+- Per-port switch config model (PVID, tagged VLANs, PoE mode, egress rate limit, isolation)
+- Device state machine: Pending → Adopting → Adopted, plus Ignored and Phantom states
+- IDS events: phantom device detection, inform flood, SSH provisioning failure, config delivery failure
+- API endpoints: inform settings, device list, adopt, ignore, remove, port config GET/PUT
+- Web UI page: device list with state badges, adopt/ignore/remove actions, live stats, port config editor
+- Full protocol documentation: [docs/inform-adoption-flow.md](docs/inform-adoption-flow.md)
+- Tested end-to-end on real USW-Flex hardware (36s from click to verified adoption)
+- IDS `log_event()` public API for cross-crate security event logging
+- dnsmasq `reload_by_pid_file()` for config reload without process handle
 
 ### v0.2.0 (2026-03-15)
 
