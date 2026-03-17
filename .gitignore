@@ -11,3 +11,4 @@ web/node_modules/
 web/dist/
 .planning/
 analysis/
+tools/ssh-diag/target/
