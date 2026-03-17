@@ -98,12 +98,20 @@ pub async fn is_enabled(db: &sfgw_db::Db) -> Result<bool> {
 /// When disabled:
 /// - Removes the DNS overrides
 /// - Stops the listener (on next restart)
-pub async fn set_enabled(db: &sfgw_db::Db, enabled: bool, inform_handle: &InformHandle, state_handle: &StateHandle) -> Result<()> {
+pub async fn set_enabled(
+    db: &sfgw_db::Db,
+    enabled: bool,
+    inform_handle: &InformHandle,
+    state_handle: &StateHandle,
+) -> Result<()> {
     let conn = db.lock().await;
     conn.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        rusqlite::params![META_KEY_INFORM_ENABLED, if enabled { "true" } else { "false" }],
+        rusqlite::params![
+            META_KEY_INFORM_ENABLED,
+            if enabled { "true" } else { "false" }
+        ],
     )?;
     drop(conn);
 
@@ -191,7 +199,11 @@ async fn remove_dns_overrides(db: &sfgw_db::Db) -> Result<()> {
 /// Stores the join handle in `inform_handle` for lifecycle management.
 ///
 /// Call this only if `is_enabled()` returns true.
-pub async fn start(db: &sfgw_db::Db, inform_handle: &InformHandle, state_handle: &StateHandle) -> Result<()> {
+pub async fn start(
+    db: &sfgw_db::Db,
+    inform_handle: &InformHandle,
+    state_handle: &StateHandle,
+) -> Result<()> {
     // Ensure DNS overrides are set
     ensure_dns_overrides(db).await?;
 
@@ -257,9 +269,7 @@ pub async fn stop(inform_handle: &InformHandle) {
 }
 
 /// Load Ubiquiti devices from the database into the in-memory map.
-async fn load_devices_from_db(
-    db: &sfgw_db::Db,
-) -> Result<HashMap<String, state::UbntDevice>> {
+async fn load_devices_from_db(db: &sfgw_db::Db) -> Result<HashMap<String, state::UbntDevice>> {
     let conn = db.lock().await;
     let mut stmt = conn.prepare("SELECT mac, config FROM devices")?;
     let rows = stmt.query_map([], |row| {
@@ -305,14 +315,16 @@ pub async fn adopt_device(db: &sfgw_db::Db, mac: &str) -> Result<()> {
     // Load the device from DB
     let device = {
         let conn = db.lock().await;
-        let config_json: String = conn.query_row(
-            "SELECT config FROM devices WHERE mac = ?1",
-            rusqlite::params![mac],
-            |r| r.get(0),
-        ).with_context(|| format!("device {mac} not found"))?;
+        let config_json: String = conn
+            .query_row(
+                "SELECT config FROM devices WHERE mac = ?1",
+                rusqlite::params![mac],
+                |r| r.get(0),
+            )
+            .with_context(|| format!("device {mac} not found"))?;
 
-        let mut dev: state::UbntDevice = serde_json::from_str(&config_json)
-            .context("failed to parse device config")?;
+        let mut dev: state::UbntDevice =
+            serde_json::from_str(&config_json).context("failed to parse device config")?;
 
         // Set to Adopting
         dev.state = state::UbntDeviceState::Adopting;
@@ -353,7 +365,9 @@ pub async fn adopt_device(db: &sfgw_db::Db, mac: &str) -> Result<()> {
                     None,
                     None,
                     &format!("SSH provisioning failed for {}: {e}", device.model_display),
-                ).await {
+                )
+                .await
+                {
                     tracing::warn!(error = %ids_err, "failed to log adoption failure to IDS");
                 }
             }
@@ -364,7 +378,10 @@ pub async fn adopt_device(db: &sfgw_db::Db, mac: &str) -> Result<()> {
 }
 
 /// List all Ubiquiti devices (any state).
-pub async fn list_devices(db: &sfgw_db::Db, state_handle: &StateHandle) -> Result<Vec<state::UbntDevice>> {
+pub async fn list_devices(
+    db: &sfgw_db::Db,
+    state_handle: &StateHandle,
+) -> Result<Vec<state::UbntDevice>> {
     // Prefer in-memory state (has live stats) over DB-only
     if let Some(ref inform_state) = *state_handle.lock().await {
         let devices = inform_state.devices.lock().await;
@@ -376,7 +393,11 @@ pub async fn list_devices(db: &sfgw_db::Db, state_handle: &StateHandle) -> Resul
 }
 
 /// Get port configuration for a device.
-pub async fn get_port_config(db: &sfgw_db::Db, state_handle: &StateHandle, mac: &str) -> Result<Option<port_config::SwitchConfig>> {
+pub async fn get_port_config(
+    db: &sfgw_db::Db,
+    state_handle: &StateHandle,
+    mac: &str,
+) -> Result<Option<port_config::SwitchConfig>> {
     // Prefer in-memory state
     if let Some(ref inform_state) = *state_handle.lock().await {
         let devices = inform_state.devices.lock().await;
@@ -400,7 +421,12 @@ pub async fn get_port_config(db: &sfgw_db::Db, state_handle: &StateHandle, mac: 
 }
 
 /// Set port configuration for a device. Persists to DB and updates in-memory state.
-pub async fn set_port_config(db: &sfgw_db::Db, state_handle: &StateHandle, mac: &str, config: port_config::SwitchConfig) -> Result<()> {
+pub async fn set_port_config(
+    db: &sfgw_db::Db,
+    state_handle: &StateHandle,
+    mac: &str,
+    config: port_config::SwitchConfig,
+) -> Result<()> {
     // Update in-memory state
     if let Some(ref inform_state) = *state_handle.lock().await {
         let mut devices = inform_state.devices.lock().await;
@@ -411,14 +437,16 @@ pub async fn set_port_config(db: &sfgw_db::Db, state_handle: &StateHandle, mac: 
 
     // Persist to DB
     let conn = db.lock().await;
-    let config_json: String = conn.query_row(
-        "SELECT config FROM devices WHERE mac = ?1",
-        rusqlite::params![mac],
-        |r| r.get(0),
-    ).with_context(|| format!("device {mac} not found"))?;
+    let config_json: String = conn
+        .query_row(
+            "SELECT config FROM devices WHERE mac = ?1",
+            rusqlite::params![mac],
+            |r| r.get(0),
+        )
+        .with_context(|| format!("device {mac} not found"))?;
 
-    let mut dev: state::UbntDevice = serde_json::from_str(&config_json)
-        .context("failed to parse device config")?;
+    let mut dev: state::UbntDevice =
+        serde_json::from_str(&config_json).context("failed to parse device config")?;
     dev.port_config = Some(config);
     let updated = serde_json::to_string(&dev)?;
     conn.execute(
@@ -431,17 +459,18 @@ pub async fn set_port_config(db: &sfgw_db::Db, state_handle: &StateHandle, mac: 
 }
 
 /// Remove/forget a Ubiquiti device from the database and in-memory state.
-pub async fn remove_device(db: &sfgw_db::Db, mac: &str, state_handle: &StateHandle) -> Result<bool> {
+pub async fn remove_device(
+    db: &sfgw_db::Db,
+    mac: &str,
+    state_handle: &StateHandle,
+) -> Result<bool> {
     // Remove from in-memory state
     if let Some(ref inform_state) = *state_handle.lock().await {
         inform_state.devices.lock().await.remove(mac);
     }
 
     let conn = db.lock().await;
-    let rows = conn.execute(
-        "DELETE FROM devices WHERE mac = ?1",
-        rusqlite::params![mac],
-    )?;
+    let rows = conn.execute("DELETE FROM devices WHERE mac = ?1", rusqlite::params![mac])?;
     if rows > 0 {
         tracing::info!(mac = %mac, "device removed from inform database");
     }
@@ -461,8 +490,8 @@ pub async fn ignore_device(db: &sfgw_db::Db, mac: &str) -> Result<bool> {
         Err(e) => return Err(e.into()),
     };
 
-    let mut dev: state::UbntDevice = serde_json::from_str(&config_json)
-        .context("failed to parse device config")?;
+    let mut dev: state::UbntDevice =
+        serde_json::from_str(&config_json).context("failed to parse device config")?;
 
     dev.state = state::UbntDeviceState::Ignored;
     let updated = serde_json::to_string(&dev)?;

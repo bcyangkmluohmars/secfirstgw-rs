@@ -32,8 +32,8 @@ pub fn decompress(data: &[u8], flags: PacketFlags) -> Result<Vec<u8>> {
 
 /// Compress a payload using zlib (for GCM+zlib responses).
 pub fn compress_zlib(data: &[u8]) -> Vec<u8> {
-    use flate2::write::ZlibEncoder;
     use flate2::Compression;
+    use flate2::write::ZlibEncoder;
     use std::io::Write;
 
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());

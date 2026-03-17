@@ -78,7 +78,6 @@ pub struct InformPayload {
     pub uptime: u64,
 
     // --- Stats fields (sent every inform cycle) ---
-
     /// Per-port statistics (switches). APs send radio_table instead (caught by extra).
     #[serde(default)]
     pub port_table: Vec<SwitchPortStats>,

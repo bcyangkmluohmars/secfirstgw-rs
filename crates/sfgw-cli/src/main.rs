@@ -252,7 +252,14 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
 
     // Phase 14: API server (blocks)
     tracing::info!("starting API server");
-    sfgw_api::serve(&db, event_tx, &sys_stats, &inform_handle, &inform_state_handle).await?;
+    sfgw_api::serve(
+        &db,
+        event_tx,
+        &sys_stats,
+        &inform_handle,
+        &inform_state_handle,
+    )
+    .await?;
 
     Ok(())
 }

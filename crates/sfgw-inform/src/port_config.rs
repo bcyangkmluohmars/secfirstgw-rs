@@ -97,7 +97,8 @@ impl SwitchConfig {
         cmds.push("swconfig dev switch0 set enable_vlan 1".into());
 
         // Collect all VLANs we need
-        let mut vlan_ports: std::collections::HashMap<u16, Vec<(u32, bool)>> = std::collections::HashMap::new();
+        let mut vlan_ports: std::collections::HashMap<u16, Vec<(u32, bool)>> =
+            std::collections::HashMap::new();
 
         for port in &self.ports {
             let sw_port = port_map(port.port_idx);
@@ -123,10 +124,7 @@ impl SwitchConfig {
 
             // Tagged VLANs — port is tagged member
             for &vid in &port.tagged_vlans {
-                vlan_ports
-                    .entry(vid)
-                    .or_default()
-                    .push((sw_port, true)); // true = tagged
+                vlan_ports.entry(vid).or_default().push((sw_port, true)); // true = tagged
             }
 
             // Port isolation

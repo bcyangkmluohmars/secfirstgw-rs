@@ -221,10 +221,7 @@ pub async fn serve(
             "/api/v1/inform/devices/{mac}/ignore",
             post(inform_device_ignore),
         )
-        .route(
-            "/api/v1/inform/devices/{mac}",
-            delete(inform_device_remove),
-        )
+        .route("/api/v1/inform/devices/{mac}", delete(inform_device_remove))
         .route(
             "/api/v1/inform/devices/{mac}/ports",
             get(inform_device_ports_get).put(inform_device_ports_set),
