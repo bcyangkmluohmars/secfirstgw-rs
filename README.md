@@ -19,6 +19,7 @@ A single Rust binary replacing bloated gateway stacks:
 - **Firewall & Router** — iptables-legacy (UDM Pro / kernel 4.19) + nftables (modern kernels), dual-stack IPv4/IPv6
 - **Network Controller** — device adoption, provisioning, monitoring
 - **UniFi Inform** — TNBU protocol, AES-128-CBC/GCM, SSH fingerprint verification, system_cfg hardening
+- **WiFi Management** — WLAN provisioning via Inform (WPA2/WPA3, VLAN-tagged SSIDs, per-radio config)
 - **Multi-Core VPN** — WireGuard (boringtun) across all cores
 - **DNS & DHCP** — dnsmasq config generation
 - **Encrypted Storage** — LUKS2 FDE with hardware-bound key derivation
