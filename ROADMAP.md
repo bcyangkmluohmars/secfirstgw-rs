@@ -38,11 +38,11 @@ Current version: **v0.3.0**
 - **Honeypot integration** — Wire honeypot connections into IDS event pipeline for correlation.
 - **Custom zones** — IoT, VPN, Custom zone types with configurable policies.
 - **WAN Failover/Load-Balancing Improvements**
-  - Health-Check erweitern — HTTP-Check, DNS-Resolve-Check (nicht nur ICMP Ping)
-  - Hysterese / Flap-Detection (Interface flapped 10x in 1 Min → nicht sofort re-route)
-  - Sticky-Sessions (bei Failover bestehende Connections nicht brechen)
-  - Per-Zone WAN-Pinning ("DMZ immer über eth8, LAN über switch0")
-  - Web UI — WAN-Bereich mit Failover/LB-Konfiguration, Health-Check-Status, Interface-Prioritäten
+  - Extended health checks — HTTP probe, DNS resolve check (not just ICMP ping)
+  - Hysteresis / flap detection (interface flapped 10x in 1 min → don't re-route immediately)
+  - Sticky sessions (don't break existing connections on failover)
+  - Per-zone WAN pinning ("DMZ always via eth8, LAN via switch0")
+  - Web UI — WAN section with failover/LB config, health check status, interface priorities
 - **DDNS** — Dynamic DNS client for WAN IP updates.
 - **UPnP/NAT-PMP** — Optional, disabled by default.
 - **Traffic shaping** — QoS via tc/nftables.
