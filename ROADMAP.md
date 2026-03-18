@@ -14,7 +14,8 @@ Current version: **v0.3.0**
 - **Database** — SQLite, encrypted at rest, parameterized queries, migrations.
 - **Auth** — Argon2id password hashing, session tokens, E2EE envelope middleware.
 - **Display (LCM)** — Native serial driver for UDM Pro front panel (direct STM32F2 MCU communication via `/dev/ttyACM0`, replaces ulcmd). Live system stats (CPU, memory, fan RPM, uptime) pushed every 3s. Board-specific configs (UDM Pro verified, UDM SE + UDM prepared).
-- **UniFi Inform** — Full TNBU binary protocol (AES-128-CBC unadopted, AES-128-GCM adopted). 5-phase adoption flow: passive validation → SSH fingerprint → authkey delivery via inform response → system_cfg with SSH hardening (custom user, ubnt disabled, iptables gateway-only) → post-adoption SSH verification with 3-attempt retry and IDS alerting. Snappy/zlib decompression with bomb protection. Per-IP rate limiting. DB protection against adopted record overwrite on service restart. Live device stats (port table, PoE, CPU/mem). Web UI with adopt/ignore/remove and per-port switch config. Tested end-to-end on USW-Flex. See [docs/inform-adoption-flow.md](docs/inform-adoption-flow.md).
+- **UniFi Inform** — Full TNBU binary protocol (AES-128-CBC unadopted, AES-128-GCM adopted). 5-phase adoption flow: passive validation → SSH fingerprint → authkey delivery via inform response → system_cfg with SSH hardening (custom user, ubnt disabled, iptables gateway-only) → post-adoption SSH verification with 3-attempt retry and IDS alerting. Snappy/zlib decompression with bomb protection. Per-IP rate limiting. DB protection against adopted record overwrite on service restart. Live device stats (port table, PoE, CPU/mem). Web UI with adopt/ignore/remove and per-port switch config. Tested end-to-end on USW-Flex and UAP-AC-Pro. See [docs/inform-adoption-flow.md](docs/inform-adoption-flow.md).
+- **WiFi Management** — Wireless network CRUD (create/update/delete SSIDs). WPA2/WPA3 with PSK. Per-SSID VLAN tagging. Per-radio band selection (2.4 GHz, 5 GHz, both). Guest network and L2 isolation flags. AP system_cfg generation with full VLAN bridging: vconfig VLAN creation, per-VLAN bridges (br0.{vid}) with eth0.{vid} uplink + ath radio ports, netconf entries for automatic interface bring-up. Tested end-to-end on UAP-AC-Pro (WPA2 auth + DHCP on VLAN 10).
 - **Deploy** — clean-and-install.sh for production (masks all UniFi services including ulcmd). dev-deploy.sh for rapid iteration on UDM Pro (rsync + on-device build + restart with SSH lockout protection).
 
 ### Untested
@@ -31,6 +32,7 @@ Current version: **v0.3.0**
 
 ### Planned
 
+- **WiFi advanced** — Channel selection, TX power, bandwidth (HT20/HT40/VHT80), fast roaming (802.11r), band steering, multi-SSID per radio (VAP).
 - **Web UI polish** — Dashboard, firewall rule editor drag-and-drop, VPN config download, real-time IDS event feed.
 - **IDS active response** — Auto-block on detection threshold (notify sfgw-fw to insert DROP rules).
 - **Honeypot integration** — Wire honeypot connections into IDS event pipeline for correlation.
@@ -81,7 +83,14 @@ Current version: **v0.3.0**
 - API endpoints: inform settings, device list, adopt, ignore, remove, port config GET/PUT
 - Web UI page: device list with state badges, adopt/ignore/remove actions, live stats, port config editor
 - Full protocol documentation: [docs/inform-adoption-flow.md](docs/inform-adoption-flow.md)
-- Tested end-to-end on real USW-Flex hardware (36s from click to verified adoption)
+- Tested end-to-end on real USW-Flex and UAP-AC-Pro hardware (36s from click to verified adoption)
+- **Wireless network management** — DB schema, CRUD API, Web UI page
+- AP system_cfg generation: per-radio WLAN config (aaa.N + wireless.N), WPA2/WPA3 PSK, SSID hiding, guest/L2 isolation
+- VLAN-tagged WLAN support: vconfig VLAN creation, per-VLAN bridge (br0.{vid}) with eth0.{vid} uplink + ath radio ports
+- Automatic VLAN interface bring-up via netconf entries (br0.{vid} + eth0.{vid} with up=enabled)
+- Device-type dispatch (AP vs Switch) for system_cfg template selection
+- ssh-key patch for 1024-bit RSA host keys (older UAP-AC-Pro/LR firmware with Dropbear)
+- ssh-diag diagnostic tool for device SSH debugging
 - IDS `log_event()` public API for cross-crate security event logging
 - dnsmasq `reload_by_pid_file()` for config reload without process handle
 
