@@ -337,6 +337,7 @@ pub async fn create_ipsec_tunnel(
         zone: request.zone.clone(),
         // IPsec uses local_addrs for WAN binding, not bind_interface
         bind_interface: None,
+        peers: Vec::new(),
     })
 }
 
@@ -1049,6 +1050,7 @@ mod tests {
             mtu: 1420,
             zone: "vpn".to_string(),
             bind_interface: Some("eth0".to_string()),
+            peers: Vec::new(),
         };
         let json = serde_json::to_string(&tunnel).unwrap();
         assert!(json.contains("\"bind_interface\":\"eth0\""));
@@ -1072,6 +1074,7 @@ mod tests {
             mtu: 1420,
             zone: "vpn".to_string(),
             bind_interface: None,
+            peers: Vec::new(),
         };
         let json = serde_json::to_string(&tunnel).unwrap();
         assert!(

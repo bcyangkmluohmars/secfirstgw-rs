@@ -256,9 +256,14 @@ export interface VpnPeer {
   name: string | null;
   public_key: string;
   preshared_key?: string;
+  address: string;
+  address_v6?: string;
   allowed_ips: string[];
   endpoint?: string;
   persistent_keepalive?: number;
+  routing_mode: string;
+  dns?: string;
+  enabled: boolean;
   created_at: string;
 }
 
@@ -270,8 +275,11 @@ export interface VpnTunnel {
   listen_port: number;
   public_key: string;
   address: string;
+  address_v6?: string;
   dns: string | null;
   mtu: number;
+  zone: string;
+  bind_interface?: string;
   peers: VpnPeer[];
 }
 

@@ -79,6 +79,7 @@ pub async fn create_tunnel(db: &sfgw_db::Db, request: &CreateTunnelRequest) -> R
         mtu: request.mtu.unwrap_or(1420),
         zone: request.zone.clone(),
         bind_interface: request.bind_interface.clone(),
+        peers: Vec::new(),
     })
 }
 
@@ -278,14 +279,17 @@ pub async fn get_status(name: &str) -> Result<TunnelStatus> {
     })
 }
 
-/// List all tunnels from DB.
+/// List all tunnels from DB, including their peers.
 pub async fn list_tunnels(db: &sfgw_db::Db) -> Result<Vec<VpnTunnel>> {
     let rows = db::list_tunnels(db).await?;
     let mut tunnels = Vec::with_capacity(rows.len());
 
     for row in rows {
         match tunnel_from_row(row) {
-            Ok(t) => tunnels.push(t),
+            Ok(mut t) => {
+                t.peers = crate::peer::list_peers(db, t.id).await.unwrap_or_default();
+                tunnels.push(t);
+            }
             Err(e) => warn!("skipping corrupt tunnel row: {e}"),
         }
     }
@@ -293,20 +297,28 @@ pub async fn list_tunnels(db: &sfgw_db::Db) -> Result<Vec<VpnTunnel>> {
     Ok(tunnels)
 }
 
-/// Get a single tunnel by ID.
+/// Get a single tunnel by ID, including its peers.
 pub async fn get_tunnel_by_id(db: &sfgw_db::Db, id: i64) -> Result<Option<VpnTunnel>> {
     let row = db::get_tunnel_by_id(db, id).await?;
     match row {
-        Some(r) => Ok(Some(tunnel_from_row(r)?)),
+        Some(r) => {
+            let mut t = tunnel_from_row(r)?;
+            t.peers = crate::peer::list_peers(db, t.id).await.unwrap_or_default();
+            Ok(Some(t))
+        }
         None => Ok(None),
     }
 }
 
-/// Get a single tunnel by name.
+/// Get a single tunnel by name, including its peers.
 pub async fn get_tunnel(db: &sfgw_db::Db, name: &str) -> Result<Option<VpnTunnel>> {
     let row = db::get_tunnel_by_name(db, name).await?;
     match row {
-        Some(r) => Ok(Some(tunnel_from_row(r)?)),
+        Some(r) => {
+            let mut t = tunnel_from_row(r)?;
+            t.peers = crate::peer::list_peers(db, t.id).await.unwrap_or_default();
+            Ok(Some(t))
+        }
         None => Ok(None),
     }
 }
@@ -480,6 +492,7 @@ fn tunnel_from_row(row: TunnelRow) -> Result<VpnTunnel> {
                 zone: config.zone,
                 // IPsec uses local_addrs for WAN binding, not bind_interface
                 bind_interface: None,
+                peers: Vec::new(),
             })
         }
         crate::TunnelType::WireGuard => {
@@ -497,6 +510,7 @@ fn tunnel_from_row(row: TunnelRow) -> Result<VpnTunnel> {
                 mtu: config.mtu,
                 zone: config.zone,
                 bind_interface: config.bind_interface,
+                peers: Vec::new(),
             })
         }
     }

@@ -295,6 +295,9 @@ pub struct VpnTunnel {
     /// WAN interface to bind this tunnel to (None = all interfaces).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind_interface: Option<String>,
+    /// Peers belonging to this tunnel.
+    #[serde(default)]
+    pub peers: Vec<VpnPeer>,
 }
 
 /// A VPN peer as presented to callers (no private key).
