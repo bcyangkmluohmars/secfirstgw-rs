@@ -908,21 +908,37 @@ fn no_zone_except_mgmt_allows_inform_8080() {
 }
 
 #[test]
-fn wan_has_no_accept_input_rules() {
+fn wan_has_no_accept_input_rules_except_rate_limited_icmp() {
     let config = standard_ruleset();
-    // WAN interfaces should have no input accept rules (only drop rules).
+    // WAN interfaces should have no input accept rules except rate-limited ICMP.
     let wan_input_accepts: Vec<&str> = config
         .lines()
         .filter(|line| {
             (line.contains("-i eth0") || line.contains("-i ppp0"))
                 && line.contains("SFGW-INPUT")
                 && line.contains("-j ACCEPT")
+                // Rate-limited ICMP is the only allowed ACCEPT on WAN.
+                && !line.contains("icmp --icmp-type echo-request -m limit")
         })
         .collect();
 
     assert!(
         wan_input_accepts.is_empty(),
-        "WAN must have no input accept rules, found: {wan_input_accepts:?}"
+        "WAN must have no input accept rules (except rate-limited ICMP), found: {wan_input_accepts:?}"
+    );
+}
+
+#[test]
+fn wan_icmp_is_rate_limited() {
+    let config = standard_ruleset();
+    // WAN ICMP must be rate-limited (1/sec burst 3) and oversized payloads dropped.
+    assert!(
+        config.contains("icmp --icmp-type echo-request -m limit --limit 1/sec --limit-burst 3"),
+        "WAN ICMP must be rate-limited at 1/sec with burst 3"
+    );
+    assert!(
+        config.contains("icmp --icmp-type echo-request -m length --length 1500:65535 -j DROP"),
+        "WAN must drop oversized ICMP packets"
     );
 }
 

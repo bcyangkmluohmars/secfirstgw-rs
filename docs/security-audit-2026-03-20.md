@@ -332,7 +332,7 @@ TLS 1.3 akzeptiert auch TLS_AES_128_GCM_SHA256. Kein Vulnerability, aber für ma
 | **M5** | UPnP SSDP bindet auf 0.0.0.0:1900 | **FIXED** | `sec: UPnP SSDP bind to LAN IP + peer validation` |
 | **M8** | DNSSEC AD-Flag nicht gesetzt | OPEN | |
 | **M10** | IPv6: Kein NDP Rate Limiting, kein DHCPv6 | OPEN | |
-| **M11** | WAN ICMP Echo Reply ohne Rate Limiting | OPEN | |
+| **M11** | WAN ICMP Echo Reply ohne Rate Limiting | **FIXED** | `sec: WAN ICMP rate limiting + oversized payload drop` |
 | **M12** | SSE Token in URL | OPEN | |
 | **L1** | Port 80 kein HTTP→HTTPS Redirect | OPEN | |
 | **L2** | Doppelte iptables-Regeln | OPEN | |

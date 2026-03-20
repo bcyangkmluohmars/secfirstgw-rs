@@ -1223,6 +1223,25 @@ fn emit_wan_zone_rules(out: &mut String, wan_ifaces: &[&str]) {
         )
         .unwrap();
 
+        // WAN ICMP rate limiting: 1/sec with burst of 3 (prevents ICMP flood
+        // and host-discovery reconnaissance). Oversized payloads (>1500 bytes)
+        // are dropped to prevent amplification attacks.
+        writeln!(
+            out,
+            "-A SFGW-INPUT -i {iface} -p icmp --icmp-type echo-request -m length --length 1500:65535 -j DROP -m comment --comment \"drop oversized ICMP on WAN\"",
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "-A SFGW-INPUT -i {iface} -p icmp --icmp-type echo-request -m limit --limit 1/sec --limit-burst 3 -j ACCEPT -m comment --comment \"WAN ICMP rate limit\"",
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "-A SFGW-INPUT -i {iface} -p icmp --icmp-type echo-request -j DROP -m comment --comment \"WAN ICMP over limit\"",
+        )
+        .unwrap();
+
         // Note: catch-all DROP moved to emit_zone_catchall_drops() so user
         // rules inserted after zone rules are evaluated before the final DROP.
     }
