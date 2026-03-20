@@ -8,6 +8,7 @@
 //!
 //! Zone-based security model: WAN, LAN, DMZ, MGMT, GUEST.
 
+pub mod ids_response;
 pub mod iptables;
 pub mod wan;
 
