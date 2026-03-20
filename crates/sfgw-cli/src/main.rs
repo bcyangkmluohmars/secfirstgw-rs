@@ -178,6 +178,9 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
     tracing::info!("opening database");
     let db = sfgw_db::open_or_create().await?;
 
+    // Load saved personality (defaults to Kevin if none saved)
+    sfgw_personality::load(&db).await?;
+
     // Phase 4: Logging with forward secrecy
     tracing::info!("initializing encrypted log");
     let _log = sfgw_log::LogManager::init(&db).await?;
@@ -229,6 +232,64 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
     // Phase 11: Intrusion Detection
     tracing::info!("starting IDS engine");
     sfgw_ids::start(&db, sfgw_ids::IdsRole::Gateway).await?;
+
+    // Phase 11c: IDS rule expiry cleanup (removes expired auto-block rules every 60s)
+    let db_ids_cleanup = db.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Err(e) = sfgw_fw::ids_response::cleanup_expired(&db_ids_cleanup).await {
+                tracing::warn!("IDS rule cleanup failed: {e}");
+            }
+        }
+    });
+
+    // Phase 11b: Honeypot listener (if enabled in settings)
+    if sfgw_personality::honeypot::is_enabled(&db)
+        .await
+        .unwrap_or(false)
+    {
+        tracing::info!(
+            "starting honeypot listener (port {})",
+            sfgw_personality::honeypot::DEFAULT_PORT
+        );
+        let listen_addr: std::net::SocketAddr =
+            format!("[::]:{}", sfgw_personality::honeypot::DEFAULT_PORT)
+                .parse()
+                .expect("valid honeypot listen address"); // INVARIANT: constant port
+
+        let db_honeypot = db.clone();
+        tokio::spawn(async move {
+            if let Err(e) = sfgw_personality::honeypot::serve(listen_addr, move |peer| {
+                let db_ids = db_honeypot.clone();
+                let ip_str = peer.ip().to_string();
+                tokio::spawn(async move {
+                    if let Err(e) = sfgw_ids::log_event(
+                        &db_ids,
+                        "Warning",
+                        "honeypot",
+                        None,
+                        Some(&ip_str),
+                        None,
+                        None,
+                        &format!("honeypot connection from {ip_str}:{}", peer.port()),
+                    )
+                    .await
+                    {
+                        tracing::error!("failed to log honeypot event to IDS: {e}");
+                    }
+                });
+            })
+            .await
+            {
+                tracing::error!("honeypot listener failed: {e}");
+            }
+        });
+        tracing::info!("honeypot listener running");
+    } else {
+        tracing::info!("honeypot disabled (enable via settings)");
+    }
 
     // Phase 12: System stats sampler (shared between API + display)
     let sys_stats = sfgw_hal::SystemStats::new();

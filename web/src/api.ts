@@ -658,6 +658,33 @@ export const api = {
   createWirelessNetwork: (net: WirelessNetworkCreate) => request<{ status: string; id: number }>('/api/v1/wireless', { method: 'POST', body: net }),
   updateWirelessNetwork: (id: number, net: WirelessNetworkCreate) => request<{ status: string }>(`/api/v1/wireless/${id}`, { method: 'PUT', body: net }),
   deleteWirelessNetwork: (id: number) => request<{ status: string }>(`/api/v1/wireless/${id}`, { method: 'DELETE' }),
+
+  // Backup / Restore
+  //
+  // downloadBackup bypasses the normal request() wrapper because the response
+  // is a file download (Content-Disposition: attachment), not a JSON API
+  // response. We still send the auth token and handle E2EE headers manually.
+  downloadBackup: async (): Promise<void> => {
+    const token = localStorage.getItem('token');
+    const hdrs: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) hdrs['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(`${BASE_URL}/api/v1/settings/backup`, { headers: hdrs });
+    if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => res.statusText));
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') ?? '';
+    const match = /filename="?([^"]+)"?/.exec(disposition);
+    const filename = match?.[1] ?? 'sfgw-backup.json';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  },
+  restoreBackup: (backup: unknown) =>
+    request<{ status: string; stats: Record<string, number> }>('/api/v1/settings/restore', { method: 'POST', body: backup }),
 };
 
 export interface WirelessNetwork {

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { api, type UserInfo } from '../api'
 import { Card, PageHeader, Spinner, Button, Modal, Input, Select, Badge } from '../components/ui'
 import { useToast } from '../hooks/useToast'
@@ -29,6 +29,11 @@ export default function Settings() {
   const [newUser, setNewUser] = useState({ username: '', password: '', confirmPassword: '', role: 'admin' })
   const [newPassword, setNewPassword] = useState({ password: '', confirmPassword: '' })
   const [editRole, setEditRole] = useState('')
+  const [backupLoading, setBackupLoading] = useState(false)
+  const [restoreLoading, setRestoreLoading] = useState(false)
+  const [showRestoreConfirm, setShowRestoreConfirm] = useState(false)
+  const [pendingRestore, setPendingRestore] = useState<unknown>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const toast = useToast()
 
   const load = useCallback(async () => {
@@ -101,6 +106,55 @@ export default function Settings() {
       setPersonalities(prev => prev.map(p => ({ ...p, active: p.name === res.active })))
       toast.success(`Personality: ${res.active}`)
     } catch (e: unknown) { toast.error((e as Error).message) }
+  }
+
+  const handleDownloadBackup = async () => {
+    setBackupLoading(true)
+    try {
+      await api.downloadBackup()
+      toast.success('Backup downloaded')
+    } catch (e: unknown) { toast.error((e as Error).message) }
+    finally { setBackupLoading(false) }
+  }
+
+  const handleRestoreFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result as string)
+        if (!data.format_version) {
+          toast.error('Invalid backup file: missing format_version')
+          return
+        }
+        setPendingRestore(data)
+        setShowRestoreConfirm(true)
+      } catch {
+        toast.error('Invalid backup file: not valid JSON')
+      }
+    }
+    reader.readAsText(file)
+    // Reset file input so the same file can be selected again
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  const handleConfirmRestore = async () => {
+    if (!pendingRestore) return
+    setShowRestoreConfirm(false)
+    setRestoreLoading(true)
+    try {
+      const res = await api.restoreBackup(pendingRestore)
+      const counts = Object.entries(res.stats ?? {})
+        .map(([k, v]) => `${k}: ${v}`)
+        .join(', ')
+      toast.success(`Configuration restored (${counts})`)
+      load()
+    } catch (e: unknown) { toast.error((e as Error).message) }
+    finally {
+      setRestoreLoading(false)
+      setPendingRestore(null)
+    }
   }
 
   if (loading) return <Spinner label="Loading settings..." />
@@ -352,8 +406,40 @@ export default function Settings() {
       </Modal>
 
       <Card title="Backup / Restore">
-        <p className="text-sm text-navy-500">Configuration backup and restore will be available in a future release.</p>
+        <p className="text-sm text-navy-500 mb-4">
+          Export or import gateway configuration. Secrets (VPN keys, wireless passwords, WAN credentials) are not included in backups and must be re-entered after restore. Devices must re-adopt.
+        </p>
+        <div className="flex gap-3">
+          <Button onClick={handleDownloadBackup} disabled={backupLoading}>
+            {backupLoading ? 'Exporting...' : 'Download Backup'}
+          </Button>
+          <Button variant="secondary" onClick={() => fileInputRef.current?.click()} disabled={restoreLoading}>
+            {restoreLoading ? 'Restoring...' : 'Restore from Backup'}
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            className="hidden"
+            onChange={handleRestoreFile}
+          />
+        </div>
       </Card>
+
+      <Modal open={showRestoreConfirm} onClose={() => { setShowRestoreConfirm(false); setPendingRestore(null) }} title="Confirm Restore">
+        <div className="space-y-4">
+          <p className="text-sm text-navy-400">
+            This will overwrite the current gateway configuration with the backup file. All existing networks, firewall rules, VPN tunnels, wireless networks, and interface settings will be replaced.
+          </p>
+          <p className="text-sm text-red-400 font-medium">
+            Secrets (VPN private keys, wireless passwords) are not included in backups. You will need to re-enter them. Devices must re-adopt.
+          </p>
+          <div className="flex gap-2 pt-2">
+            <Button variant="danger" onClick={handleConfirmRestore}>Restore Configuration</Button>
+            <Button variant="secondary" onClick={() => { setShowRestoreConfirm(false); setPendingRestore(null) }}>Cancel</Button>
+          </div>
+        </div>
+      </Modal>
 
       <Card title="Firmware">
         <div className="flex items-center gap-4">
