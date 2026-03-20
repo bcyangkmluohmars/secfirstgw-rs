@@ -761,8 +761,32 @@ mod tests {
 
         let result = render_template(&cfg, &[], &[], &[]).unwrap();
         assert!(!result.contains("stop-dns-rebind"));
-        // DNSSEC block is commented out in template (UDM stock dnsmasq lacks support).
-        // The word "dnssec" appears in comments, but no active dnssec directive should be present.
+        // When dnssec=false, the "dnssec" directive must not appear as an active line.
+        assert!(
+            !result.lines().any(|l| l.trim() == "dnssec"),
+            "dnssec directive must not be active when dnssec=false"
+        );
+    }
+
+    #[test]
+    fn test_dnssec_enabled() {
+        let cfg = DnsConfig {
+            dnssec: true,
+            ..DnsConfig::default()
+        };
+        let result = render_template(&cfg, &[], &[], &[]).unwrap();
+        assert!(
+            result.lines().any(|l| l.trim() == "dnssec"),
+            "dnssec directive must be active when dnssec=true"
+        );
+        assert!(
+            result.contains("trust-anchor=.,20326"),
+            "DNSSEC trust anchor for root zone must be present"
+        );
+        assert!(
+            result.contains("proxy-dnssec"),
+            "proxy-dnssec must be enabled to forward AD flag to clients"
+        );
     }
 
     #[test]

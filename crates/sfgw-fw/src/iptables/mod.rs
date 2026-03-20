@@ -533,25 +533,37 @@ pub fn filter_config_to_ipv6(config: &str) -> String {
                 "-A SFGW-INPUT -p icmpv6 --icmpv6-type echo-request -m limit --limit 5/sec -j ACCEPT"
             )
             .unwrap();
-            // ICMPv6 NDP — required for IPv6 to function at all.
+            // ICMPv6 NDP — required for IPv6 to function at all, but rate-limited
+            // to prevent NDP flood attacks.
             writeln!(
                 out,
-                "-A SFGW-INPUT -p icmpv6 --icmpv6-type neighbor-solicitation -j ACCEPT"
+                "-A SFGW-INPUT -p icmpv6 --icmpv6-type neighbor-solicitation -m limit --limit 100/sec --limit-burst 200 -j ACCEPT"
             )
             .unwrap();
             writeln!(
                 out,
-                "-A SFGW-INPUT -p icmpv6 --icmpv6-type neighbor-advertisement -j ACCEPT"
+                "-A SFGW-INPUT -p icmpv6 --icmpv6-type neighbor-advertisement -m limit --limit 100/sec --limit-burst 200 -j ACCEPT"
             )
             .unwrap();
             writeln!(
                 out,
-                "-A SFGW-INPUT -p icmpv6 --icmpv6-type router-solicitation -j ACCEPT"
+                "-A SFGW-INPUT -p icmpv6 --icmpv6-type router-solicitation -m limit --limit 10/sec --limit-burst 20 -j ACCEPT"
             )
             .unwrap();
             writeln!(
                 out,
-                "-A SFGW-INPUT -p icmpv6 --icmpv6-type router-advertisement -j ACCEPT"
+                "-A SFGW-INPUT -p icmpv6 --icmpv6-type router-advertisement -m limit --limit 10/sec --limit-burst 20 -j ACCEPT"
+            )
+            .unwrap();
+            // DHCPv6 — client (546) and server (547) ports.
+            writeln!(
+                out,
+                "-A SFGW-INPUT -p udp --dport 546 -j ACCEPT -m comment --comment \"DHCPv6 client\""
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "-A SFGW-INPUT -p udp --dport 547 -j ACCEPT -m comment --comment \"DHCPv6 server\""
             )
             .unwrap();
             continue;
@@ -565,6 +577,25 @@ pub fn filter_config_to_ipv6(config: &str) -> String {
         out.push_str(line);
         out.push('\n');
     }
+
+    // Link-local (fe80::/10) filtering: drop link-local sourced packets
+    // from WAN/DMZ/GUEST zones in the FORWARD chain. Link-local traffic
+    // should never cross zone boundaries.
+    writeln!(
+        out,
+        "# ── IPv6 link-local zone isolation ──"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "-A SFGW-FORWARD -s fe80::/10 -j DROP -m comment --comment \"drop link-local forwards\""
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "-A SFGW-FORWARD -d fe80::/10 -j DROP -m comment --comment \"drop link-local forwards\""
+    )
+    .unwrap();
 
     out
 }

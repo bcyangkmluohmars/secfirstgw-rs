@@ -31,12 +31,16 @@ rebind-localhost-ok
 {% endif %}
 
 # ---------- Security: DNSSEC ----------
-# Note: requires dnsmasq compiled with DNSSEC support (--enable-dnssec).
-# UDM/USG stock dnsmasq lacks this. Enable when using a custom build.
-# {% if dnssec %}
-# dnssec
-# trust-anchor=.,20326,8,2,E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D
-# {% endif %}
+{% if dnssec %}
+# DNSSEC validation enabled — requires dnsmasq compiled with --enable-dnssec.
+dnssec
+trust-anchor=.,20326,8,2,E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D
+# Forward DNSSEC results to clients (sets AD flag).
+proxy-dnssec
+{% else %}
+# DNSSEC disabled (stock UDM dnsmasq lacks --enable-dnssec support).
+# Enable via DNS settings when running a custom dnsmasq build.
+{% endif %}
 
 # ---------- Security: No Open Resolver ----------
 # Bind only to LAN/MGMT interfaces + loopback (for system resolver), never WAN
