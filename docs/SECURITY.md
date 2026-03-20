@@ -6,7 +6,7 @@
 
 ### Contact
 
-Email: **security@bcyangkmluohmars.dev**
+Email: **security@stageone.solutions**
 
 If you prefer encrypted communication, use our PGP key (available on request at the same address).
 
