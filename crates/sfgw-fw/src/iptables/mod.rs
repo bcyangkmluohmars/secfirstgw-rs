@@ -6,7 +6,9 @@
 //! iptables-legacy exclusively. All rules are generated in
 //! `iptables-restore` format and applied atomically.
 
-use crate::{Action, FirewallPolicy, FirewallRule, FirewallZone, PortForward, ZonePolicy};
+use crate::{
+    Action, CustomZone, FirewallPolicy, FirewallRule, FirewallZone, PortForward, ZonePolicy,
+};
 use anyhow::{Context, Result, bail};
 use std::fmt::Write;
 use std::net::IpAddr;
@@ -248,8 +250,9 @@ pub fn generate_ruleset_with_forwards(
         }
 
         // Allow forwarded traffic to reach DNAT destinations.
+        // Legacy mode: no WAN interface info available, passes empty slice.
         for fwd in forwards.iter().filter(|f| f.enabled) {
-            if let Err(e) = emit_port_forward_accept(out, fwd) {
+            if let Err(e) = emit_port_forward_accept(out, fwd, &[]) {
                 tracing::error!("skipping invalid port forward accept: {e}");
             }
         }
@@ -279,10 +282,25 @@ pub fn generate_ruleset_with_forwards(
 /// Pipes config to `iptables-restore`. On failure the old rules remain.
 /// Validate that a generated ruleset won't lock us out.
 /// Refuses to apply if SSH (port 22) is not ACCEPT'd on any interface.
+///
+/// Checks the actual rule structure (protocol TCP, destination port 22,
+/// ACCEPT action) rather than string matching on the whole line. This
+/// prevents bypass via crafted comments containing "ssh" or "--dport 22".
 fn validate_no_lockout(config: &str) -> Result<()> {
-    let has_ssh_accept = config
-        .lines()
-        .any(|l| l.contains("--dport 22") && l.contains("-j ACCEPT"));
+    let has_ssh_accept = config.lines().any(|line| {
+        // Strip the comment portion to prevent bypass via crafted comments.
+        let rule_part = if let Some(idx) = line.find("-m comment") {
+            &line[..idx]
+        } else {
+            line
+        };
+
+        // Must be a rule line (starts with -A), target TCP port 22, and ACCEPT.
+        rule_part.starts_with("-A SFGW-INPUT")
+            && rule_part.contains("-p tcp")
+            && rule_part.contains("--dport 22")
+            && rule_part.contains("-j ACCEPT")
+    });
     if !has_ssh_accept {
         bail!(
             "REFUSING to apply ruleset: no SSH ACCEPT rule found — would lock out all management access"
@@ -682,6 +700,20 @@ pub fn generate_zone_ruleset(
     policy: &FirewallPolicy,
     forwards: &[PortForward],
 ) -> String {
+    generate_zone_ruleset_with_custom(zones, rules, policy, forwards, &[])
+}
+
+/// Generate a zone-aware ruleset including custom zone policies.
+///
+/// Custom zones (IoT, VPN, user-defined) get their iptables rules generated
+/// from the `custom_zones` DB table configuration.
+pub fn generate_zone_ruleset_with_custom(
+    zones: &[ZonePolicy],
+    rules: &[FirewallRule],
+    policy: &FirewallPolicy,
+    forwards: &[PortForward],
+    custom_zones: &[CustomZone],
+) -> String {
     // INVARIANT: All writeln!(out, ...).unwrap() calls write to a String.
     // fmt::Write for String is infallible -- it can only fail on OOM which aborts.
     let mut out = String::with_capacity(8192);
@@ -699,6 +731,16 @@ pub fn generate_zone_ruleset(
     let dmz_ifaces = zone_interfaces(zones, &FirewallZone::Dmz);
     let mgmt_ifaces = zone_interfaces(zones, &FirewallZone::Mgmt);
     let guest_ifaces = zone_interfaces(zones, &FirewallZone::Guest);
+
+    // Collect custom zone interfaces.
+    let custom_iface_sets: Vec<(&CustomZone, Vec<&str>)> = custom_zones
+        .iter()
+        .map(|cz| {
+            let zone = FirewallZone::from_role(&cz.name);
+            let ifaces = zone_interfaces(zones, &zone);
+            (cz, ifaces)
+        })
+        .collect();
 
     // ── *filter table ──────────────────────────────────────────────
     emit_filter_table(&mut out, policy, |out| {
@@ -740,18 +782,56 @@ pub fn generate_zone_ruleset(
             );
         }
 
-        // Port forwarding accept rules.
+        // Custom zone rules (IoT, VPN, user-defined).
+        for (cz, cz_ifaces) in &custom_iface_sets {
+            if !cz_ifaces.is_empty() {
+                emit_custom_zone_rules(
+                    out,
+                    cz,
+                    cz_ifaces,
+                    &wan_ifaces,
+                    &lan_ifaces,
+                    &mgmt_ifaces,
+                    &dmz_ifaces,
+                );
+            }
+        }
+
+        // Port forwarding accept rules (WAN-only: restricts to WAN input interfaces).
         for fwd in forwards.iter().filter(|f| f.enabled) {
-            if let Err(e) = emit_port_forward_accept(out, fwd) {
+            if let Err(e) = emit_port_forward_accept(out, fwd, &wan_ifaces) {
                 tracing::error!("skipping invalid port forward accept: {e}");
             }
         }
 
-        // User-defined rules from DB.
+        // User-defined rules from DB (inserted BEFORE zone catch-all DROPs).
         if !rules.is_empty() {
             writeln!(out, "# ── User-defined rules ──").unwrap();
             for rule in rules {
                 emit_single_rule(out, rule, zones);
+            }
+        }
+
+        // Zone catch-all DROP rules — MUST be LAST in each chain so that
+        // user-defined rules above are evaluated first.
+        emit_zone_catchall_drops(
+            out,
+            &wan_ifaces,
+            &lan_ifaces,
+            &dmz_ifaces,
+            &mgmt_ifaces,
+            &guest_ifaces,
+        );
+
+        // Custom zone catch-all DROPs (also must be last).
+        for (cz, cz_ifaces) in &custom_iface_sets {
+            for iface in cz_ifaces {
+                writeln!(
+                    out,
+                    "-A SFGW-INPUT -i {iface} -j DROP -m comment --comment \"drop all other {} input\"",
+                    sanitize_comment(&cz.name),
+                )
+                .unwrap();
             }
         }
     });
@@ -1127,12 +1207,8 @@ fn emit_wan_zone_rules(out: &mut String, wan_ifaces: &[&str]) {
         )
         .unwrap();
 
-        // Catch-all: drop everything else on WAN.
-        writeln!(
-            out,
-            "-A SFGW-INPUT -i {iface} -j DROP -m comment --comment \"drop all WAN input\""
-        )
-        .unwrap();
+        // Note: catch-all DROP moved to emit_zone_catchall_drops() so user
+        // rules inserted after zone rules are evaluated before the final DROP.
     }
 
     writeln!(out).unwrap();
@@ -1187,14 +1263,8 @@ fn emit_lan_zone_rules(
         )
         .unwrap();
 
-        // Catch-all: drop everything else on LAN.
-        // Without this, unmatched packets return to INPUT where platform
-        // rules (WiFiman, UniFi API, guest portal) would ACCEPT them.
-        writeln!(
-            out,
-            "-A SFGW-INPUT -i {iface} -j DROP -m comment --comment \"drop all other LAN input\""
-        )
-        .unwrap();
+        // Note: catch-all DROP moved to emit_zone_catchall_drops() so user
+        // rules inserted after zone rules are evaluated before the final DROP.
     }
 
     // Forward LAN to WAN (outbound internet).
@@ -1252,12 +1322,8 @@ fn emit_dmz_zone_rules(
         )
         .unwrap();
 
-        // Catch-all: drop everything else on DMZ.
-        writeln!(
-            out,
-            "-A SFGW-INPUT -i {iface} -j DROP -m comment --comment \"drop all other DMZ input\""
-        )
-        .unwrap();
+        // Note: catch-all DROP moved to emit_zone_catchall_drops() so user
+        // rules inserted after zone rules are evaluated before the final DROP.
     }
 
     // Block DMZ to LAN forwarding.
@@ -1346,13 +1412,8 @@ fn emit_mgmt_zone_rules(
         )
         .unwrap();
 
-        // Catch-all: drop everything else on MGMT.
-        // Even MGMT only gets the services it needs — no platform leftovers.
-        writeln!(
-            out,
-            "-A SFGW-INPUT -i {iface} -j DROP -m comment --comment \"drop all other MGMT input\""
-        )
-        .unwrap();
+        // Note: catch-all DROP moved to emit_zone_catchall_drops() so user
+        // rules inserted after zone rules are evaluated before the final DROP.
     }
 
     // MGMT can reach all internal zones.
@@ -1443,12 +1504,8 @@ fn emit_guest_zone_rules(
         )
         .unwrap();
 
-        // Explicitly drop all other input from GUEST.
-        writeln!(
-            out,
-            "-A SFGW-INPUT -i {iface} -j DROP -m comment --comment \"block all other GUEST input\""
-        )
-        .unwrap();
+        // Note: catch-all DROP moved to emit_zone_catchall_drops() so user
+        // rules inserted after zone rules are evaluated before the final DROP.
     }
 
     // Block GUEST to all internal zones.
@@ -1485,6 +1542,188 @@ fn emit_guest_zone_rules(
             )
             .unwrap();
         }
+    }
+
+    writeln!(out).unwrap();
+}
+
+/// Custom zone rules: generated from DB `custom_zones` table config.
+///
+/// Security model:
+/// - **IoT-like** (outbound=accept, forward=drop): internet access only, no inter-VLAN.
+/// - **VPN-like** (outbound=accept, forward=drop + LAN allow): LAN access, no MGMT/DMZ.
+/// - **Custom**: fully user-defined inbound/outbound/forward policies.
+///
+/// All custom zones:
+/// - Always block SSH (22), HTTPS (443), HTTP (80), Inform (8080) to gateway.
+/// - Always block access to MGMT zone (security invariant).
+/// - DNS and DHCP to gateway are allowed if in `allowed_services`.
+fn emit_custom_zone_rules(
+    out: &mut String,
+    cz: &CustomZone,
+    cz_ifaces: &[&str],
+    wan_ifaces: &[&str],
+    lan_ifaces: &[&str],
+    mgmt_ifaces: &[&str],
+    dmz_ifaces: &[&str],
+) {
+    let safe_name = sanitize_comment(&cz.name);
+    writeln!(out, "# ── Custom zone rules: {} ──", safe_name).unwrap();
+
+    for iface in cz_ifaces {
+        // Security invariant: always block management ports on custom zones.
+        writeln!(
+            out,
+            "-A SFGW-INPUT -i {iface} -p tcp --dport 22 -j DROP -m comment --comment \"no SSH on {safe_name}\""
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "-A SFGW-INPUT -i {iface} -p tcp --dport 443 -j DROP -m comment --comment \"no web UI on {safe_name}\""
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "-A SFGW-INPUT -i {iface} -p tcp --dport 80 -j DROP -m comment --comment \"no HTTP on {safe_name}\""
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "-A SFGW-INPUT -i {iface} -p tcp --dport 8080 -j DROP -m comment --comment \"no Inform on {safe_name}\""
+        )
+        .unwrap();
+
+        // Allowed services to the gateway (e.g., DNS, DHCP).
+        for svc in &cz.allowed_services {
+            let proto = svc.protocol.to_lowercase();
+            if validate_protocol(&proto).is_err() {
+                tracing::error!(
+                    "skipping invalid protocol '{}' in custom zone '{}'",
+                    svc.protocol,
+                    cz.name
+                );
+                continue;
+            }
+            let port_label = format!("port {}", svc.port);
+            let svc_desc = svc.description.as_deref().unwrap_or(&port_label);
+            let svc_comment = sanitize_comment(svc_desc);
+            writeln!(
+                out,
+                "-A SFGW-INPUT -i {iface} -p {proto} --dport {} -j ACCEPT -m comment --comment \"{svc_comment} on {safe_name}\"",
+                svc.port,
+            )
+            .unwrap();
+        }
+    }
+
+    // Forward rules based on policy.
+    let fwd_target = action_to_target(&cz.policy_forward);
+
+    // Security invariant: always block custom zone -> MGMT forwarding regardless of policy.
+    for cz_iface in cz_ifaces {
+        for mgmt in mgmt_ifaces {
+            writeln!(
+                out,
+                "-A SFGW-FORWARD -i {cz_iface} -o {mgmt} -j DROP -m comment --comment \"block {safe_name} to MGMT\""
+            )
+            .unwrap();
+        }
+    }
+
+    // Forward to WAN: controlled by outbound policy.
+    let out_target = action_to_target(&cz.policy_outbound);
+    for cz_iface in cz_ifaces {
+        for wan in wan_ifaces {
+            writeln!(
+                out,
+                "-A SFGW-FORWARD -i {cz_iface} -o {wan} -j {out_target} -m comment --comment \"{safe_name} to WAN\""
+            )
+            .unwrap();
+        }
+    }
+
+    // Forward to LAN: VPN zones get ACCEPT, IoT/custom get their forward policy.
+    // Check if this is a VPN-like zone (name contains "vpn").
+    let is_vpn_like = cz.name.contains("vpn");
+    let lan_fwd = if is_vpn_like {
+        "ACCEPT"
+    } else {
+        fwd_target
+    };
+    for cz_iface in cz_ifaces {
+        for lan in lan_ifaces {
+            writeln!(
+                out,
+                "-A SFGW-FORWARD -i {cz_iface} -o {lan} -j {lan_fwd} -m comment --comment \"{safe_name} to LAN\""
+            )
+            .unwrap();
+        }
+    }
+
+    // Forward to DMZ: controlled by forward policy.
+    for cz_iface in cz_ifaces {
+        for dmz in dmz_ifaces {
+            writeln!(
+                out,
+                "-A SFGW-FORWARD -i {cz_iface} -o {dmz} -j {fwd_target} -m comment --comment \"{safe_name} to DMZ\""
+            )
+            .unwrap();
+        }
+    }
+
+    writeln!(out).unwrap();
+}
+
+/// Emit catch-all DROP rules for all zones.
+///
+/// These MUST be emitted LAST in the filter table so that user-defined rules
+/// (inserted between zone-specific ACCEPT rules and these DROPs) are evaluated
+/// before the catch-all. This fixes the issue where user rules after zone
+/// catch-all DROPs were silently ignored.
+fn emit_zone_catchall_drops(
+    out: &mut String,
+    wan_ifaces: &[&str],
+    lan_ifaces: &[&str],
+    dmz_ifaces: &[&str],
+    mgmt_ifaces: &[&str],
+    guest_ifaces: &[&str],
+) {
+    writeln!(out, "# ── Zone catch-all DROPs (must be last) ──").unwrap();
+
+    for iface in wan_ifaces {
+        writeln!(
+            out,
+            "-A SFGW-INPUT -i {iface} -j DROP -m comment --comment \"drop all WAN input\""
+        )
+        .unwrap();
+    }
+    for iface in lan_ifaces {
+        writeln!(
+            out,
+            "-A SFGW-INPUT -i {iface} -j DROP -m comment --comment \"drop all other LAN input\""
+        )
+        .unwrap();
+    }
+    for iface in dmz_ifaces {
+        writeln!(
+            out,
+            "-A SFGW-INPUT -i {iface} -j DROP -m comment --comment \"drop all other DMZ input\""
+        )
+        .unwrap();
+    }
+    for iface in mgmt_ifaces {
+        writeln!(
+            out,
+            "-A SFGW-INPUT -i {iface} -j DROP -m comment --comment \"drop all other MGMT input\""
+        )
+        .unwrap();
+    }
+    for iface in guest_ifaces {
+        writeln!(
+            out,
+            "-A SFGW-INPUT -i {iface} -j DROP -m comment --comment \"block all other GUEST input\""
+        )
+        .unwrap();
     }
 
     writeln!(out).unwrap();
@@ -1548,7 +1787,16 @@ fn emit_port_forward_dnat(out: &mut String, fwd: &PortForward, wan_ifaces: &[&st
 }
 
 /// Emit a forward accept rule for port-forwarded traffic.
-fn emit_port_forward_accept(out: &mut String, fwd: &PortForward) -> Result<()> {
+///
+/// ACCEPT rules are restricted to WAN input interfaces only. Port forwards
+/// from the internet should not create ACCEPT rules that also apply to
+/// LAN/DMZ/MGMT traffic — that would let internal hosts bypass zone policy
+/// by sending traffic to the DNAT destination directly.
+fn emit_port_forward_accept(
+    out: &mut String,
+    fwd: &PortForward,
+    wan_ifaces: &[&str],
+) -> Result<()> {
     let proto = fwd.protocol.to_lowercase();
     validate_protocol(&proto)?;
     let _ip: IpAddr = fwd
@@ -1558,12 +1806,35 @@ fn emit_port_forward_accept(out: &mut String, fwd: &PortForward) -> Result<()> {
 
     let comment = sanitize_comment(fwd.comment.as_deref().unwrap_or("port forward"));
 
-    writeln!(
-        out,
-        "-A SFGW-FORWARD -d {} -p {proto} --dport {} -j ACCEPT -m comment --comment \"allow fwd: {comment}\"",
-        fwd.internal_ip, fwd.internal_port,
-    )
-    .unwrap();
+    if let Some(ref iface) = fwd.wan_interface {
+        // Specific WAN interface binding.
+        validate_interface_name(iface)
+            .with_context(|| format!("invalid wan_interface in port forward: {iface}"))?;
+        writeln!(
+            out,
+            "-A SFGW-FORWARD -i {iface} -d {} -p {proto} --dport {} -j ACCEPT -m comment --comment \"allow fwd: {comment}\"",
+            fwd.internal_ip, fwd.internal_port,
+        )
+        .unwrap();
+    } else if !wan_ifaces.is_empty() {
+        // Zone mode: restrict to all WAN interfaces.
+        for iface in wan_ifaces {
+            writeln!(
+                out,
+                "-A SFGW-FORWARD -i {iface} -d {} -p {proto} --dport {} -j ACCEPT -m comment --comment \"allow fwd: {comment}\"",
+                fwd.internal_ip, fwd.internal_port,
+            )
+            .unwrap();
+        }
+    } else {
+        // Legacy mode (no zones): no interface restriction available.
+        writeln!(
+            out,
+            "-A SFGW-FORWARD -d {} -p {proto} --dport {} -j ACCEPT -m comment --comment \"allow fwd: {comment}\"",
+            fwd.internal_ip, fwd.internal_port,
+        )
+        .unwrap();
+    }
 
     Ok(())
 }

@@ -10,6 +10,7 @@
 
 pub mod ids_response;
 pub mod iptables;
+pub mod qos;
 pub mod wan;
 
 use anyhow::Context;
@@ -44,6 +45,22 @@ pub enum FwError {
     /// iptables command failed.
     #[error("iptables command failed: {0}")]
     IptablesFailed(String),
+
+    /// Custom zone not found.
+    #[error("custom zone id={0} not found")]
+    CustomZoneNotFound(i64),
+
+    /// Custom zone name conflict.
+    #[error("custom zone name '{0}' already exists")]
+    CustomZoneNameConflict(String),
+
+    /// Custom zone VLAN conflict.
+    #[error("VLAN {0} already assigned to another zone")]
+    CustomZoneVlanConflict(u16),
+
+    /// Validation error.
+    #[error("validation error: {0}")]
+    Validation(String),
 
     /// WAN routing command failed.
     #[error("WAN routing error: {0}")]
@@ -126,6 +143,111 @@ pub struct ZonePolicy {
     pub interfaces: Vec<String>,
     /// VLAN ID from the networks table. `None` for WAN (pvid=0, not an internal VLAN).
     pub vlan_id: Option<u16>,
+}
+
+// ── Custom zone model ───────────────────────────────────────────────
+
+/// A user-defined custom zone (IoT, VPN, or fully custom).
+///
+/// Custom zones are stored in the `custom_zones` DB table and generate
+/// iptables rules based on their policy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomZone {
+    pub id: Option<i64>,
+    pub name: String,
+    pub vlan_id: u16,
+    pub policy_inbound: Action,
+    pub policy_outbound: Action,
+    pub policy_forward: Action,
+    pub allowed_services: Vec<AllowedService>,
+    pub description: String,
+}
+
+/// A service allowed through a custom zone's firewall policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllowedService {
+    pub protocol: String,
+    pub port: u16,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Request to create or update a custom zone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomZoneRequest {
+    pub name: String,
+    pub vlan_id: u16,
+    #[serde(default = "default_drop")]
+    pub policy_inbound: Action,
+    #[serde(default = "default_drop")]
+    pub policy_outbound: Action,
+    #[serde(default = "default_drop")]
+    pub policy_forward: Action,
+    #[serde(default)]
+    pub allowed_services: Vec<AllowedService>,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// Request to update only a custom zone's policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomZonePolicyUpdate {
+    pub policy_inbound: Action,
+    pub policy_outbound: Action,
+    pub policy_forward: Action,
+    #[serde(default)]
+    pub allowed_services: Vec<AllowedService>,
+}
+
+fn default_drop() -> Action {
+    Action::Drop
+}
+
+/// Validate a custom zone name: lowercase alphanumeric + hyphens, 1-32 chars,
+/// must start with a letter, must not collide with built-in zone names.
+#[must_use]
+pub fn validate_zone_name(name: &str) -> Result<(), FwError> {
+    if name.is_empty() || name.len() > 32 {
+        return Err(FwError::Validation(
+            "zone name must be 1-32 characters".to_string(),
+        ));
+    }
+
+    if !name.chars().next().map_or(false, |c| c.is_ascii_lowercase()) {
+        return Err(FwError::Validation(
+            "zone name must start with a lowercase letter".to_string(),
+        ));
+    }
+
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(FwError::Validation(
+            "zone name may only contain lowercase letters, digits, and hyphens".to_string(),
+        ));
+    }
+
+    // Built-in zone names cannot be used.
+    const RESERVED: &[&str] = &["wan", "lan", "dmz", "guest", "mgmt", "void"];
+    if RESERVED.contains(&name) {
+        return Err(FwError::Validation(format!(
+            "'{name}' is a reserved zone name"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate a VLAN ID for custom zones: 2-4094 (VLAN 0 is WAN, VLAN 1 is void).
+#[must_use]
+pub fn validate_custom_vlan_id(vlan_id: u16) -> Result<(), FwError> {
+    if vlan_id < 2 || vlan_id > 4094 {
+        return Err(FwError::Validation(
+            "VLAN ID must be between 2 and 4094".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 // ── WAN failover / load-balance ─────────────────────────────────────
@@ -437,13 +559,20 @@ pub async fn apply_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
     let rules = load_enabled_rules(db).await?;
     let zones = load_interface_zones(db).await?;
     let wan_groups = load_wan_groups(db).await?;
+    let custom_zones = load_custom_zones(db).await.unwrap_or_default();
     let policy = FirewallPolicy::default();
 
     let config = if zones.is_empty() {
         // Fallback to legacy generation when no zones are configured.
         iptables::generate_ruleset(&rules, &policy)
     } else {
-        iptables::generate_zone_ruleset(&zones, &rules, &policy, &[])
+        iptables::generate_zone_ruleset_with_custom(
+            &zones,
+            &rules,
+            &policy,
+            &[],
+            &custom_zones,
+        )
     };
 
     iptables::apply_ruleset(&config).await?;
@@ -617,6 +746,335 @@ pub async fn save_wan_groups(db: &sfgw_db::Db, groups: &[WanGroup]) -> Result<()
     .context("failed to save wan_groups to meta table")?;
     tracing::info!("saved {} WAN groups to database", groups.len());
     Ok(())
+}
+
+// ── Custom zone DB CRUD ─────────────────────────────────────────────
+
+/// Parse an `Action` from a policy string ("drop", "accept").
+fn parse_action(s: &str) -> Action {
+    match s.to_lowercase().as_str() {
+        "accept" => Action::Accept,
+        _ => Action::Drop,
+    }
+}
+
+/// Serialize an `Action` to a policy string for DB storage.
+fn action_to_str(a: &Action) -> &'static str {
+    match a {
+        Action::Accept => "accept",
+        Action::Drop => "drop",
+        Action::Reject => "reject",
+        Action::Masquerade => "masquerade",
+    }
+}
+
+/// Load all custom zones from the database.
+pub async fn load_custom_zones(db: &sfgw_db::Db) -> Result<Vec<CustomZone>, FwError> {
+    let conn = db.lock().await;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, vlan_id, policy_inbound, policy_outbound, \
+             policy_forward, allowed_services, description \
+             FROM custom_zones ORDER BY name",
+        )
+        .context("failed to prepare custom_zones query")?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u16>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })
+        .context("failed to query custom_zones")?;
+
+    let mut zones = Vec::new();
+    for row in rows {
+        let (id, name, vlan_id, pol_in, pol_out, pol_fwd, services_json, description) =
+            row.context("failed to read custom_zones row")?;
+
+        let allowed_services: Vec<AllowedService> =
+            serde_json::from_str(&services_json).unwrap_or_default();
+
+        zones.push(CustomZone {
+            id: Some(id),
+            name,
+            vlan_id,
+            policy_inbound: parse_action(&pol_in),
+            policy_outbound: parse_action(&pol_out),
+            policy_forward: parse_action(&pol_fwd),
+            allowed_services,
+            description,
+        });
+    }
+
+    tracing::info!("loaded {} custom zones from database", zones.len());
+    Ok(zones)
+}
+
+/// Get a single custom zone by ID.
+pub async fn get_custom_zone(db: &sfgw_db::Db, id: i64) -> Result<CustomZone, FwError> {
+    let conn = db.lock().await;
+    let result = conn.query_row(
+        "SELECT id, name, vlan_id, policy_inbound, policy_outbound, \
+         policy_forward, allowed_services, description \
+         FROM custom_zones WHERE id = ?1",
+        rusqlite::params![id],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u16>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        },
+    );
+
+    match result {
+        Ok((id, name, vlan_id, pol_in, pol_out, pol_fwd, services_json, description)) => {
+            let allowed_services: Vec<AllowedService> =
+                serde_json::from_str(&services_json).unwrap_or_default();
+            Ok(CustomZone {
+                id: Some(id),
+                name,
+                vlan_id,
+                policy_inbound: parse_action(&pol_in),
+                policy_outbound: parse_action(&pol_out),
+                policy_forward: parse_action(&pol_fwd),
+                allowed_services,
+                description,
+            })
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err(FwError::CustomZoneNotFound(id)),
+        Err(e) => Err(FwError::Database(e)),
+    }
+}
+
+/// Insert a new custom zone. Returns the new row ID.
+///
+/// Validates name, VLAN ID, and checks for conflicts with existing zones.
+pub async fn insert_custom_zone(db: &sfgw_db::Db, req: &CustomZoneRequest) -> Result<i64, FwError> {
+    validate_zone_name(&req.name)?;
+    validate_custom_vlan_id(req.vlan_id)?;
+
+    let services_json =
+        serde_json::to_string(&req.allowed_services).context("failed to serialize services")?;
+
+    let conn = db.lock().await;
+
+    // Check VLAN conflict with networks table (built-in zones).
+    let vlan_conflict: Option<String> = conn
+        .query_row(
+            "SELECT zone FROM networks WHERE vlan_id = ?1",
+            rusqlite::params![req.vlan_id],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(existing_zone) = vlan_conflict {
+        return Err(FwError::Validation(format!(
+            "VLAN {} is already used by built-in zone '{}'",
+            req.vlan_id, existing_zone
+        )));
+    }
+
+    let result = conn.execute(
+        "INSERT INTO custom_zones (name, vlan_id, policy_inbound, policy_outbound, \
+         policy_forward, allowed_services, description) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            req.name,
+            req.vlan_id,
+            action_to_str(&req.policy_inbound),
+            action_to_str(&req.policy_outbound),
+            action_to_str(&req.policy_forward),
+            services_json,
+            req.description,
+        ],
+    );
+
+    match result {
+        Ok(_) => {
+            let id = conn.last_insert_rowid();
+            tracing::info!(id, name = %req.name, vlan_id = req.vlan_id, "inserted custom zone");
+            Ok(id)
+        }
+        Err(e) if e.to_string().contains("UNIQUE constraint failed: custom_zones.name") => {
+            Err(FwError::CustomZoneNameConflict(req.name.clone()))
+        }
+        Err(e) if e.to_string().contains("UNIQUE constraint failed: custom_zones.vlan_id")
+            || e.to_string().contains("idx_custom_zones_vlan_id") =>
+        {
+            Err(FwError::CustomZoneVlanConflict(req.vlan_id))
+        }
+        Err(e) => Err(FwError::Database(e)),
+    }
+}
+
+/// Update an existing custom zone.
+pub async fn update_custom_zone(
+    db: &sfgw_db::Db,
+    id: i64,
+    req: &CustomZoneRequest,
+) -> Result<(), FwError> {
+    validate_zone_name(&req.name)?;
+    validate_custom_vlan_id(req.vlan_id)?;
+
+    let services_json =
+        serde_json::to_string(&req.allowed_services).context("failed to serialize services")?;
+
+    let conn = db.lock().await;
+
+    // Check VLAN conflict with networks table (built-in zones).
+    let vlan_conflict: Option<String> = conn
+        .query_row(
+            "SELECT zone FROM networks WHERE vlan_id = ?1",
+            rusqlite::params![req.vlan_id],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(existing_zone) = vlan_conflict {
+        return Err(FwError::Validation(format!(
+            "VLAN {} is already used by built-in zone '{}'",
+            req.vlan_id, existing_zone
+        )));
+    }
+
+    let result = conn.execute(
+        "UPDATE custom_zones SET name = ?1, vlan_id = ?2, policy_inbound = ?3, \
+         policy_outbound = ?4, policy_forward = ?5, allowed_services = ?6, \
+         description = ?7, updated_at = datetime('now') WHERE id = ?8",
+        rusqlite::params![
+            req.name,
+            req.vlan_id,
+            action_to_str(&req.policy_inbound),
+            action_to_str(&req.policy_outbound),
+            action_to_str(&req.policy_forward),
+            services_json,
+            req.description,
+            id,
+        ],
+    );
+
+    match result {
+        Ok(0) => Err(FwError::CustomZoneNotFound(id)),
+        Ok(_) => {
+            tracing::info!(id, name = %req.name, "updated custom zone");
+            Ok(())
+        }
+        Err(e) if e.to_string().contains("UNIQUE constraint failed: custom_zones.name") => {
+            Err(FwError::CustomZoneNameConflict(req.name.clone()))
+        }
+        Err(e) if e.to_string().contains("UNIQUE constraint failed: custom_zones.vlan_id")
+            || e.to_string().contains("idx_custom_zones_vlan_id") =>
+        {
+            Err(FwError::CustomZoneVlanConflict(req.vlan_id))
+        }
+        Err(e) => Err(FwError::Database(e)),
+    }
+}
+
+/// Update only the policy of a custom zone.
+pub async fn update_custom_zone_policy(
+    db: &sfgw_db::Db,
+    id: i64,
+    policy: &CustomZonePolicyUpdate,
+) -> Result<(), FwError> {
+    let services_json =
+        serde_json::to_string(&policy.allowed_services).context("failed to serialize services")?;
+
+    let conn = db.lock().await;
+    let affected = conn
+        .execute(
+            "UPDATE custom_zones SET policy_inbound = ?1, policy_outbound = ?2, \
+             policy_forward = ?3, allowed_services = ?4, updated_at = datetime('now') \
+             WHERE id = ?5",
+            rusqlite::params![
+                action_to_str(&policy.policy_inbound),
+                action_to_str(&policy.policy_outbound),
+                action_to_str(&policy.policy_forward),
+                services_json,
+                id,
+            ],
+        )
+        .context("failed to update custom zone policy")?;
+
+    if affected == 0 {
+        return Err(FwError::CustomZoneNotFound(id));
+    }
+
+    tracing::info!(id, "updated custom zone policy");
+    Ok(())
+}
+
+/// Delete a custom zone by ID.
+pub async fn delete_custom_zone(db: &sfgw_db::Db, id: i64) -> Result<(), FwError> {
+    let conn = db.lock().await;
+    let affected = conn
+        .execute(
+            "DELETE FROM custom_zones WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .context("failed to delete custom zone")?;
+
+    if affected == 0 {
+        return Err(FwError::CustomZoneNotFound(id));
+    }
+
+    tracing::info!(id, "deleted custom zone");
+    Ok(())
+}
+
+/// Build default IoT zone preset.
+pub fn iot_zone_preset(vlan_id: u16) -> CustomZoneRequest {
+    CustomZoneRequest {
+        name: "iot".to_string(),
+        vlan_id,
+        policy_inbound: Action::Drop,
+        policy_outbound: Action::Accept,
+        policy_forward: Action::Drop,
+        allowed_services: vec![
+            AllowedService {
+                protocol: "udp".to_string(),
+                port: 53,
+                description: Some("DNS".to_string()),
+            },
+            AllowedService {
+                protocol: "udp".to_string(),
+                port: 67,
+                description: Some("DHCP".to_string()),
+            },
+        ],
+        description: "IoT devices: internet-only, no inter-VLAN access".to_string(),
+    }
+}
+
+/// Build default VPN zone preset.
+pub fn vpn_zone_preset(vlan_id: u16) -> CustomZoneRequest {
+    CustomZoneRequest {
+        name: "vpn".to_string(),
+        vlan_id,
+        policy_inbound: Action::Drop,
+        policy_outbound: Action::Accept,
+        policy_forward: Action::Drop,
+        allowed_services: vec![
+            AllowedService {
+                protocol: "udp".to_string(),
+                port: 53,
+                description: Some("DNS".to_string()),
+            },
+        ],
+        description: "VPN clients: access to LAN, blocked from MGMT/DMZ".to_string(),
+    }
 }
 
 // ── First-boot default rules ────────────────────────────────────────
