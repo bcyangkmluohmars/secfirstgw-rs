@@ -187,6 +187,11 @@ pub async fn serve(
         )
         .route("/api/v1/wan/{interface}/status", get(wan_status))
         .route("/api/v1/wan/{interface}/reconnect", post(wan_reconnect))
+        .route(
+            "/api/v1/wan/{interface}/health-config",
+            get(wan_health_config_get).put(wan_health_config_set),
+        )
+        .route("/api/v1/wan/flap-log", get(wan_flap_log))
         // Ports (PVID/tagged VLAN per-port config + live reconfiguration)
         .route(
             "/api/v1/ports/{name}",
@@ -195,6 +200,19 @@ pub async fn serve(
         // Zones (read-only VLAN zone view)
         .route("/api/v1/zones", get(zones_list_handler))
         .route("/api/v1/zones/{zone}", get(zone_get_handler))
+        // Custom zones (IoT, VPN, user-defined)
+        .route(
+            "/api/v1/zones/custom",
+            get(custom_zones_list).post(custom_zones_create),
+        )
+        .route(
+            "/api/v1/zones/custom/{id}",
+            put(custom_zones_update).delete(custom_zones_delete),
+        )
+        .route(
+            "/api/v1/zones/custom/{id}/policy",
+            put(custom_zones_update_policy),
+        )
         // Wireless
         .route("/api/v1/wireless", get(wireless_list).post(wireless_create))
         .route(
@@ -243,6 +261,17 @@ pub async fn serve(
         .route("/api/v1/ddns", get(ddns_list).post(ddns_create))
         .route("/api/v1/ddns/{id}", put(ddns_update).delete(ddns_delete))
         .route("/api/v1/ddns/{id}/update", post(ddns_force_update))
+        // QoS / Traffic Shaping
+        .route(
+            "/api/v1/qos/rules",
+            get(qos_list_rules).post(qos_create_rule),
+        )
+        .route(
+            "/api/v1/qos/rules/{id}",
+            put(qos_update_rule).delete(qos_delete_rule),
+        )
+        .route("/api/v1/qos/apply", post(qos_apply))
+        .route("/api/v1/qos/stats", get(qos_stats))
         // Backup / Restore
         .route("/api/v1/settings/backup", get(backup_handler))
         .route("/api/v1/settings/restore", post(restore_handler))
@@ -1586,6 +1615,75 @@ async fn fw_apply_rules(
 ) -> impl IntoResponse {
     match sfgw_fw::apply_rules(&db).await {
         Ok(()) => (StatusCode::OK, Json(json!({ "status": "applied" }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+// ===========================================================================
+// QoS / Traffic Shaping handlers
+// ===========================================================================
+
+async fn qos_list_rules(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_fw::qos::load_rules(&db).await {
+        Ok(rules) => (StatusCode::OK, Json(json!({ "rules": rules }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn qos_create_rule(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(rule): Json<sfgw_fw::qos::QosRule>,
+) -> impl IntoResponse {
+    match sfgw_fw::qos::insert_rule(&db, &rule).await {
+        Ok(id) => (StatusCode::CREATED, Json(json!({ "id": id }))),
+        Err(e) => err_response(StatusCode::UNPROCESSABLE_ENTITY, e),
+    }
+}
+
+async fn qos_update_rule(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+    Json(mut rule): Json<sfgw_fw::qos::QosRule>,
+) -> impl IntoResponse {
+    rule.id = Some(id);
+    match sfgw_fw::qos::update_rule(&db, &rule).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "updated" }))),
+        Err(e) => err_response(StatusCode::NOT_FOUND, e),
+    }
+}
+
+async fn qos_delete_rule(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match sfgw_fw::qos::delete_rule(&db, id).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "deleted" }))),
+        Err(e) => err_response(StatusCode::NOT_FOUND, e),
+    }
+}
+
+async fn qos_apply(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_fw::qos::apply_qos(&db).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "applied" }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn qos_stats(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_fw::qos::get_stats(&db).await {
+        Ok(stats) => (StatusCode::OK, Json(json!({ "stats": stats }))),
         Err(e) => internal_err(e),
     }
 }
@@ -3102,6 +3200,135 @@ async fn zone_get_handler(
             "interfaces": interfaces,
         })),
     )
+}
+
+// ===========================================================================
+// Custom zone handlers — /api/v1/zones/custom
+// ===========================================================================
+
+/// GET /api/v1/zones/custom
+///
+/// List all custom zones (IoT, VPN, user-defined).
+async fn custom_zones_list(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_fw::load_custom_zones(&db).await {
+        Ok(zones) => (StatusCode::OK, Json(json!({ "zones": zones }))),
+        Err(e) => {
+            tracing::error!("custom_zones_list error: {e}");
+            internal_err(anyhow::anyhow!("{e}"))
+        }
+    }
+}
+
+/// POST /api/v1/zones/custom
+///
+/// Create a new custom zone.
+async fn custom_zones_create(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(req): Json<sfgw_fw::CustomZoneRequest>,
+) -> impl IntoResponse {
+    match sfgw_fw::insert_custom_zone(&db, &req).await {
+        Ok(id) => (
+            StatusCode::CREATED,
+            Json(json!({ "id": id, "name": req.name })),
+        ),
+        Err(sfgw_fw::FwError::Validation(msg)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": msg })),
+        ),
+        Err(sfgw_fw::FwError::CustomZoneNameConflict(name)) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!("zone name '{}' already exists", name) })),
+        ),
+        Err(sfgw_fw::FwError::CustomZoneVlanConflict(vid)) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!("VLAN {} already assigned", vid) })),
+        ),
+        Err(e) => {
+            tracing::error!("custom_zones_create error: {e}");
+            internal_err(anyhow::anyhow!("{e}"))
+        }
+    }
+}
+
+/// PUT /api/v1/zones/custom/{id}
+///
+/// Update an existing custom zone.
+async fn custom_zones_update(
+    _auth: AuthUser,
+    Path(id): Path<i64>,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(req): Json<sfgw_fw::CustomZoneRequest>,
+) -> impl IntoResponse {
+    match sfgw_fw::update_custom_zone(&db, id, &req).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Err(sfgw_fw::FwError::CustomZoneNotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "custom zone not found" })),
+        ),
+        Err(sfgw_fw::FwError::Validation(msg)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": msg })),
+        ),
+        Err(sfgw_fw::FwError::CustomZoneNameConflict(name)) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!("zone name '{}' already exists", name) })),
+        ),
+        Err(sfgw_fw::FwError::CustomZoneVlanConflict(vid)) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!("VLAN {} already assigned", vid) })),
+        ),
+        Err(e) => {
+            tracing::error!("custom_zones_update error: {e}");
+            internal_err(anyhow::anyhow!("{e}"))
+        }
+    }
+}
+
+/// DELETE /api/v1/zones/custom/{id}
+///
+/// Delete a custom zone.
+async fn custom_zones_delete(
+    _auth: AuthUser,
+    Path(id): Path<i64>,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_fw::delete_custom_zone(&db, id).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Err(sfgw_fw::FwError::CustomZoneNotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "custom zone not found" })),
+        ),
+        Err(e) => {
+            tracing::error!("custom_zones_delete error: {e}");
+            internal_err(anyhow::anyhow!("{e}"))
+        }
+    }
+}
+
+/// PUT /api/v1/zones/custom/{id}/policy
+///
+/// Update only the policy of a custom zone.
+async fn custom_zones_update_policy(
+    _auth: AuthUser,
+    Path(id): Path<i64>,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(policy): Json<sfgw_fw::CustomZonePolicyUpdate>,
+) -> impl IntoResponse {
+    match sfgw_fw::update_custom_zone_policy(&db, id, &policy).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))),
+        Err(sfgw_fw::FwError::CustomZoneNotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "custom zone not found" })),
+        ),
+        Err(e) => {
+            tracing::error!("custom_zones_update_policy error: {e}");
+            internal_err(anyhow::anyhow!("{e}"))
+        }
+    }
 }
 
 // ===========================================================================
