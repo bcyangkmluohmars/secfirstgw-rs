@@ -4153,7 +4153,9 @@ async fn update_apply_handler(
 
         // Verify SHA-256 — MANDATORY. Never install unverified firmware.
         if sha256.is_empty() {
-            tracing::error!("no SHA-256 checksum available — refusing to install unverified firmware");
+            tracing::error!(
+                "no SHA-256 checksum available — refusing to install unverified firmware"
+            );
             let _ = tokio::fs::remove_file(temp_path).await;
             return;
         }

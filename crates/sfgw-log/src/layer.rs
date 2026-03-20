@@ -71,8 +71,11 @@ impl<S: Subscriber> Layer<S> for EncryptedLogLayer {
                     .write_log(&level_clone, &target_clone, &message_clone)
                     .await
                 {
-                    // Cannot use tracing here (infinite recursion), so use eprintln.
-                    eprintln!("sfgw-log: encrypted write failed: {e}");
+                    // Cannot use tracing here (infinite recursion), write to stderr directly.
+                    let _ = std::io::Write::write_fmt(
+                        &mut std::io::stderr(),
+                        format_args!("sfgw-log: encrypted write failed: {e}\n"),
+                    );
                 }
             });
         }
