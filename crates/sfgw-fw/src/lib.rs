@@ -11,6 +11,7 @@
 pub mod ids_response;
 pub mod iptables;
 pub mod qos;
+pub mod upnp;
 pub mod wan;
 
 use anyhow::Context;
@@ -212,11 +213,7 @@ pub fn validate_zone_name(name: &str) -> Result<(), FwError> {
         ));
     }
 
-    if !name
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_lowercase())
-    {
+    if !name.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
         return Err(FwError::Validation(
             "zone name must start with a lowercase letter".to_string(),
         ));
@@ -564,11 +561,37 @@ pub async fn apply_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
     let custom_zones = load_custom_zones(db).await.unwrap_or_default();
     let policy = FirewallPolicy::default();
 
+    // Load UPnP mappings and convert to PortForward entries for iptables generation.
+    let upnp_forwards: Vec<PortForward> = upnp::list_mappings(db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| PortForward {
+            protocol: m.protocol,
+            external_port: m.external_port,
+            internal_ip: m.internal_ip,
+            internal_port: m.internal_port,
+            comment: Some(format!("sfgw-upnp id={}", m.id.unwrap_or(0))),
+            enabled: true,
+            wan_interface: None,
+        })
+        .collect();
+
     let config = if zones.is_empty() {
         // Fallback to legacy generation when no zones are configured.
-        iptables::generate_ruleset(&rules, &policy)
+        if upnp_forwards.is_empty() {
+            iptables::generate_ruleset(&rules, &policy)
+        } else {
+            iptables::generate_ruleset_with_forwards(&rules, &policy, &upnp_forwards)
+        }
     } else {
-        iptables::generate_zone_ruleset_with_custom(&zones, &rules, &policy, &[], &custom_zones)
+        iptables::generate_zone_ruleset_with_custom(
+            &zones,
+            &rules,
+            &policy,
+            &upnp_forwards,
+            &custom_zones,
+        )
     };
 
     iptables::apply_ruleset(&config).await?;

@@ -15,6 +15,8 @@ pub mod messages;
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use anyhow::Context;
+
 /// The active personality index. Defaults to `Kevin` (0).
 static ACTIVE: AtomicU8 = AtomicU8::new(0);
 
@@ -115,7 +117,148 @@ pub fn active() -> Personality {
 }
 
 /// Switch to a different personality. Takes effect immediately.
+///
+/// This only updates the in-memory state. Use [`save`] to persist across
+/// restarts, or [`set_and_save`] for both in one call.
 pub fn set(personality: Personality) {
     ACTIVE.store(personality as u8, Ordering::Relaxed);
     tracing::info!(personality = personality.name(), "personality switched");
+}
+
+// ---------------------------------------------------------------------------
+// Persistence (via meta table in sfgw-db)
+// ---------------------------------------------------------------------------
+
+/// Meta key for the active personality setting.
+const META_KEY_PERSONALITY: &str = "personality";
+
+/// Load the saved personality from the database and activate it.
+///
+/// If no personality is saved (fresh install), leaves the default (`Kevin`)
+/// in place and returns `Personality::Kevin`.
+pub async fn load(db: &sfgw_db::Db) -> anyhow::Result<Personality> {
+    let conn = db.lock().await;
+    let result = conn.query_row(
+        "SELECT value FROM meta WHERE key = ?1",
+        [META_KEY_PERSONALITY],
+        |r| r.get::<_, String>(0),
+    );
+    match result {
+        Ok(val) => {
+            let p = Personality::from_name(&val).unwrap_or(Personality::Kevin);
+            ACTIVE.store(p as u8, Ordering::Relaxed);
+            tracing::info!(personality = p.name(), "personality loaded from database");
+            Ok(p)
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            tracing::debug!("no saved personality, defaulting to kevin");
+            Ok(Personality::Kevin)
+        }
+        Err(e) => Err(e).context("failed to read personality setting"),
+    }
+}
+
+/// Persist the given personality to the database.
+pub async fn save(db: &sfgw_db::Db, personality: Personality) -> anyhow::Result<()> {
+    let conn = db.lock().await;
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![META_KEY_PERSONALITY, personality.name()],
+    )
+    .context("failed to write personality setting")?;
+    Ok(())
+}
+
+/// Switch personality and persist the choice. Convenience wrapper around
+/// [`set`] + [`save`].
+pub async fn set_and_save(db: &sfgw_db::Db, personality: Personality) -> anyhow::Result<()> {
+    set(personality);
+    save(db, personality).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_load_default_when_no_row() {
+        let db = sfgw_db::open_in_memory().await.unwrap();
+        let p = load(&db).await.unwrap();
+        assert_eq!(p, Personality::Kevin, "default personality should be kevin");
+    }
+
+    #[tokio::test]
+    async fn test_save_and_load_roundtrip() {
+        let db = sfgw_db::open_in_memory().await.unwrap();
+
+        save(&db, Personality::Pirate).await.unwrap();
+
+        // Reset in-memory to Kevin so we can verify load actually changes it
+        ACTIVE.store(Personality::Kevin as u8, Ordering::Relaxed);
+
+        let p = load(&db).await.unwrap();
+        assert_eq!(p, Personality::Pirate);
+        assert_eq!(
+            active(),
+            Personality::Pirate,
+            "load should activate the personality"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_and_save() {
+        let db = sfgw_db::open_in_memory().await.unwrap();
+
+        set_and_save(&db, Personality::Bofh).await.unwrap();
+        assert_eq!(active(), Personality::Bofh, "in-memory should be updated");
+
+        // Verify it's in the DB
+        let conn = db.lock().await;
+        let val: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [META_KEY_PERSONALITY],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(val, "bofh");
+    }
+
+    #[tokio::test]
+    async fn test_load_unknown_value_defaults_to_kevin() {
+        let db = sfgw_db::open_in_memory().await.unwrap();
+
+        // Manually insert a garbage value
+        {
+            let conn = db.lock().await;
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params![META_KEY_PERSONALITY, "nonexistent-personality"],
+            )
+            .unwrap();
+        }
+
+        let p = load(&db).await.unwrap();
+        assert_eq!(
+            p,
+            Personality::Kevin,
+            "unknown personality should default to kevin"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_overwrites_previous() {
+        let db = sfgw_db::open_in_memory().await.unwrap();
+
+        save(&db, Personality::Zen).await.unwrap();
+        save(&db, Personality::Corporate).await.unwrap();
+
+        ACTIVE.store(Personality::Kevin as u8, Ordering::Relaxed);
+        let p = load(&db).await.unwrap();
+        assert_eq!(
+            p,
+            Personality::Corporate,
+            "second save should overwrite first"
+        );
+    }
 }

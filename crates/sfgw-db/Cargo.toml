@@ -10,3 +10,5 @@ thiserror.workspace = true
 rusqlite.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+sfgw-crypto = { path = "../sfgw-crypto" }
+zeroize.workspace = true

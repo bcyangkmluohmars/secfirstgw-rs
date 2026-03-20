@@ -330,7 +330,11 @@ async fn process_inform(
             system_stats: inform.system_stats.clone(),
             if_table: inform.if_table.clone(),
             uptime: inform.uptime,
-            uptime_str: inform.uptime_str.clone(),
+            uptime_str: if inform.uptime_str.is_empty() && inform.uptime > 0 {
+                format_uptime(inform.uptime)
+            } else {
+                inform.uptime_str.clone()
+            },
             satisfaction: inform.satisfaction,
             power_source_voltage: inform.power_source_voltage.clone(),
             total_max_power: inform.total_max_power,
@@ -406,11 +410,15 @@ async fn process_inform(
                                 drop(devices);
 
                                 // Spawn async SSH verification
+                                let db_clone = state_clone.db.clone();
                                 tokio::spawn(async move {
                                     // Small delay — let the device finish applying config
                                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-                                    match crate::provision::verify_config_applied(&dev_clone).await
+                                    match crate::provision::verify_config_applied(
+                                        &dev_clone, &db_clone,
+                                    )
+                                    .await
                                     {
                                         Ok(result) if result.is_ok() => {
                                             // Verification passed — mark config as applied
@@ -1012,4 +1020,22 @@ fn build_response_packet(
     };
 
     Ok(packet::serialize(&final_pkt))
+}
+
+/// Format uptime seconds into a human-readable string (e.g. "2d 9h 52m").
+///
+/// Fallback for devices that send numeric `uptime` but no `uptime_str`
+/// (e.g. UAP-AC-Pro).
+fn format_uptime(secs: u64) -> String {
+    let days = secs / 86400;
+    let hours = (secs % 86400) / 3600;
+    let mins = (secs % 3600) / 60;
+
+    if days > 0 {
+        format!("{days}d {hours}h {mins}m")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else {
+        format!("{mins}m")
+    }
 }

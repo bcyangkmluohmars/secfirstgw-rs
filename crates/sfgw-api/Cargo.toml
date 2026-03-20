@@ -16,6 +16,7 @@ sfgw-adopt = { path = "../sfgw-adopt" }
 sfgw-hal = { path = "../sfgw-hal" }
 sfgw-personality = { path = "../sfgw-personality" }
 sfgw-inform = { path = "../sfgw-inform" }
+sfgw-log = { path = "../sfgw-log" }
 anyhow.workspace = true
 tokio.workspace = true
 axum.workspace = true
@@ -40,6 +41,8 @@ rustls-pki-types.workspace = true
 rustls-pemfile.workspace = true
 tracing-subscriber.workspace = true
 futures-core = "0.3"
+reqwest.workspace = true
+tokio-stream = "0.1"
 
 [dev-dependencies]
 x25519-dalek = { workspace = true, features = ["static_secrets"] }

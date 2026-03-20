@@ -45,6 +45,9 @@ fn build_server_config(
     cert_chain: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
 ) -> Result<ServerConfig> {
+    // Ensure ring CryptoProvider is installed (rustls 0.23+ requires explicit provider).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)

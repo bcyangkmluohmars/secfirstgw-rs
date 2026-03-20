@@ -17,7 +17,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -39,6 +39,7 @@ pub async fn serve(
     sys_stats: &SysStats,
     inform_handle: &sfgw_inform::InformHandle,
     inform_state_handle: &sfgw_inform::StateHandle,
+    log_handle: &sfgw_log::LogHandle,
 ) -> Result<()> {
     let listen_addr: SocketAddr = std::env::var("SFGW_LISTEN_ADDR")
         .unwrap_or_else(|_| "[::]:443".to_string())
@@ -156,6 +157,25 @@ pub async fn serve(
             "/api/v1/vpn/tunnels/{id}/peers/{peer_id}/config",
             get(vpn_peer_config),
         )
+        // VPN site meshes
+        .route(
+            "/api/v1/vpn/sites",
+            get(vpn_list_meshes).post(vpn_create_mesh),
+        )
+        .route(
+            "/api/v1/vpn/sites/{id}",
+            get(vpn_get_mesh)
+                .put(vpn_update_mesh)
+                .delete(vpn_delete_mesh),
+        )
+        .route("/api/v1/vpn/sites/{id}/start", post(vpn_start_mesh))
+        .route("/api/v1/vpn/sites/{id}/stop", post(vpn_stop_mesh))
+        .route("/api/v1/vpn/sites/{id}/status", get(vpn_mesh_status))
+        .route("/api/v1/vpn/sites/{id}/peers", post(vpn_add_mesh_peer))
+        .route(
+            "/api/v1/vpn/sites/{id}/peers/{peer_id}",
+            delete(vpn_remove_mesh_peer),
+        )
         // DNS/DHCP
         .route(
             "/api/v1/dns/config",
@@ -272,9 +292,32 @@ pub async fn serve(
         )
         .route("/api/v1/qos/apply", post(qos_apply))
         .route("/api/v1/qos/stats", get(qos_stats))
+        // UPnP / NAT-PMP
+        .route(
+            "/api/v1/upnp/settings",
+            get(upnp_settings_get).put(upnp_settings_set),
+        )
+        .route("/api/v1/upnp/mappings", get(upnp_list_mappings))
+        .route("/api/v1/upnp/mappings/{id}", delete(upnp_delete_mapping))
+        // Firmware Update
+        .route("/api/v1/system/update/check", get(update_check_handler))
+        .route("/api/v1/system/update/apply", post(update_apply_handler))
+        .route(
+            "/api/v1/system/update/rollback",
+            post(update_rollback_handler),
+        )
+        .route(
+            "/api/v1/system/update/settings",
+            get(update_settings_get).put(update_settings_set),
+        )
         // Backup / Restore
         .route("/api/v1/settings/backup", get(backup_handler))
         .route("/api/v1/settings/restore", post(restore_handler))
+        // Forward-secret encrypted logs
+        .route("/api/v1/logs/days", get(logs_list_days))
+        .route("/api/v1/logs/status", get(logs_key_status))
+        .route("/api/v1/logs/{date}/export", get(logs_export_day))
+        .route("/api/v1/logs/{date}/destroy", post(logs_destroy_day))
         .layer(axum::middleware::from_fn(e2ee::e2ee_layer))
         .layer(axum::middleware::from_fn_with_state(
             general_limiter.clone(),
@@ -310,6 +353,7 @@ pub async fn serve(
             .layer(Extension(sys_stats.clone()))
             .layer(Extension(inform_handle.clone()))
             .layer(Extension(inform_state_handle.clone()))
+            .layer(Extension(log_handle.clone()))
             .layer(tower_http::trace::TraceLayer::new_for_http())
             .fallback_service(serve_dir)
     } else {
@@ -326,6 +370,7 @@ pub async fn serve(
             .layer(Extension(sys_stats.clone()))
             .layer(Extension(inform_handle.clone()))
             .layer(Extension(inform_state_handle.clone()))
+            .layer(Extension(log_handle.clone()))
             .layer(tower_http::trace::TraceLayer::new_for_http())
     };
 
@@ -1683,6 +1728,127 @@ async fn qos_stats(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) -> im
 }
 
 // ===========================================================================
+// UPnP / NAT-PMP handlers
+// ===========================================================================
+
+/// GET /api/v1/upnp/settings — get UPnP/NAT-PMP settings.
+async fn upnp_settings_get(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_fw::upnp::load_settings(&db).await {
+        Ok(settings) => (StatusCode::OK, Json(json!({ "upnp": settings }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct UpnpSettingsBody {
+    enabled: Option<bool>,
+    port_min: Option<u16>,
+    port_max: Option<u16>,
+    max_per_ip: Option<u32>,
+}
+
+/// PUT /api/v1/upnp/settings — update UPnP/NAT-PMP settings.
+async fn upnp_settings_set(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(body): Json<UpnpSettingsBody>,
+) -> impl IntoResponse {
+    let mut settings = match sfgw_fw::upnp::load_settings(&db).await {
+        Ok(s) => s,
+        Err(e) => return internal_err(e),
+    };
+
+    if let Some(enabled) = body.enabled {
+        settings.enabled = enabled;
+    }
+    if let Some(port_min) = body.port_min {
+        if port_min == 0 {
+            return err_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                anyhow::anyhow!("port_min must be >= 1"),
+            );
+        }
+        settings.port_min = port_min;
+    }
+    if let Some(port_max) = body.port_max {
+        settings.port_max = port_max;
+    }
+    if settings.port_min > settings.port_max {
+        return err_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            anyhow::anyhow!(
+                "port_min ({}) must be <= port_max ({})",
+                settings.port_min,
+                settings.port_max
+            ),
+        );
+    }
+    if let Some(max_per_ip) = body.max_per_ip {
+        if max_per_ip == 0 {
+            return err_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                anyhow::anyhow!("max_per_ip must be >= 1"),
+            );
+        }
+        settings.max_per_ip = max_per_ip;
+    }
+
+    match sfgw_fw::upnp::save_settings(&db, &settings).await {
+        Ok(()) => {
+            tracing::info!(
+                enabled = settings.enabled,
+                port_range = %format!("{}-{}", settings.port_min, settings.port_max),
+                max_per_ip = settings.max_per_ip,
+                "UPnP settings updated (restart required for listener changes)"
+            );
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "upnp": settings,
+                    "note": "restart required for listener enable/disable changes",
+                })),
+            )
+        }
+        Err(e) => internal_err(e),
+    }
+}
+
+/// GET /api/v1/upnp/mappings — list active UPnP port mappings.
+async fn upnp_list_mappings(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_fw::upnp::list_mappings(&db).await {
+        Ok(mappings) => (StatusCode::OK, Json(json!({ "mappings": mappings }))),
+        Err(e) => internal_err(anyhow::anyhow!("{e}")),
+    }
+}
+
+/// DELETE /api/v1/upnp/mappings/{id} — remove a UPnP port mapping.
+async fn upnp_delete_mapping(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match sfgw_fw::upnp::delete_mapping(&db, id).await {
+        Ok(()) => {
+            // Trigger firewall reload to remove the iptables rules
+            if let Err(e) = sfgw_fw::upnp::apply_upnp_rules(&db).await {
+                tracing::error!("failed to apply rules after UPnP mapping delete: {e}");
+            }
+            (
+                StatusCode::OK,
+                Json(json!({ "status": "deleted", "id": id })),
+            )
+        }
+        Err(e) => err_response(StatusCode::NOT_FOUND, anyhow::anyhow!("{e}")),
+    }
+}
+
+// ===========================================================================
 // VPN handlers
 // ===========================================================================
 
@@ -1870,6 +2036,125 @@ async fn vpn_peer_config(
 }
 
 // ===========================================================================
+// VPN Site Mesh handlers
+// ===========================================================================
+
+async fn vpn_list_meshes(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match sfgw_vpn::site::list_meshes(&db).await {
+        Ok(meshes) => (StatusCode::OK, Json(json!({ "meshes": meshes }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn vpn_create_mesh(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(body): Json<sfgw_vpn::site::CreateMeshRequest>,
+) -> impl IntoResponse {
+    match sfgw_vpn::site::create_mesh(&db, &body).await {
+        Ok(mesh) => (StatusCode::CREATED, Json(json!({ "mesh": mesh }))),
+        Err(e) => err_response(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn vpn_get_mesh(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match sfgw_vpn::site::get_mesh(&db, id).await {
+        Ok(Some(mesh)) => (StatusCode::OK, Json(json!({ "mesh": mesh }))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "site mesh not found" })),
+        ),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn vpn_update_mesh(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+    Json(body): Json<sfgw_vpn::site::UpdateMeshRequest>,
+) -> impl IntoResponse {
+    match sfgw_vpn::site::update_mesh(&db, id, &body).await {
+        Ok(mesh) => (StatusCode::OK, Json(json!({ "mesh": mesh }))),
+        Err(e) => err_response(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn vpn_delete_mesh(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match sfgw_vpn::site::delete_mesh(&db, id).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "deleted" }))),
+        Err(e) => err_response(StatusCode::NOT_FOUND, e),
+    }
+}
+
+async fn vpn_start_mesh(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match sfgw_vpn::site::start_mesh(&db, id).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "started" }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn vpn_stop_mesh(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match sfgw_vpn::site::stop_mesh(&db, id).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "stopped" }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn vpn_mesh_status(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match sfgw_vpn::site::get_mesh_status(&db, id).await {
+        Ok(status) => (StatusCode::OK, Json(json!({ "status": status }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn vpn_add_mesh_peer(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+    Json(body): Json<sfgw_vpn::site::CreateSiteRequest>,
+) -> impl IntoResponse {
+    match sfgw_vpn::site::add_site_to_mesh(&db, id, &body).await {
+        Ok(site) => (StatusCode::CREATED, Json(json!({ "site": site }))),
+        Err(e) => err_response(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn vpn_remove_mesh_peer(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path((_id, peer_id)): Path<(i64, i64)>,
+) -> impl IntoResponse {
+    match sfgw_vpn::db::delete_site_mesh_peer(&db, peer_id).await {
+        Ok(()) => (StatusCode::OK, Json(json!({ "status": "site removed" }))),
+        Err(e) => err_response(StatusCode::NOT_FOUND, e),
+    }
+}
+
+// ===========================================================================
 // DNS/DHCP handlers
 // ===========================================================================
 
@@ -1972,6 +2257,8 @@ async fn dns_save_overrides(
 struct IdsEventsQuery {
     limit: Option<i64>,
     severity: Option<String>,
+    detector: Option<String>,
+    since: Option<String>,
 }
 
 async fn ids_list_events(
@@ -1998,27 +2285,49 @@ async fn ids_list_events(
             }))
         };
 
-        let events: Result<Vec<Value>, _> = if let Some(ref severity) = params.severity {
-            let mut stmt = match conn.prepare(
-                "SELECT id, timestamp, severity, detector, source_mac, source_ip, interface, vlan, description \
-                 FROM ids_events WHERE severity = ?1 ORDER BY id DESC LIMIT ?2",
-            ) {
-                Ok(s) => s,
-                Err(e) => return internal_err(anyhow::anyhow!("{e}")),
-            };
-            stmt.query_map(rusqlite::params![severity, limit], map_row)
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        // Build dynamic WHERE clause from filters
+        let mut conditions: Vec<String> = Vec::new();
+        let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(ref severity) = params.severity {
+            bind_values.push(Box::new(severity.clone()));
+            conditions.push(format!("severity = ?{}", bind_values.len()));
+        }
+        if let Some(ref detector) = params.detector {
+            bind_values.push(Box::new(detector.clone()));
+            conditions.push(format!("detector = ?{}", bind_values.len()));
+        }
+        if let Some(ref since) = params.since {
+            bind_values.push(Box::new(since.clone()));
+            conditions.push(format!("timestamp >= ?{}", bind_values.len()));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
         } else {
-            let mut stmt = match conn.prepare(
-                "SELECT id, timestamp, severity, detector, source_mac, source_ip, interface, vlan, description \
-                 FROM ids_events ORDER BY id DESC LIMIT ?1",
-            ) {
-                Ok(s) => s,
-                Err(e) => return internal_err(anyhow::anyhow!("{e}")),
-            };
-            stmt.query_map(rusqlite::params![limit], map_row)
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            format!(" WHERE {}", conditions.join(" AND "))
         };
+
+        bind_values.push(Box::new(limit));
+        let limit_param = bind_values.len();
+
+        let sql = format!(
+            "SELECT id, timestamp, severity, detector, source_mac, source_ip, interface, vlan, description \
+             FROM ids_events{} ORDER BY id DESC LIMIT ?{}",
+            where_clause, limit_param
+        );
+
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(e) => return internal_err(anyhow::anyhow!("{e}")),
+        };
+
+        let params_slice: Vec<&dyn rusqlite::types::ToSql> =
+            bind_values.iter().map(|b| b.as_ref()).collect();
+
+        let events: Result<Vec<Value>, _> = stmt
+            .query_map(params_slice.as_slice(), map_row)
+            .map(|rows| rows.filter_map(|r| r.ok()).collect());
 
         match events {
             Ok(v) => v,
@@ -2064,10 +2373,36 @@ async fn ids_event_stats(
             }
         }
 
+        // Top source IPs by event count
+        let mut top_sources: Vec<Value> = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT source_ip, COUNT(*) as cnt FROM ids_events \
+             WHERE source_ip IS NOT NULL AND source_ip != '' \
+             GROUP BY source_ip ORDER BY cnt DESC LIMIT 10",
+        ) && let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }) {
+            for row in rows.flatten() {
+                top_sources.push(json!({ "ip": row.0, "count": row.1 }));
+            }
+        }
+
+        // Recent critical events count (last 24h)
+        let critical_24h: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ids_events WHERE severity = 'Critical' \
+                 AND timestamp >= datetime('now', '-24 hours')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
         json!({
             "total": total,
+            "critical_24h": critical_24h,
             "by_severity": by_severity,
             "by_detector": by_detector,
+            "top_sources": top_sources,
         })
     };
 
@@ -2902,6 +3237,10 @@ async fn wireless_create(
             StatusCode::CREATED,
             Json(json!({ "status": "created", "id": id })),
         ),
+        Err(sfgw_net::NetError::Validation(msg)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": msg })),
+        ),
         Err(e) => internal_err(e),
     }
 }
@@ -2917,6 +3256,10 @@ async fn wireless_update(
         Ok(false) => err_response(
             StatusCode::NOT_FOUND,
             anyhow::anyhow!("wireless network not found"),
+        ),
+        Err(sfgw_net::NetError::Validation(msg)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": msg })),
         ),
         Err(e) => internal_err(e),
     }
@@ -3536,6 +3879,550 @@ async fn ddns_force_update(
 }
 
 // ===========================================================================
+// Firmware Update handlers
+// ===========================================================================
+
+/// Check for available firmware updates.
+async fn update_check_handler(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match update_check_inner(&db).await {
+        Ok(result) => (StatusCode::OK, Json(json!(result))),
+        Err(e) => {
+            tracing::error!("update check failed: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to check for updates" })),
+            )
+        }
+    }
+}
+
+async fn update_check_inner(db: &sfgw_db::Db) -> anyhow::Result<serde_json::Value> {
+    let settings = update_load_settings(db).await?;
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+
+    let client = reqwest::Client::builder()
+        .user_agent(format!("sfgw/{current_version}"))
+        .timeout(Duration::from_secs(30))
+        .build()?;
+
+    let releases: Vec<serde_json::Value> = client
+        .get(&settings.update_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    // Record check timestamp
+    {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = db.lock().await;
+        let _ = conn.execute(
+            "UPDATE firmware_settings SET last_check = ?1 WHERE id = 1",
+            rusqlite::params![now],
+        );
+    }
+
+    let checked_at = chrono::Utc::now().to_rfc3339();
+
+    #[cfg(target_arch = "aarch64")]
+    let arch = "aarch64";
+    #[cfg(target_arch = "x86_64")]
+    let arch = "x86_64";
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let arch = "unknown";
+
+    let asset_pattern = format!("sfgw-{arch}");
+
+    for release in &releases {
+        let prerelease = release["prerelease"].as_bool().unwrap_or(false);
+        if prerelease && settings.update_channel != "beta" {
+            continue;
+        }
+
+        let tag = release["tag_name"].as_str().unwrap_or("");
+        let release_version = tag.strip_prefix('v').unwrap_or(tag);
+
+        if !is_newer_version(release_version, &current_version) {
+            continue;
+        }
+
+        let assets = release["assets"].as_array();
+        if let Some(assets) = assets {
+            let binary_asset = assets.iter().find(|a| {
+                let name = a["name"].as_str().unwrap_or("");
+                name.starts_with(&asset_pattern) && !name.ends_with(".sha256")
+            });
+
+            if let Some(binary) = binary_asset {
+                // Try to get checksum
+                let checksum_asset = assets.iter().find(|a| {
+                    let name = a["name"].as_str().unwrap_or("");
+                    name.starts_with(&asset_pattern) && name.ends_with(".sha256")
+                });
+
+                let sha256 = if let Some(cs) = checksum_asset {
+                    let url = cs["browser_download_url"].as_str().unwrap_or("");
+                    if !url.is_empty() {
+                        match client.get(url).send().await {
+                            Ok(resp) => match resp.text().await {
+                                Ok(text) => text
+                                    .split_whitespace()
+                                    .next()
+                                    .map(String::from)
+                                    .unwrap_or_default(),
+                                Err(_) => String::new(),
+                            },
+                            Err(_) => String::new(),
+                        }
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+
+                return Ok(json!({
+                    "current_version": current_version,
+                    "update_available": true,
+                    "checked_at": checked_at,
+                    "available": {
+                        "version": release_version,
+                        "sha256": sha256,
+                        "download_url": binary["browser_download_url"].as_str().unwrap_or(""),
+                        "release_notes": release["body"].as_str().unwrap_or(""),
+                        "size_bytes": binary["size"].as_u64().unwrap_or(0),
+                        "prerelease": prerelease,
+                        "published_at": release["published_at"].as_str().unwrap_or(""),
+                    }
+                }));
+            }
+        }
+    }
+
+    Ok(json!({
+        "current_version": current_version,
+        "update_available": false,
+        "checked_at": checked_at,
+        "available": null,
+    }))
+}
+
+fn is_newer_version(new_ver: &str, current: &str) -> bool {
+    let parse = |v: &str| -> Vec<u64> { v.split('.').filter_map(|s| s.parse().ok()).collect() };
+    let new_parts = parse(new_ver);
+    let cur_parts = parse(current);
+    for i in 0..3 {
+        let n = new_parts.get(i).copied().unwrap_or(0);
+        let c = cur_parts.get(i).copied().unwrap_or(0);
+        if n > c {
+            return true;
+        }
+        if n < c {
+            return false;
+        }
+    }
+    false
+}
+
+/// Download and apply a firmware update.
+async fn update_apply_handler(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    // Check for update first
+    let result = match update_check_inner(&db).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("update check failed: {e:#}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to check for updates" })),
+            );
+        }
+    };
+
+    if !result["update_available"].as_bool().unwrap_or(false) {
+        return (
+            StatusCode::OK,
+            Json(json!({ "status": "no_update", "message": "no update available" })),
+        );
+    }
+
+    let available = &result["available"];
+    let version = available["version"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+    let download_url = available["download_url"].as_str().unwrap_or("").to_string();
+    let sha256 = available["sha256"].as_str().unwrap_or("").to_string();
+    let size_bytes = available["size_bytes"].as_u64().unwrap_or(0);
+
+    if download_url.is_empty() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "no download URL available" })),
+        );
+    }
+
+    // Spawn the download + apply in a background task so the API response returns immediately
+    let db_bg = db.clone();
+    tokio::spawn(async move {
+        tracing::info!(version = %version, "starting firmware download and apply");
+
+        let current_version = env!("CARGO_PKG_VERSION");
+        let client = match reqwest::Client::builder()
+            .user_agent(format!("sfgw/{current_version}"))
+            .timeout(Duration::from_secs(600))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("failed to build HTTP client for firmware download: {e}");
+                return;
+            }
+        };
+
+        let temp_path = std::path::Path::new("/usr/local/bin/.sfgw.update.tmp");
+        let binary_path = std::path::Path::new("/usr/local/bin/sfgw");
+        let backup_path = std::path::Path::new("/usr/local/bin/sfgw.backup");
+
+        // Download
+        let response = match client.get(&download_url).send().await {
+            Ok(r) => match r.error_for_status() {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!("firmware download returned error: {e}");
+                    return;
+                }
+            },
+            Err(e) => {
+                tracing::error!("failed to start firmware download: {e}");
+                return;
+            }
+        };
+
+        // Stream to temp file with SHA-256 verification
+        let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
+        let mut file = match tokio::fs::File::create(temp_path).await {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::error!("failed to create temp file: {e}");
+                return;
+            }
+        };
+
+        let mut stream = response.bytes_stream();
+        let mut downloaded: u64 = 0;
+
+        use tokio_stream::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    hasher.update(&bytes);
+                    if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut file, &bytes).await {
+                        tracing::error!("failed to write firmware chunk: {e}");
+                        let _ = tokio::fs::remove_file(temp_path).await;
+                        return;
+                    }
+                    downloaded += bytes.len() as u64;
+                }
+                Err(e) => {
+                    tracing::error!("error reading firmware stream: {e}");
+                    let _ = tokio::fs::remove_file(temp_path).await;
+                    return;
+                }
+            }
+        }
+
+        if let Err(e) = tokio::io::AsyncWriteExt::flush(&mut file).await {
+            tracing::error!("failed to flush firmware file: {e}");
+            let _ = tokio::fs::remove_file(temp_path).await;
+            return;
+        }
+        drop(file);
+
+        tracing::info!(
+            downloaded_bytes = downloaded,
+            expected = size_bytes,
+            "firmware download complete"
+        );
+
+        // Verify SHA-256 — MANDATORY. Never install unverified firmware.
+        if sha256.is_empty() {
+            tracing::error!("no SHA-256 checksum available — refusing to install unverified firmware");
+            let _ = tokio::fs::remove_file(temp_path).await;
+            return;
+        }
+        let digest = hasher.finish();
+        let hex: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        if hex != sha256 {
+            tracing::error!(expected = %sha256, got = %hex, "SHA-256 hash mismatch");
+            let _ = tokio::fs::remove_file(temp_path).await;
+            return;
+        }
+        tracing::info!(sha256 = %hex, "SHA-256 verification passed");
+
+        // Set executable permissions
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            if let Err(e) = std::fs::set_permissions(temp_path, perms) {
+                tracing::error!("failed to set permissions: {e}");
+                let _ = tokio::fs::remove_file(temp_path).await;
+                return;
+            }
+        }
+
+        // Backup current binary
+        if binary_path.exists()
+            && let Err(e) = tokio::fs::copy(binary_path, backup_path).await
+        {
+            tracing::error!("failed to backup current binary: {e}");
+            let _ = tokio::fs::remove_file(temp_path).await;
+            return;
+        }
+
+        // Atomic rename
+        if let Err(e) = tokio::fs::rename(temp_path, binary_path).await {
+            tracing::error!("failed to replace binary: {e}");
+            // Try to restore backup
+            let _ = tokio::fs::rename(backup_path, binary_path).await;
+            return;
+        }
+
+        // Log IDS event
+        let _ = sfgw_ids::log_event(
+            &db_bg,
+            "Info",
+            "firmware",
+            None,
+            None,
+            None,
+            None,
+            &format!("firmware updated to version {version}"),
+        )
+        .await;
+
+        // Restart service
+        tracing::info!("restarting sfgw service after firmware update");
+        let _ = tokio::process::Command::new("systemctl")
+            .args(["restart", "sfgw.service"])
+            .output()
+            .await;
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "status": "applying",
+            "message": "firmware update download and apply initiated",
+        })),
+    )
+}
+
+/// Rollback to the previous firmware version.
+async fn update_rollback_handler(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    let backup_path = std::path::Path::new("/usr/local/bin/sfgw.backup");
+    if !backup_path.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no backup firmware found" })),
+        );
+    }
+
+    let binary_path = std::path::Path::new("/usr/local/bin/sfgw");
+
+    // Stop service
+    let _ = tokio::process::Command::new("systemctl")
+        .args(["stop", "sfgw.service"])
+        .output()
+        .await;
+
+    // Atomic rename: backup -> binary
+    if let Err(e) = tokio::fs::rename(backup_path, binary_path).await {
+        tracing::error!("firmware rollback failed: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "failed to restore backup binary" })),
+        );
+    }
+
+    // Log IDS event
+    let _ = sfgw_ids::log_event(
+        &db,
+        "Warning",
+        "firmware",
+        None,
+        None,
+        None,
+        None,
+        "firmware rollback: reverted to previous version",
+    )
+    .await;
+
+    // Restart service
+    let _ = tokio::process::Command::new("systemctl")
+        .args(["start", "sfgw.service"])
+        .output()
+        .await;
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "rolled_back",
+            "message": "firmware rolled back to previous version, service restarting",
+        })),
+    )
+}
+
+/// Update settings types for the API layer.
+#[derive(Deserialize)]
+struct UpdateSettingsPayload {
+    update_channel: Option<String>,
+    auto_check: Option<bool>,
+    check_interval_hours: Option<i64>,
+    update_url: Option<String>,
+}
+
+/// Get firmware update settings.
+async fn update_settings_get(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+) -> impl IntoResponse {
+    match update_load_settings(&db).await {
+        Ok(settings) => (StatusCode::OK, Json(json!({ "settings": settings }))),
+        Err(e) => {
+            tracing::error!("failed to load update settings: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to load update settings" })),
+            )
+        }
+    }
+}
+
+/// Update firmware update settings.
+async fn update_settings_set(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(body): Json<UpdateSettingsPayload>,
+) -> impl IntoResponse {
+    // Load current settings
+    let mut settings = match update_load_settings(&db).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("failed to load update settings: {e:#}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to load update settings" })),
+            );
+        }
+    };
+
+    // Apply updates
+    if let Some(channel) = &body.update_channel {
+        if channel != "stable" && channel != "beta" {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "update_channel must be 'stable' or 'beta'" })),
+            );
+        }
+        settings.update_channel = channel.clone();
+    }
+    if let Some(auto_check) = body.auto_check {
+        settings.auto_check = auto_check;
+    }
+    if let Some(hours) = body.check_interval_hours {
+        if !(1..=168).contains(&hours) {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "check_interval_hours must be between 1 and 168" })),
+            );
+        }
+        settings.check_interval_hours = hours;
+    }
+    if let Some(url) = &body.update_url {
+        if url.is_empty() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "update_url must not be empty" })),
+            );
+        }
+        if !url.starts_with("https://") {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "update_url must use HTTPS" })),
+            );
+        }
+        settings.update_url = url.clone();
+    }
+
+    // Save
+    let conn = db.lock().await;
+    let result = conn.execute(
+        "UPDATE firmware_settings SET
+            update_channel = ?1, auto_check = ?2,
+            check_interval_hours = ?3, update_url = ?4
+         WHERE id = 1",
+        rusqlite::params![
+            settings.update_channel,
+            settings.auto_check as i64,
+            settings.check_interval_hours,
+            settings.update_url,
+        ],
+    );
+    drop(conn);
+
+    match result {
+        Ok(_) => (StatusCode::OK, Json(json!({ "settings": settings }))),
+        Err(e) => {
+            tracing::error!("failed to save update settings: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to save update settings" })),
+            )
+        }
+    }
+}
+
+/// Internal helper to load update settings from DB.
+#[derive(Serialize)]
+struct UpdateSettingsResponse {
+    update_channel: String,
+    auto_check: bool,
+    check_interval_hours: i64,
+    last_check: Option<String>,
+    update_url: String,
+}
+
+async fn update_load_settings(db: &sfgw_db::Db) -> anyhow::Result<UpdateSettingsResponse> {
+    let conn = db.lock().await;
+    let settings = conn.query_row(
+        "SELECT update_channel, auto_check, check_interval_hours, last_check, update_url
+         FROM firmware_settings WHERE id = 1",
+        [],
+        |row| {
+            Ok(UpdateSettingsResponse {
+                update_channel: row.get(0)?,
+                auto_check: row.get::<_, i64>(1)? != 0,
+                check_interval_hours: row.get(2)?,
+                last_check: row.get(3)?,
+                update_url: row.get(4)?,
+            })
+        },
+    )?;
+    Ok(settings)
+}
+
+// ===========================================================================
 // Backup / Restore handlers
 // ===========================================================================
 
@@ -3645,7 +4532,8 @@ async fn build_backup(db: &sfgw_db::Db) -> Result<Value> {
     // Wireless networks — strip psk (secret)
     let wireless_networks = query_table_as_json(
         &conn,
-        "SELECT id, ssid, security, hidden, band, vlan_id, is_guest, l2_isolation, enabled FROM wireless_networks",
+        "SELECT id, ssid, security, hidden, band, vlan_id, is_guest, l2_isolation, enabled,
+                channel, tx_power, bandwidth, fast_roaming, band_steering FROM wireless_networks",
         &[
             "id",
             "ssid",
@@ -3656,6 +4544,11 @@ async fn build_backup(db: &sfgw_db::Db) -> Result<Value> {
             "is_guest",
             "l2_isolation",
             "enabled",
+            "channel",
+            "tx_power",
+            "bandwidth",
+            "fast_roaming",
+            "band_steering",
         ],
     )?;
 
@@ -3980,8 +4873,9 @@ fn apply_restore_inner(conn: &rusqlite::Connection, backup: &Value) -> Result<Va
         let mut count = 0i64;
         for net in nets {
             conn.execute(
-                "INSERT INTO wireless_networks (id, ssid, security, hidden, band, vlan_id, is_guest, l2_isolation, enabled)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO wireless_networks (id, ssid, security, hidden, band, vlan_id, is_guest, l2_isolation, enabled,
+                                                channel, tx_power, bandwidth, fast_roaming, band_steering)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 rusqlite::params![
                     json_to_i64(net.get("id")),
                     json_to_str(net.get("ssid")),
@@ -3992,6 +4886,11 @@ fn apply_restore_inner(conn: &rusqlite::Connection, backup: &Value) -> Result<Va
                     json_to_i64_or(net.get("is_guest"), 0),
                     json_to_i64_or(net.get("l2_isolation"), 0),
                     json_to_i64_or(net.get("enabled"), 1),
+                    json_to_i64_or(net.get("channel"), 0),
+                    json_to_i64_or(net.get("tx_power"), 0),
+                    json_to_str_or(net.get("bandwidth"), "auto"),
+                    json_to_i64_or(net.get("fast_roaming"), 0),
+                    json_to_i64_or(net.get("band_steering"), 0),
                 ],
             )
             .context("insert wireless_network")?;
@@ -4084,6 +4983,115 @@ fn json_to_opt_str(v: Option<&Value>) -> Option<String> {
             v.as_str().map(|s| s.to_string())
         }
     })
+}
+
+// ===========================================================================
+// Forward-secret encrypted log handlers
+// ===========================================================================
+
+/// List all days with encrypted log entries.
+async fn logs_list_days(
+    _auth: AuthUser,
+    Extension(log_handle): Extension<sfgw_log::LogHandle>,
+) -> impl IntoResponse {
+    let mgr = log_handle.lock().await;
+    match mgr.list_days().await {
+        Ok(days) => (StatusCode::OK, Json(json!({ "days": days }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+/// Get current key/ratchet status.
+async fn logs_key_status(
+    _auth: AuthUser,
+    Extension(log_handle): Extension<sfgw_log::LogHandle>,
+) -> impl IntoResponse {
+    let mgr = log_handle.lock().await;
+    match mgr.key_status().await {
+        Ok(status) => (StatusCode::OK, Json(json!({ "status": status }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+/// Export (decrypt) a day's logs and mark as exported.  The key is deleted
+/// after export -- the logs become permanently unrecoverable.
+async fn logs_export_day(
+    _auth: AuthUser,
+    Path(date): Path<String>,
+    Extension(log_handle): Extension<sfgw_log::LogHandle>,
+) -> Response {
+    let parsed = match chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(_) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "invalid date format, expected YYYY-MM-DD" })),
+            )
+                .into_response();
+        }
+    };
+
+    let mgr = log_handle.lock().await;
+    match mgr.export_logs(parsed).await {
+        Ok(entries) => {
+            let body = match serde_json::to_string_pretty(&json!({
+                "date": date,
+                "entries": entries,
+                "count": entries.len(),
+                "exported": true,
+            })) {
+                Ok(b) => b,
+                Err(e) => return internal_err(e).into_response(),
+            };
+
+            let filename = format!("sfgw-logs-{date}.json");
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .header(
+                    "Content-Disposition",
+                    format!("attachment; filename=\"{filename}\""),
+                )
+                .body(axum::body::Body::from(body))
+                .unwrap_or_else(|e| internal_err(e).into_response())
+        }
+        Err(sfgw_log::LogError::KeyDestroyed(d)) => (
+            StatusCode::GONE,
+            Json(json!({ "error": format!("key for {d} has been destroyed -- logs are unrecoverable") })),
+        )
+            .into_response(),
+        Err(e) => internal_err(e).into_response(),
+    }
+}
+
+/// Permanently destroy the key for a day's logs.  This is irreversible.
+async fn logs_destroy_day(
+    _auth: AuthUser,
+    Path(date): Path<String>,
+    Extension(log_handle): Extension<sfgw_log::LogHandle>,
+) -> impl IntoResponse {
+    let parsed = match chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(_) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": "invalid date format, expected YYYY-MM-DD" })),
+            );
+        }
+    };
+
+    let mgr = log_handle.lock().await;
+    match mgr.destroy_day_key(parsed).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "destroyed",
+                "date": date,
+                "message": "key permanently destroyed -- logs for this day are unrecoverable"
+            })),
+        ),
+        Err(e) => internal_err(e),
+    }
 }
 
 // ===========================================================================

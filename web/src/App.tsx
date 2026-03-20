@@ -16,6 +16,8 @@ import Wireless from './pages/Wireless'
 import Ddns from './pages/Ddns'
 import Qos from './pages/Qos'
 import Zones from './pages/Zones'
+import Upnp from './pages/Upnp'
+import Update from './pages/Update'
 import Settings from './pages/Settings'
 import Logs from './pages/Logs'
 import Login from './pages/Login'
@@ -123,7 +125,9 @@ export default function App() {
               <Route path="/devices" element={<Devices />} />
               <Route path="/inform" element={<Inform />} />
               <Route path="/ids" element={<Ids />} />
+              <Route path="/upnp" element={<Upnp />} />
               <Route path="/logs" element={<Logs />} />
+              <Route path="/update" element={<Update />} />
               <Route path="/settings" element={<Settings />} />
             </Route>
           )}

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #![deny(unsafe_code)]
 
+mod update;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
@@ -84,6 +86,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: CryptoCommands,
     },
+    /// Manage firmware updates
+    Update {
+        #[command(subcommand)]
+        cmd: UpdateCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -134,6 +141,16 @@ enum CryptoCommands {
     Status,
 }
 
+#[derive(Subcommand)]
+enum UpdateCommands {
+    /// Check for available firmware updates
+    Check,
+    /// Download and apply a firmware update
+    Apply,
+    /// Rollback to the previous firmware version
+    Rollback,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing with a broadcast layer for live SSE event streaming.
@@ -156,6 +173,7 @@ async fn main() -> Result<()> {
         Some(Commands::Net { cmd }) => handle_net(cmd).await?,
         Some(Commands::Adopt { cmd }) => handle_adopt(cmd).await?,
         Some(Commands::Crypto { cmd }) => handle_crypto(cmd).await?,
+        Some(Commands::Update { cmd }) => handle_update(cmd).await?,
         None => start_services(event_tx).await?,
     }
 
@@ -183,7 +201,34 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
 
     // Phase 4: Logging with forward secrecy
     tracing::info!("initializing encrypted log");
-    let _log = sfgw_log::LogManager::init(&db).await?;
+    let log_mgr = sfgw_log::LogManager::init(&db).await?;
+    let log_handle: sfgw_log::LogHandle = std::sync::Arc::new(tokio::sync::Mutex::new(log_mgr));
+
+    // Spawn background task: rotate log encryption key at midnight.
+    {
+        let lh = log_handle.clone();
+        tokio::spawn(async move {
+            loop {
+                // Calculate time until next midnight UTC.
+                let now = chrono::Utc::now();
+                let tomorrow = (now.date_naive() + chrono::Duration::days(1))
+                    .and_hms_opt(0, 0, 1)
+                    .expect("valid midnight"); // INVARIANT: 00:00:01 is always valid
+                let until_midnight = tomorrow
+                    .and_utc()
+                    .signed_duration_since(now)
+                    .to_std()
+                    .unwrap_or(std::time::Duration::from_secs(3600));
+
+                tokio::time::sleep(until_midnight).await;
+
+                let mut mgr = lh.lock().await;
+                if let Err(e) = mgr.rotate_key().await {
+                    tracing::error!("failed to rotate log encryption key: {e}");
+                }
+            }
+        });
+    }
 
     // Phase 5: Network stack
     tracing::info!("configuring network");
@@ -198,6 +243,33 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
     tracing::info!("applying QoS traffic shaping");
     if let Err(e) = sfgw_fw::qos::apply_qos(&db).await {
         tracing::warn!("QoS setup failed (continuing): {e}");
+    }
+
+    // Phase 6c: UPnP/NAT-PMP (if enabled in settings)
+    if sfgw_fw::upnp::is_enabled(&db).await.unwrap_or(false) {
+        tracing::info!("starting UPnP/NAT-PMP service");
+        // Get LAN gateway IP from networks table
+        let lan_ip: std::net::Ipv4Addr = {
+            let conn = db.lock().await;
+            conn.query_row(
+                "SELECT gateway FROM networks WHERE zone = 'lan' AND enabled = 1 LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(std::net::Ipv4Addr::new(192, 168, 1, 1))
+        };
+        match sfgw_fw::upnp::start(&db, lan_ip).await {
+            Ok(_handle) => {
+                tracing::info!("UPnP/NAT-PMP service running on {lan_ip}");
+            }
+            Err(e) => {
+                tracing::warn!("UPnP/NAT-PMP failed to start: {e}");
+            }
+        }
+    } else {
+        tracing::info!("UPnP/NAT-PMP disabled (enable via settings)");
     }
 
     // Phase 7: DNS/DHCP
@@ -320,6 +392,10 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
         }
     };
 
+    // Phase 13b: Background firmware update checker
+    tracing::info!("starting firmware update checker");
+    update::spawn_update_checker(db.clone());
+
     // Signal systemd that we're fully ready, then start watchdog pings
     sd_notify("READY=1");
     spawn_watchdog();
@@ -332,6 +408,7 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
         &sys_stats,
         &inform_handle,
         &inform_state_handle,
+        &log_handle,
     )
     .await?;
 
@@ -658,6 +735,64 @@ fn handle_crypto_init(confirm: bool) -> Result<()> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("cryptsetup luksFormat failed: {stderr}");
+    }
+
+    Ok(())
+}
+
+async fn handle_update(cmd: UpdateCommands) -> Result<()> {
+    let db = sfgw_db::open_or_create().await?;
+
+    match cmd {
+        UpdateCommands::Check => {
+            let result = update::check_for_update(&db).await?;
+            println!("Current version: {}", result.current_version);
+            if let Some(ref info) = result.available {
+                println!("Update available: v{}", info.version);
+                println!(
+                    "  Channel:  {}",
+                    if info.prerelease { "beta" } else { "stable" }
+                );
+                println!("  Size:     {} bytes", info.size_bytes);
+                println!(
+                    "  SHA-256:  {}",
+                    if info.sha256.is_empty() {
+                        "n/a"
+                    } else {
+                        &info.sha256
+                    }
+                );
+                if !info.release_notes.is_empty() {
+                    println!("  Notes:");
+                    for line in info.release_notes.lines().take(10) {
+                        println!("    {line}");
+                    }
+                }
+            } else {
+                println!("No update available.");
+            }
+        }
+        UpdateCommands::Apply => {
+            let result = update::check_for_update(&db).await?;
+            match result.available {
+                Some(info) => {
+                    println!("Downloading v{}...", info.version);
+                    let _temp = update::download_firmware(&info).await?;
+                    println!("Download complete, applying update...");
+                    update::apply_update(&db, &info).await?;
+                    println!("Update applied. Service restarting.");
+                    println!("If the service fails to start, run: sfgw update rollback");
+                }
+                None => {
+                    println!("No update available.");
+                }
+            }
+        }
+        UpdateCommands::Rollback => {
+            println!("Rolling back to previous firmware version...");
+            update::rollback(&db).await?;
+            println!("Rollback complete. Service restarted.");
+        }
     }
 
     Ok(())

@@ -446,7 +446,11 @@ export default function Settings() {
           <span className="w-32 text-sm text-navy-400">Version</span>
           <span className="text-sm font-mono text-gray-200">{system?.version ?? '0.1.0'}</span>
         </div>
-        <p className="text-xs text-navy-500 mt-3">Firmware updates will be available in a future release.</p>
+        <div className="mt-3">
+          <a href="/update" className="text-sm text-emerald-400 hover:text-emerald-300 transition-colors">
+            Manage firmware updates &rarr;
+          </a>
+        </div>
       </Card>
     </div>
   )

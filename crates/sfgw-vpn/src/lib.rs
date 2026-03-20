@@ -30,6 +30,7 @@ pub mod db;
 pub mod ipsec;
 pub mod keys;
 pub mod peer;
+pub mod site;
 pub mod tunnel;
 pub mod userspace;
 
@@ -72,6 +73,15 @@ pub enum VpnError {
 
     #[error("swanctl config injection attempt: {0}")]
     ConfigInjection(String),
+
+    #[error("site mesh not found: {0}")]
+    MeshNotFound(String),
+
+    #[error("site mesh '{0}' already exists")]
+    MeshExists(String),
+
+    #[error("no local site configured in mesh")]
+    NoLocalSite,
 
     #[error(transparent)]
     Db(#[from] anyhow::Error),

@@ -364,6 +364,150 @@ export interface TunnelStatus {
   peers: { public_key: string; endpoint: string | null; last_handshake_secs: number; rx_bytes: number; tx_bytes: number }[];
 }
 
+// IPSec types
+export type IpsecAuthMethod = 'certificate' | 'psk' | 'eap-mschapv2'
+export type IpsecMode = 'roadwarrior' | 'site-to-site'
+
+export interface IpsecTunnel {
+  id: number
+  name: string
+  tunnel_type: 'ipsec'
+  enabled: boolean
+  listen_port: number
+  public_key: string
+  address: string
+  address_v6?: string
+  dns: string | null
+  mtu: number
+  zone: string
+  bind_interface?: string
+  peers: VpnPeer[]
+  // IPSec-specific fields parsed from the tunnel config
+  ipsec_config?: IpsecDbConfig
+}
+
+export interface IpsecDbConfig {
+  mode: string
+  auth_method: string
+  local_id: string
+  listen_port?: number
+  local_addrs?: string
+  pool_v4?: string
+  pool_v6?: string
+  local_ts: string[]
+  remote_ts: string[]
+  dns?: string
+  zone: string
+}
+
+export interface CreateIpsecTunnelRequest {
+  tunnel_type: 'ipsec'
+  name: string
+  mode: IpsecMode
+  auth_method: IpsecAuthMethod
+  local_id?: string
+  listen_port?: number
+  local_addrs?: string
+  pool_v4?: string
+  pool_v6?: string
+  local_ts?: string[]
+  remote_ts?: string[]
+  dns?: string
+  zone?: string
+}
+
+export interface IpsecChildSaStatus {
+  name: string
+  state: string
+  local_ts: string
+  remote_ts: string
+}
+
+export interface IpsecStatus {
+  name: string
+  is_up: boolean
+  ike_state: string
+  child_sas: IpsecChildSaStatus[]
+}
+
+// Site mesh types
+export type MeshTopology = 'full-mesh' | 'hub-and-spoke'
+export type SiteConnectionState = 'connected' | 'degraded' | 'down' | 'pending'
+
+export interface SitePeer {
+  id: number
+  mesh_id: number
+  name: string
+  endpoint: string
+  public_key: string
+  local_subnets: string[]
+  remote_subnets: string[]
+  priority: number
+  is_local: boolean
+  enabled: boolean
+  created_at: string
+}
+
+export interface SiteMesh {
+  id: number
+  name: string
+  topology: MeshTopology
+  listen_port: number
+  keepalive_interval: number
+  failover_timeout_secs: number
+  enabled: boolean
+  sites: SitePeer[]
+  created_at: string
+  updated_at: string
+}
+
+export interface SiteStatus {
+  site_id: number
+  site_name: string
+  endpoint: string
+  state: SiteConnectionState
+  last_handshake_secs: number
+  latency_ms: number | null
+  rx_bytes: number
+  tx_bytes: number
+}
+
+export interface MeshStatus {
+  mesh_id: number
+  mesh_name: string
+  is_active: boolean
+  interface_name: string
+  sites: SiteStatus[]
+}
+
+export interface CreateMeshRequest {
+  name: string
+  topology?: MeshTopology
+  listen_port?: number
+  keepalive_interval?: number
+  failover_timeout_secs?: number
+  sites?: CreateSiteRequest[]
+}
+
+export interface CreateSiteRequest {
+  name: string
+  endpoint: string
+  public_key?: string
+  preshared_key?: string
+  local_subnets?: string[]
+  remote_subnets?: string[]
+  priority?: number
+  is_local?: boolean
+}
+
+export interface UpdateMeshRequest {
+  name?: string
+  topology?: MeshTopology
+  listen_port?: number
+  keepalive_interval?: number
+  failover_timeout_secs?: number
+}
+
 // DNS types
 export interface DnsConfig {
   upstream_dns: string[];
@@ -414,6 +558,19 @@ export interface IdsEvent {
   interface: string;
   vlan: number | null;
   description: string;
+}
+
+export interface IdsTopSource {
+  ip: string;
+  count: number;
+}
+
+export interface IdsEventStats {
+  total: number;
+  critical_24h: number;
+  by_severity: Record<string, number>;
+  by_detector: Record<string, number>;
+  top_sources: IdsTopSource[];
 }
 
 // Device types
@@ -685,6 +842,47 @@ export const api = {
   getVpnPeerConfig: (tunnelId: number, peerId: number, endpoint: string) =>
     request<{ config: string }>(`/api/v1/vpn/tunnels/${tunnelId}/peers/${peerId}/config?endpoint=${encodeURIComponent(endpoint)}`),
 
+  // IPSec VPN (uses unified tunnel endpoints with tunnel_type: "ipsec")
+  getIpsecTunnels: async () => {
+    const res = await request<{ tunnels: VpnTunnel[] }>('/api/v1/vpn/tunnels')
+    return { tunnels: (res.tunnels ?? []).filter(t => t.tunnel_type === 'ipsec') }
+  },
+  createIpsecTunnel: (body: CreateIpsecTunnelRequest) =>
+    request<{ tunnel: VpnTunnel }>('/api/v1/vpn/tunnels', { method: 'POST', body }),
+  getIpsecTunnel: (id: number) =>
+    request<{ tunnel: VpnTunnel }>(`/api/v1/vpn/tunnels/${id}`),
+  updateIpsecTunnel: (id: number, body: CreateIpsecTunnelRequest) =>
+    request<{ tunnel: VpnTunnel }>(`/api/v1/vpn/tunnels/${id}`, { method: 'PUT', body }),
+  deleteIpsecTunnel: (id: number) =>
+    request<void>(`/api/v1/vpn/tunnels/${id}`, { method: 'DELETE' }),
+  startIpsecTunnel: (id: number) =>
+    request<void>(`/api/v1/vpn/tunnels/${id}/start`, { method: 'POST' }),
+  stopIpsecTunnel: (id: number) =>
+    request<void>(`/api/v1/vpn/tunnels/${id}/stop`, { method: 'POST' }),
+  getIpsecTunnelStatus: (id: number) =>
+    request<{ status: IpsecStatus }>(`/api/v1/vpn/tunnels/${id}/status`),
+
+  // Site-to-site VPN meshes
+  getSiteMeshes: () => request<{ meshes: SiteMesh[] }>('/api/v1/vpn/sites'),
+  createSiteMesh: (body: CreateMeshRequest) =>
+    request<{ mesh: SiteMesh }>('/api/v1/vpn/sites', { method: 'POST', body }),
+  getSiteMesh: (id: number) =>
+    request<{ mesh: SiteMesh }>(`/api/v1/vpn/sites/${id}`),
+  updateSiteMesh: (id: number, body: UpdateMeshRequest) =>
+    request<{ mesh: SiteMesh }>(`/api/v1/vpn/sites/${id}`, { method: 'PUT', body }),
+  deleteSiteMesh: (id: number) =>
+    request<void>(`/api/v1/vpn/sites/${id}`, { method: 'DELETE' }),
+  startSiteMesh: (id: number) =>
+    request<void>(`/api/v1/vpn/sites/${id}/start`, { method: 'POST' }),
+  stopSiteMesh: (id: number) =>
+    request<void>(`/api/v1/vpn/sites/${id}/stop`, { method: 'POST' }),
+  getSiteMeshStatus: (id: number) =>
+    request<{ status: MeshStatus }>(`/api/v1/vpn/sites/${id}/status`),
+  addSiteMeshPeer: (meshId: number, site: CreateSiteRequest) =>
+    request<{ site: SitePeer }>(`/api/v1/vpn/sites/${meshId}/peers`, { method: 'POST', body: site }),
+  removeSiteMeshPeer: (meshId: number, peerId: number) =>
+    request<void>(`/api/v1/vpn/sites/${meshId}/peers/${peerId}`, { method: 'DELETE' }),
+
   // DNS
   getDnsConfig: () => request<{ config: DnsConfig }>('/api/v1/dns/config'),
   saveDnsConfig: (config: DnsConfig) => request<void>('/api/v1/dns/config', { method: 'PUT', body: config }),
@@ -697,14 +895,16 @@ export const api = {
   saveDnsOverrides: (overrides: DnsOverride[]) => request<void>('/api/v1/dns/overrides', { method: 'PUT', body: overrides }),
 
   // IDS
-  getIdsEvents: (limit?: number, severity?: string) => {
+  getIdsEvents: (opts?: { limit?: number; severity?: string; detector?: string; since?: string }) => {
     const params = new URLSearchParams();
-    if (limit) params.set('limit', String(limit));
-    if (severity) params.set('severity', severity);
+    if (opts?.limit) params.set('limit', String(opts.limit));
+    if (opts?.severity) params.set('severity', opts.severity);
+    if (opts?.detector) params.set('detector', opts.detector);
+    if (opts?.since) params.set('since', opts.since);
     const qs = params.toString();
     return request<{ events: IdsEvent[] }>(`/api/v1/ids/events${qs ? '?' + qs : ''}`);
   },
-  getIdsStats: () => request<Record<string, unknown>>('/api/v1/ids/events/stats'),
+  getIdsStats: () => request<IdsEventStats>('/api/v1/ids/events/stats'),
 
   // Devices
   getDevices: () => request<{ devices: DeviceSummary[] }>('/api/v1/devices'),
@@ -818,7 +1018,48 @@ export const api = {
     request<{ status: string }>(`/api/v1/ddns/${id}`, { method: 'DELETE' }),
   forceDdnsUpdate: (id: number) =>
     request<{ result: DdnsUpdateResult }>(`/api/v1/ddns/${id}/update`, { method: 'POST' }),
+
+  // UPnP / NAT-PMP
+  getUpnpSettings: () => request<{ upnp: UpnpSettings }>('/api/v1/upnp/settings'),
+  setUpnpSettings: (settings: Partial<UpnpSettings>) =>
+    request<{ upnp: UpnpSettings; note: string }>('/api/v1/upnp/settings', { method: 'PUT', body: settings }),
+  getUpnpMappings: () => request<{ mappings: UpnpMapping[] }>('/api/v1/upnp/mappings'),
+  deleteUpnpMapping: (id: number) =>
+    request<{ status: string; id: number }>(`/api/v1/upnp/mappings/${id}`, { method: 'DELETE' }),
+
+  // Firmware Update
+  checkForUpdate: () =>
+    request<UpdateCheckResult>('/api/v1/system/update/check'),
+  applyUpdate: () =>
+    request<{ status: string; message: string }>('/api/v1/system/update/apply', { method: 'POST' }),
+  rollbackUpdate: () =>
+    request<{ status: string; message: string }>('/api/v1/system/update/rollback', { method: 'POST' }),
+  getUpdateSettings: () =>
+    request<{ settings: UpdateSettings }>('/api/v1/system/update/settings'),
+  setUpdateSettings: (settings: Partial<UpdateSettings>) =>
+    request<{ settings: UpdateSettings }>('/api/v1/system/update/settings', { method: 'PUT', body: settings }),
+
+  // Forward-secret encrypted logs
+  getLogDays: () =>
+    request<{ days: LogDaySummary[] }>('/api/v1/logs/days'),
+  getLogStatus: () =>
+    request<{ status: LogKeyStatus }>('/api/v1/logs/status'),
+  exportLogDay: async (date: string): Promise<LogExportResult> => {
+    const token = localStorage.getItem('token');
+    const hdrs: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) hdrs['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(`${BASE_URL}/api/v1/logs/${encodeURIComponent(date)}/export`, { headers: hdrs });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new ApiError(res.status, text);
+    }
+    return res.json();
+  },
+  destroyLogDay: (date: string) =>
+    request<{ status: string; date: string; message: string }>(`/api/v1/logs/${encodeURIComponent(date)}/destroy`, { method: 'POST' }),
 };
+
+export type WirelessBandwidthMode = 'auto' | 'HT20' | 'HT40' | 'VHT80';
 
 export interface WirelessNetwork {
   id: number;
@@ -830,6 +1071,11 @@ export interface WirelessNetwork {
   is_guest: boolean;
   l2_isolation: boolean;
   enabled: boolean;
+  channel: number;
+  tx_power: number;
+  bandwidth: WirelessBandwidthMode;
+  fast_roaming: boolean;
+  band_steering: boolean;
 }
 
 export interface WirelessNetworkCreate {
@@ -842,6 +1088,11 @@ export interface WirelessNetworkCreate {
   is_guest?: boolean;
   l2_isolation?: boolean;
   enabled?: boolean;
+  channel?: number;
+  tx_power?: number;
+  bandwidth?: WirelessBandwidthMode;
+  fast_roaming?: boolean;
+  band_steering?: boolean;
 }
 
 // DDNS types
@@ -877,6 +1128,85 @@ export interface DdnsUpdateResult {
   success: boolean;
   status: string;
   ip: string;
+}
+
+// UPnP types
+export interface UpnpSettings {
+  enabled: boolean;
+  port_min: number;
+  port_max: number;
+  max_per_ip: number;
+}
+
+export interface UpnpMapping {
+  id: number;
+  protocol: string;
+  external_port: number;
+  internal_ip: string;
+  internal_port: number;
+  description: string;
+  client_ip: string;
+  ttl_seconds: number;
+  created_at: string;
+  expires_at: string;
+}
+
+// Firmware Update types
+export interface FirmwareInfo {
+  version: string;
+  sha256: string;
+  download_url: string;
+  release_notes: string;
+  size_bytes: number;
+  prerelease: boolean;
+  published_at: string;
+}
+
+export interface UpdateCheckResult {
+  current_version: string;
+  update_available: boolean;
+  checked_at: string;
+  available: FirmwareInfo | null;
+}
+
+export interface UpdateSettings {
+  update_channel: string;
+  auto_check: boolean;
+  check_interval_hours: number;
+  last_check: string | null;
+  update_url: string;
+}
+
+// Forward-secret encrypted log types
+export interface LogDaySummary {
+  date: string;
+  entry_count: number;
+  exported: boolean;
+  key_available: boolean;
+}
+
+export interface LogKeyStatus {
+  current_date: string;
+  ratchet_position: number;
+  total_days_stored: number;
+  total_entries: number;
+  destroyed_days: number;
+}
+
+export interface LogExportEntry {
+  id: number;
+  date: string;
+  level: string;
+  module: string;
+  message: string;
+  created_at: string;
+}
+
+export interface LogExportResult {
+  date: string;
+  entries: LogExportEntry[];
+  count: number;
+  exported: boolean;
 }
 
 export { BASE_URL };

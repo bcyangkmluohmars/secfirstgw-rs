@@ -1,6 +1,6 @@
 # Roadmap
 
-Current version: **v0.3.0**
+Current version: **v0.4.0**
 
 ## Status
 
@@ -10,56 +10,79 @@ Current version: **v0.3.0**
 - **Networking** — Interface management, VLAN trunk model (per-port PVID + tagged VLANs), bridge configuration. Auto-detection of Ubiquiti hardware (UDM Pro, SE, USG). Switch ASIC VLAN programming via swconfig driven by DB config. VLAN 1 = void sink (all DROP). WAN ports isolated from internal VLAN space (PVID 0).
 - **Web UI + API** — axum, TLS 1.3 only. E2EE (X25519 + ML-KEM-1024, AES-256-GCM). Session binding (IP + fingerprint). Rate limiting on every endpoint. Security headers (HSTS, CSP, X-Frame-Options, etc.). User management.
 - **DNS/DHCP** — dnsmasq config generation. DHCP ranges, static leases, DNS overrides. DNSSEC validation.
-- **Personality** — 7 switchable personalities for error messages, honeypot, IDS alerts. Switchable via web UI settings.
+- **Personality** — 7 switchable personalities for error messages, honeypot, IDS alerts. Switchable via web UI settings. Persisted across restarts via DB meta table.
 - **Database** — SQLite, encrypted at rest, parameterized queries, migrations.
 - **Auth** — Argon2id password hashing, session tokens, E2EE envelope middleware.
+- **IDS Active Response** — Auto-block on detection threshold. Atomic iptables-restore rule insertion via `sfgw-fw::ids_response`. Rate limiting and timed expiry with background cleanup task.
+- **Honeypot** — Troll TCP listener on port 28082, wired into service lifecycle. Connections logged as IDS events. Enable/disable via API + Web UI.
+- **Backup/Restore** — JSON configuration export/import. Secrets excluded. Atomic restore with SQLite savepoint. Download/upload via Settings UI.
+- **DDNS** — Dynamic DNS client supporting DynDNS2, DuckDNS, and Cloudflare. Background update loop with IP change detection. Per-config intervals. Full CRUD API + Web UI page.
+- **Custom Zones** — IoT, VPN, and user-defined zone types with configurable inbound/outbound/forward policies. Allowed service lists. MGMT always blocked from custom zones (security invariant). Zone presets. DB-backed with iptables rule generation.
+- **Traffic Shaping (QoS)** — HTB qdisc per interface with 4 priority classes (High/Normal/Low/Default). iptables mangle MARK rules. IFB device for ingress shaping. SFQ leaf qdiscs. Match by protocol, port, IP/CIDR, DSCP. Live tc stats. API + Web UI.
+- **WAN Failover/Load-Balancing** — Extended health checks (HTTP probe, DNS resolve, ICMP). Hysteresis/flap detection with configurable threshold and sliding window. Sticky sessions via CONNMARK. Per-zone WAN pinning via fwmark + ip rule. Flap event log. Web UI with health config, flap log viewer.
 - **Display (LCM)** — Native serial driver for UDM Pro front panel (direct STM32F2 MCU communication via `/dev/ttyACM0`, replaces ulcmd). Live system stats (CPU, memory, fan RPM, uptime) pushed every 3s. Board-specific configs (UDM Pro verified, UDM SE + UDM prepared).
 - **UniFi Inform** — Full TNBU binary protocol (AES-128-CBC unadopted, AES-128-GCM adopted). 5-phase adoption flow: passive validation → SSH fingerprint → authkey delivery via inform response → system_cfg with SSH hardening (custom user, ubnt disabled, iptables gateway-only) → post-adoption SSH verification with 3-attempt retry and IDS alerting. Snappy/zlib decompression with bomb protection. Per-IP rate limiting. DB protection against adopted record overwrite on service restart. Live device stats (port table, PoE, CPU/mem). Web UI with adopt/ignore/remove and per-port switch config. Tested end-to-end on USW-Flex and UAP-AC-Pro. See [docs/inform-adoption-flow.md](docs/inform-adoption-flow.md).
 - **WiFi Management** — Wireless network CRUD (create/update/delete SSIDs). WPA2/WPA3 with PSK. Per-SSID VLAN tagging. Per-radio band selection (2.4 GHz, 5 GHz, both). Guest network and L2 isolation flags. AP system_cfg generation with full VLAN bridging: vconfig VLAN creation, per-VLAN bridges (br0.{vid}) with eth0.{vid} uplink + ath radio ports, netconf entries for automatic interface bring-up. Tested end-to-end on UAP-AC-Pro (WPA2 auth + DHCP on VLAN 10).
 - **Deploy** — clean-and-install.sh for production (masks all UniFi services including ulcmd). dev-deploy.sh for rapid iteration on UDM Pro (rsync + on-device build + restart with SSH lockout protection).
 
 ### Untested
-- **VPN** — WireGuard tunnels via boringtun. Peer management, config generation. Multi-core.
+- **VPN** — WireGuard tunnels via boringtun. Peer management, config generation with download + QR code. Multi-core.
 - **IDS** — ARP/DHCP/DNS/VLAN anomaly detection framework with alert correlation.
 - **Display (HD44780/Framebuffer)** — HD44780 LCD fallback, framebuffer touchscreen abstraction (untested without UDM Pro LCM hardware).
 
+- **WiFi Advanced** — Channel selection, TX power, bandwidth (HT20/HT40/VHT80), fast roaming (802.11r), band steering. Per-radio config in system_cfg. Multi-SSID per radio (VAP): up to 4 SSIDs per radio, correct ath0/ath1/ath10/ath11 naming, dynamic bridge port enumeration. VAP capacity indicator in Web UI.
+- **IDS Event Feed** — Real-time SSE event page with severity/category/time filters, stats cards, top source IPs, expandable rows, JSON export.
+- **Firmware Updates (OTA)** — Update check via configurable URL (GitHub releases default, HTTPS enforced). Mandatory SHA-256 verified download, atomic binary swap via rename(2), auto-rollback. Background periodic check. Web UI with release notes, channel selector.
+- **UPnP/NAT-PMP** — UPnP IGD (SSDP + SOAP) and NAT-PMP (RFC 6886) servers. iptables DNAT mappings with TTL expiry. LAN-only binding, disabled by default, per-IP quotas, port range limits.
+- **IPSec VPN** — IKEv2 via strongSwan (swanctl.conf generation). Site-to-site and roadwarrior modes. PSK and certificate auth. AES-256-GCM + SHA-384 + ECP384 defaults. Web UI with WireGuard/IPSec tab switcher.
+- **SQLCipher** — Database encrypted at rest via SQLCipher (AES-256). Key derived from hardware fingerprint (board serial + CPU ID + MAC) via HKDF-SHA256. Key zeroized after PRAGMA, never on disk. Automatic plain-to-encrypted migration on first start.
+- **Forward-secret logging** — HKDF ratchet with daily key rotation. AES-256-GCM encrypted log files. Export deletes key (forward secrecy). Destroy marks day permanently unrecoverable. Midnight auto-rotation task. API + Web UI with encrypted archive tab.
+- **Multi-site VPN** — Site-to-site WireGuard mesh with auto-failover via handshake age monitoring. Full-mesh or hub-and-spoke topology. Background health monitor. Route failover to backup peers. PSK quantum-resistance. Web UI sites tab.
+- **Dashboard** — Enhanced with security overview, VPN status, device health, DHCP clients, traffic table, 5s auto-refresh.
+
 ### In Progress
 
-- **Honeypot** — Module written (`sfgw-personality::honeypot`), not yet wired into service lifecycle. Troll TCP listener on port 28082.
-- **Forward-secret logging** — Framework exists, daily key rotation not yet integrated.
 - **NAS** — SMB (ksmbd) + NFS interface stubs. Not yet functional.
 - **Encrypted storage** — LUKS2 integration started, not complete.
 
 ### Planned
 
-- **WiFi advanced** — Channel selection, TX power, bandwidth (HT20/HT40/VHT80), fast roaming (802.11r), band steering, multi-SSID per radio (VAP).
-- **Web UI polish** — Dashboard, firewall rule editor drag-and-drop, VPN config download, real-time IDS event feed.
-- **IDS active response** — Auto-block on detection threshold (notify sfgw-fw to insert DROP rules).
-- **Honeypot integration** — Wire honeypot connections into IDS event pipeline for correlation.
-- **Custom zones** — IoT, VPN, Custom zone types with configurable policies.
-- **WAN Failover/Load-Balancing Improvements**
-  - Extended health checks — HTTP probe, DNS resolve check (not just ICMP ping)
-  - Hysteresis / flap detection (interface flapped 10x in 1 min → don't re-route immediately)
-  - Sticky sessions (don't break existing connections on failover)
-  - Per-zone WAN pinning ("DMZ always via eth8, LAN via switch0")
-  - Web UI — WAN section with failover/LB config, health check status, interface priorities
-- **DDNS** — Dynamic DNS client for WAN IP updates.
-- **UPnP/NAT-PMP** — Optional, disabled by default.
-- **Traffic shaping** — QoS via tc/nftables.
-- **Multi-site VPN** — Site-to-site WireGuard with auto-failover.
-- **Firmware updates** — OTA update mechanism with rollback.
-- **Backup/Restore** — Configuration export/import.
+- **Web UI polish** — Firewall rule editor drag-and-drop.
 - **HA (High Availability)** — Active/passive failover between two gateways.
 
 ### Known Issues
 
-- User-defined firewall rules after zone catch-all DROPs are silently ignored (rules need priority reordering)
-- `validate_no_lockout` can be bypassed via rule comments containing "ssh"
-- Port forward ACCEPT rules lack input interface restriction (should be WAN-only)
-- IoT/VPN/Custom zones have no default rules yet
-- Personality setting is not persisted across restarts (resets to "kevin")
+- ~~User-defined firewall rules after zone catch-all DROPs are silently ignored~~ (fixed: catch-all DROPs moved to end of chain)
+- ~~`validate_no_lockout` can be bypassed via rule comments containing "ssh"~~ (fixed: checks rule structure, strips comments before matching)
+- ~~Port forward ACCEPT rules lack input interface restriction~~ (fixed: restricted to WAN interfaces in zone mode)
+- ~~IoT/VPN/Custom zones have no default rules yet~~ (fixed: custom zones with configurable policies + IoT/VPN presets)
+- ~~Personality setting is not persisted across restarts (resets to "kevin")~~ (fixed: DB-backed via meta table)
 
 ## Version History
+
+### v0.4.0 (2026-03-20)
+
+- **SQLCipher** — AES-256 database encryption at rest, hardware-bound key derivation (HKDF-SHA256 from board serial + CPU ID + MAC), automatic plain-to-encrypted migration, vendored OpenSSL for UDM Pro
+- **Forward-secret logging** — HKDF ratchet with daily key rotation, AES-256-GCM encrypted log files, export deletes key, destroy marks permanently unrecoverable, midnight auto-rotation, API + Web UI encrypted archive tab
+- **Multi-site VPN** — Site-to-site WireGuard mesh with auto-failover via handshake age monitoring, full-mesh or hub-and-spoke topology, background health monitor, PSK quantum-resistance, Web UI sites tab
+- **IPSec VPN** — IKEv2 via strongSwan swanctl.conf generation, site-to-site + roadwarrior modes, PSK + certificate auth, AES-256-GCM + SHA-384 + ECP384 defaults, Web UI tab switcher
+- **Custom Zones** — IoT/VPN/user-defined zones with configurable inbound/outbound/forward policies, allowed service lists, MGMT always blocked (security invariant), zone presets, iptables rule generation
+- **Traffic Shaping (QoS)** — HTB qdisc with 4 priority classes, iptables mangle MARK, IFB ingress shaping, SFQ leaf qdiscs, match by protocol/port/IP/DSCP, live tc stats, API + Web UI
+- **WAN Failover/Load-Balancing** — HTTP/DNS/ICMP health probes, flap detection with sliding window, sticky sessions via CONNMARK, per-zone WAN pinning via fwmark + ip rule, flap event log
+- **WiFi Advanced** — Channel selection, TX power, bandwidth (HT20/HT40/VHT80), 802.11r fast roaming, band steering, multi-SSID per radio (VAP) with correct ath naming, VAP capacity indicator
+- **UPnP/NAT-PMP** — UPnP IGD (SSDP + SOAP) and NAT-PMP (RFC 6886), iptables DNAT with TTL expiry, LAN-only, disabled by default, per-IP quotas
+- **Firmware Updates (OTA)** — Update check via configurable HTTPS URL, mandatory SHA-256 verification, atomic binary swap, auto-rollback, background periodic check, Web UI with release notes
+- **DDNS** — DynDNS2/DuckDNS/Cloudflare with background IP change detection, per-config intervals, Cloudflare zone_id hex validation
+- **IDS Event Feed** — Real-time SSE with severity/category/time filters, stats cards, top source IPs, JSON export
+- **Dashboard** — Security overview, VPN status, device health, DHCP clients, traffic table, 5s auto-refresh
+- **IDS Active Response** — Auto-block on threshold, atomic iptables-restore, rate limiting + timed expiry
+- sec: Firmware SHA-256 now mandatory (no install without checksum)
+- sec: update_url enforced HTTPS-only
+- sec: Cloudflare zone_id hex-validated against URL path manipulation
+- fix: rustls CryptoProvider panic on startup (0.23+ requires explicit provider)
+- fix: Devices page shows "UniFi Inform" badge for adopted devices, no action buttons
+- fix: Stale dnsmasq orphan process blocking restart (startup cleanup)
+- DB migrations 007-015 (DDNS, WAN health, QoS, custom zones, wireless advanced, UPnP, firmware, log keys, site mesh)
 
 ### v0.3.0 (2026-03-17)
 

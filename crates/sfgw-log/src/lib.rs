@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #![deny(unsafe_code)]
 
-//! Forward-secret encrypted logging.
+//! Forward-secret encrypted logging with daily key ratchet.
 //!
-//! Every day gets a unique AES-256-GCM key derived via HKDF from a master key.
-//! Once a day-key is deleted (after export), the corresponding logs become
-//! permanently unreadable — achieving forward secrecy for audit logs.
+//! Every day gets a unique AES-256-GCM key derived via HKDF from a ratcheting
+//! master key.  The ratchet is one-way: `master_day_N = HKDF(master_day_{N-1}, "ratchet")`.
+//! Once the master ratchets forward, previous days' keys are unrecoverable unless
+//! the day-key was persisted.  After export the day-key is deleted, achieving
+//! forward secrecy for audit logs.
+
+pub mod layer;
 
 use anyhow::Context;
 
@@ -32,6 +36,10 @@ pub enum LogError {
     #[error("crypto operation failed: {0}")]
     CryptoFailed(String),
 
+    /// The day-key for the requested date has been destroyed.
+    #[error("key destroyed for {0} (forward secrecy)")]
+    KeyDestroyed(String),
+
     /// Wrapped anyhow error for internal context propagation.
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
@@ -48,6 +56,8 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use sfgw_crypto::HkdfLen;
 use sfgw_crypto::secure_mem::SecureBox;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use zeroize::Zeroize;
 
 /// A decrypted log entry.
@@ -69,15 +79,39 @@ struct LogPayload {
     message: String,
 }
 
+/// Summary of a single day's log state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogDaySummary {
+    pub date: String,
+    pub entry_count: i64,
+    pub exported: bool,
+    pub key_available: bool,
+}
+
+/// Current ratchet/key status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyStatus {
+    pub current_date: String,
+    pub ratchet_position: i64,
+    pub total_days_stored: i64,
+    pub total_entries: i64,
+    pub destroyed_days: i64,
+}
+
 /// Encryption key bound to a specific calendar day.
 struct DayKey {
     date: NaiveDate,
     key: LessSafeKey,
 }
 
-/// Forward-secret log manager.
+/// Thread-safe handle to the log manager.
+pub type LogHandle = Arc<Mutex<LogManager>>;
+
+/// Forward-secret log manager with ratcheting master key.
 ///
 /// Holds a reference to the database and the current day's encryption key.
+/// The master key ratchets forward daily — once ratcheted, previous master
+/// states are unrecoverable.
 pub struct LogManager {
     db: sfgw_db::Db,
     current_key: DayKey,
@@ -96,9 +130,18 @@ CREATE TABLE IF NOT EXISTS encrypted_logs (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_logs_date ON encrypted_logs(date);
+
+CREATE TABLE IF NOT EXISTS log_keys (
+    date        TEXT PRIMARY KEY,
+    exported    INTEGER NOT NULL DEFAULT 0,
+    destroyed   INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
 ";
 
 const META_MASTER_KEY: &str = "log_master_key";
+const META_RATCHET_DATE: &str = "log_ratchet_date";
+const META_RATCHET_POSITION: &str = "log_ratchet_position";
 
 fn meta_day_key_name(date: NaiveDate) -> String {
     format!("log_key_{date}")
@@ -111,23 +154,26 @@ fn meta_day_key_name(date: NaiveDate) -> String {
 impl LogManager {
     /// Initialise the log subsystem.
     ///
-    /// Creates the `encrypted_logs` table if needed, generates a master key on
-    /// first run, and derives today's day-key.
+    /// Creates tables if needed, generates a master key on first run, ratchets
+    /// forward to today if days were missed, and derives today's day-key.
     pub async fn init(db: &sfgw_db::Db) -> Result<Self> {
         {
             let conn = db.lock().await;
             conn.execute_batch(SCHEMA_SQL)
-                .context("failed to create encrypted_logs table")?;
+                .context("failed to create log tables")?;
         }
 
-        // Ensure master key exists (held in SecureBox — encrypted in memory).
+        // Ensure master key exists (held in SecureBox -- encrypted in memory).
         let master_key_box = ensure_master_key(db).await?;
 
         let today = Utc::now().date_naive();
+
+        // Ratchet forward from last known date to today.
         let mut master_key_plain = master_key_box
             .open()
             .context("failed to decrypt master key from SecureBox")?;
-        let day_key = ensure_day_key(db, &master_key_plain, today).await?;
+        let ratcheted = ratchet_to_date(db, &mut master_key_plain, today).await?;
+        let day_key = ensure_day_key(db, &ratcheted, today).await?;
         master_key_plain.zeroize();
 
         tracing::info!("log subsystem initialized (forward-secret encryption active)");
@@ -189,14 +235,14 @@ impl LogManager {
     pub async fn export_logs(&self, date: NaiveDate) -> Result<Vec<LogEntry>> {
         let key = self.load_day_key(date).await?;
         let entries = self.decrypt_logs_with_key(date, &key).await?;
+        self.mark_exported(date).await?;
         self.delete_day_key(date).await?;
         Ok(entries)
     }
 
     /// Rotate to a new day-key (call once per day, e.g. from a scheduler).
     ///
-    /// Derives and stores a key for today if it doesn't already exist, then
-    /// updates the in-memory current key.
+    /// Ratchets the master key forward and derives today's day-key.
     pub async fn rotate_key(&mut self) -> Result<()> {
         let today = Utc::now().date_naive();
         if today == self.current_key.date {
@@ -207,7 +253,10 @@ impl LogManager {
         let mut master_key_plain = master_key_box
             .open()
             .context("failed to decrypt master key from SecureBox")?;
-        let day_key = ensure_day_key(&self.db, &master_key_plain, today).await?;
+
+        // Ratchet forward (covers missed days too).
+        let ratcheted = ratchet_to_date(&self.db, &mut master_key_plain, today).await?;
+        let day_key = ensure_day_key(&self.db, &ratcheted, today).await?;
         master_key_plain.zeroize();
 
         self.current_key = DayKey {
@@ -232,12 +281,151 @@ impl LogManager {
         Ok(())
     }
 
+    /// Permanently destroy the key for `date` -- logs for that day become
+    /// unrecoverable.  Unlike `delete_day_key` this also marks the
+    /// `log_keys` row so the UI can show it was intentionally destroyed.
+    pub async fn destroy_day_key(&self, date: NaiveDate) -> Result<()> {
+        self.delete_day_key(date).await?;
+        let conn = self.db.lock().await;
+        let date_str = date.to_string();
+        conn.execute(
+            "UPDATE log_keys SET destroyed = 1 WHERE date = ?1",
+            rusqlite::params![date_str],
+        )
+        .context("failed to mark day key as destroyed")?;
+        tracing::info!("destroyed day-key for {date} (permanent forward secrecy)");
+        Ok(())
+    }
+
+    /// List all days that have log entries, with summary info.
+    pub async fn list_days(&self) -> Result<Vec<LogDaySummary>> {
+        let conn = self.db.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT el.date, COUNT(*) as cnt,
+                    COALESCE(lk.exported, 0),
+                    COALESCE(lk.destroyed, 0)
+             FROM encrypted_logs el
+             LEFT JOIN log_keys lk ON el.date = lk.date
+             GROUP BY el.date
+             ORDER BY el.date DESC",
+        )?;
+
+        let rows: Vec<LogDaySummary> = stmt
+            .query_map([], |row| {
+                let date: String = row.get(0)?;
+                let entry_count: i64 = row.get(1)?;
+                let exported: bool = row.get::<_, i64>(2)? != 0;
+                let destroyed: bool = row.get::<_, i64>(3)? != 0;
+                Ok(LogDaySummary {
+                    date,
+                    entry_count,
+                    exported,
+                    key_available: !destroyed,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // Cross-check against meta table for key availability.
+        drop(stmt);
+        let mut result = rows;
+        for day in &mut result {
+            if !day.key_available {
+                continue;
+            }
+            let key_name = format!("log_key_{}", day.date);
+            let exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM meta WHERE key = ?1",
+                    rusqlite::params![key_name],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                > 0;
+            day.key_available = exists;
+        }
+
+        Ok(result)
+    }
+
+    /// Get current key/ratchet status.
+    pub async fn key_status(&self) -> Result<KeyStatus> {
+        let conn = self.db.lock().await;
+
+        let ratchet_position: i64 = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                rusqlite::params![META_RATCHET_POSITION],
+                |row| {
+                    let s: String = row.get(0)?;
+                    Ok(s.parse::<i64>().unwrap_or(0))
+                },
+            )
+            .unwrap_or(0);
+
+        let total_days_stored: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT date) FROM encrypted_logs",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        let total_entries: i64 = conn
+            .query_row("SELECT COUNT(*) FROM encrypted_logs", [], |row| row.get(0))
+            .unwrap_or(0);
+
+        let destroyed_days: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM log_keys WHERE destroyed = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        Ok(KeyStatus {
+            current_date: self.current_key.date.to_string(),
+            ratchet_position,
+            total_days_stored,
+            total_entries,
+            destroyed_days,
+        })
+    }
+
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
 
+    /// Mark a day as exported in the `log_keys` table.
+    async fn mark_exported(&self, date: NaiveDate) -> Result<()> {
+        let conn = self.db.lock().await;
+        let date_str = date.to_string();
+        conn.execute(
+            "UPDATE log_keys SET exported = 1 WHERE date = ?1",
+            rusqlite::params![date_str],
+        )
+        .context("failed to mark day as exported")?;
+        Ok(())
+    }
+
     /// Load a day-key from the meta table, returning an error if it was deleted.
     async fn load_day_key(&self, date: NaiveDate) -> Result<LessSafeKey> {
+        // Check if explicitly destroyed first.
+        {
+            let conn = self.db.lock().await;
+            let date_str = date.to_string();
+            let destroyed: bool = conn
+                .query_row(
+                    "SELECT destroyed FROM log_keys WHERE date = ?1",
+                    rusqlite::params![date_str],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                != 0;
+            if destroyed {
+                return Err(LogError::KeyDestroyed(date_str));
+            }
+        }
+
         let key_name = meta_day_key_name(date);
         let conn = self.db.lock().await;
         let raw: String = conn
@@ -344,14 +532,137 @@ async fn ensure_master_key(db: &sfgw_db::Db) -> Result<SecureBox<Vec<u8>>> {
     )
     .context("failed to store master key")?;
 
+    // Initialize ratchet metadata.
+    let today = Utc::now().date_naive().to_string();
+    conn.execute(
+        "INSERT OR IGNORE INTO meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![META_RATCHET_DATE, today],
+    )
+    .context("failed to store ratchet date")?;
+    conn.execute(
+        "INSERT OR IGNORE INTO meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![META_RATCHET_POSITION, "0"],
+    )
+    .context("failed to store ratchet position")?;
+
     tracing::info!("generated new log master key");
     Ok(SecureBox::new(mk).context("failed to wrap master key in SecureBox")?)
+}
+
+/// Ratchet the master key forward from its last known date to `target_date`.
+///
+/// Each day of ratcheting: `new_master = HKDF(old_master, info="ratchet")`.
+/// The old master is overwritten in the DB and zeroized in memory.
+/// Returns the ratcheted master key bytes for `target_date`.
+async fn ratchet_to_date(
+    db: &sfgw_db::Db,
+    current_master: &mut Vec<u8>,
+    target_date: NaiveDate,
+) -> Result<[u8; 32]> {
+    let conn = db.lock().await;
+
+    // Load last ratchet date.
+    let last_date_str: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            rusqlite::params![META_RATCHET_DATE],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| target_date.to_string());
+
+    let last_date = NaiveDate::parse_from_str(&last_date_str, "%Y-%m-%d").unwrap_or(target_date);
+
+    let mut position: i64 = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            rusqlite::params![META_RATCHET_POSITION],
+            |row| {
+                let s: String = row.get(0)?;
+                Ok(s.parse::<i64>().unwrap_or(0))
+            },
+        )
+        .unwrap_or(0);
+
+    // Copy current master into a working buffer.
+    let mut master = [0u8; 32];
+    if current_master.len() >= 32 {
+        master.copy_from_slice(&current_master[..32]);
+    }
+
+    // Count days to ratchet.
+    let days_to_ratchet = (target_date - last_date).num_days();
+
+    if days_to_ratchet <= 0 {
+        // Already at or past target date.
+        return Ok(master);
+    }
+
+    tracing::info!(
+        "ratcheting master key forward {days_to_ratchet} day(s) from {last_date} to {target_date}"
+    );
+
+    // Ratchet forward one day at a time.
+    for i in 0..days_to_ratchet {
+        let step_date = last_date + chrono::Duration::days(i + 1);
+        let mut new_master = [0u8; 32];
+        ratchet_once(&master, &mut new_master)?;
+        master.zeroize();
+        master = new_master;
+        position += 1;
+
+        // Record this day in log_keys so we know it existed.
+        let date_str = step_date.to_string();
+        conn.execute(
+            "INSERT OR IGNORE INTO log_keys (date) VALUES (?1)",
+            rusqlite::params![date_str],
+        )
+        .ok();
+    }
+
+    // Persist the new master and ratchet position.
+    let encoded = B64.encode(master);
+    conn.execute(
+        "UPDATE meta SET value = ?2 WHERE key = ?1",
+        rusqlite::params![META_MASTER_KEY, encoded],
+    )
+    .context("failed to update master key after ratchet")?;
+
+    let target_str = target_date.to_string();
+    // Use INSERT OR REPLACE to handle both initial and subsequent ratchets.
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![META_RATCHET_DATE, target_str],
+    )
+    .context("failed to update ratchet date")?;
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![META_RATCHET_POSITION, position.to_string()],
+    )
+    .context("failed to update ratchet position")?;
+
+    // Zeroize the Vec master copy (caller's copy).
+    current_master.zeroize();
+
+    Ok(master)
+}
+
+/// Single ratchet step: HKDF(current, info="ratchet") -> next.
+fn ratchet_once(current: &[u8; 32], out: &mut [u8; 32]) -> Result<()> {
+    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]);
+    let prk = salt.extract(current);
+    let info = [b"ratchet" as &[u8]];
+    let okm = prk
+        .expand(&info, HkdfLen(32))
+        .map_err(|_| LogError::CryptoFailed("HKDF ratchet expand failed".to_string()))?;
+    okm.fill(out)
+        .map_err(|_| LogError::CryptoFailed("HKDF ratchet fill failed".to_string()))?;
+    Ok(())
 }
 
 /// Derive a day-key via HKDF-SHA256 and store it in the meta table if absent.
 async fn ensure_day_key(
     db: &sfgw_db::Db,
-    master_key: &[u8],
+    master_key: &[u8; 32],
     date: NaiveDate,
 ) -> Result<LessSafeKey> {
     let key_name = meta_day_key_name(date);
@@ -379,7 +690,7 @@ async fn ensure_day_key(
     // Derive via HKDF.
     let key_bytes = derive_day_key_bytes(master_key, date)?;
 
-    // Store.
+    // Store day-key.
     let encoded = B64.encode(key_bytes);
     {
         let conn = db.lock().await;
@@ -388,6 +699,14 @@ async fn ensure_day_key(
             rusqlite::params![key_name, encoded],
         )
         .context("failed to store day key")?;
+
+        // Record in log_keys table too.
+        let date_str = date.to_string();
+        conn.execute(
+            "INSERT OR IGNORE INTO log_keys (date) VALUES (?1)",
+            rusqlite::params![date_str],
+        )
+        .context("failed to record day in log_keys")?;
     }
 
     let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes)
@@ -395,7 +714,7 @@ async fn ensure_day_key(
     Ok(LessSafeKey::new(unbound))
 }
 
-/// Pure derivation: HKDF-SHA256(master_key, salt=[], info="sfgw-log-YYYY-MM-DD") → 32 bytes.
+/// Pure derivation: HKDF-SHA256(master_key, salt=[], info="sfgw-log-YYYY-MM-DD") -> 32 bytes.
 fn derive_day_key_bytes(master_key: &[u8], date: NaiveDate) -> Result<[u8; 32]> {
     let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]);
     let prk = salt.extract(master_key);
@@ -529,6 +848,34 @@ mod tests {
         assert!(decrypt(&key_b, &nonce, &ct).is_err(), "wrong key must fail");
     }
 
+    #[test]
+    fn ratchet_is_one_way() {
+        let mut master = [0x99u8; 32];
+        let mut r1 = [0u8; 32];
+        let mut r2 = [0u8; 32];
+        ratchet_once(&master, &mut r1).unwrap();
+        ratchet_once(&r1, &mut r2).unwrap();
+
+        // Ratcheted keys must differ from each other and from original.
+        assert_ne!(master, r1);
+        assert_ne!(r1, r2);
+        assert_ne!(master, r2);
+
+        // There is no reverse: given r2, you cannot recover r1.
+        // (This is inherent to HKDF being a one-way function.)
+        master.zeroize();
+    }
+
+    #[test]
+    fn ratchet_is_deterministic() {
+        let master = [0x55u8; 32];
+        let mut r1a = [0u8; 32];
+        let mut r1b = [0u8; 32];
+        ratchet_once(&master, &mut r1a).unwrap();
+        ratchet_once(&master, &mut r1b).unwrap();
+        assert_eq!(r1a, r1b, "same input must yield same ratchet output");
+    }
+
     #[tokio::test]
     async fn write_read_roundtrip() {
         let db = test_db().await;
@@ -586,10 +933,55 @@ mod tests {
         assert_eq!(exported.len(), 1);
         assert_eq!(exported[0].message, "exported entry");
 
-        // After export, key is gone — reading must fail.
+        // After export, key is gone -- reading must fail.
         assert!(
             mgr.read_logs(today).await.is_err(),
             "key should have been deleted after export"
         );
+    }
+
+    #[tokio::test]
+    async fn destroy_marks_key_as_destroyed() {
+        let db = test_db().await;
+        let mgr = LogManager::init(&db).await.unwrap();
+
+        mgr.write_log("INFO", "destroy_test", "will be destroyed")
+            .await
+            .unwrap();
+
+        let today = Utc::now().date_naive();
+        mgr.destroy_day_key(today).await.unwrap();
+
+        // Check the log_keys table marks it destroyed.
+        let days = mgr.list_days().await.unwrap();
+        assert_eq!(days.len(), 1);
+        assert!(!days[0].key_available);
+    }
+
+    #[tokio::test]
+    async fn list_days_returns_summary() {
+        let db = test_db().await;
+        let mgr = LogManager::init(&db).await.unwrap();
+
+        mgr.write_log("INFO", "test", "entry1").await.unwrap();
+        mgr.write_log("WARN", "test", "entry2").await.unwrap();
+
+        let days = mgr.list_days().await.unwrap();
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].entry_count, 2);
+        assert!(days[0].key_available);
+        assert!(!days[0].exported);
+    }
+
+    #[tokio::test]
+    async fn key_status_reports_correctly() {
+        let db = test_db().await;
+        let mgr = LogManager::init(&db).await.unwrap();
+
+        mgr.write_log("INFO", "test", "entry").await.unwrap();
+
+        let status = mgr.key_status().await.unwrap();
+        assert_eq!(status.current_date, Utc::now().date_naive().to_string());
+        assert_eq!(status.total_entries, 1);
     }
 }

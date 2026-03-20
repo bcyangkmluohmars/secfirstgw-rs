@@ -183,10 +183,18 @@ pub fn validate_ddns_config(config: &DdnsConfig) -> std::result::Result<(), Ddns
         }
         DdnsProvider::Cloudflare => {
             // Cloudflare uses zone ID (username) + API token (password)
-            if config.username.as_deref().unwrap_or("").is_empty() {
+            let zone_id = config.username.as_deref().unwrap_or("");
+            if zone_id.is_empty() {
                 return Err(DdnsValidationError::MissingCredential(
                     "cloudflare".to_string(),
                     "zone_id (in username field)".to_string(),
+                ));
+            }
+            // Zone ID is a hex string — reject anything that could manipulate the API URL path
+            if !zone_id.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(DdnsValidationError::MissingCredential(
+                    "cloudflare".to_string(),
+                    "zone_id must be a hex string".to_string(),
                 ));
             }
             if config.password.as_deref().unwrap_or("").is_empty() {
@@ -981,7 +989,7 @@ mod tests {
             hostname: "myhost.example.com".to_string(),
             provider: "cloudflare".to_string(),
             server: None,
-            username: Some("zone-id-here".to_string()),
+            username: Some("abc123def456abc789def012abc345de".to_string()),
             password: Some("api-token-here".to_string()),
             wan_interface: "eth8".to_string(),
             update_interval_secs: 300,

@@ -1395,13 +1395,8 @@ fn zones_with_custom() -> Vec<ZonePolicy> {
 fn custom_zone_iot_blocks_management_ports() {
     let zones = zones_with_custom();
     let custom = vec![iot_custom_zone()];
-    let config = generate_zone_ruleset_with_custom(
-        &zones,
-        &[],
-        &FirewallPolicy::default(),
-        &[],
-        &custom,
-    );
+    let config =
+        generate_zone_ruleset_with_custom(&zones, &[], &FirewallPolicy::default(), &[], &custom);
 
     // IoT zone must block SSH, HTTPS, HTTP, Inform to gateway.
     assert!(
@@ -1426,13 +1421,8 @@ fn custom_zone_iot_blocks_management_ports() {
 fn custom_zone_iot_allows_dns_dhcp() {
     let zones = zones_with_custom();
     let custom = vec![iot_custom_zone()];
-    let config = generate_zone_ruleset_with_custom(
-        &zones,
-        &[],
-        &FirewallPolicy::default(),
-        &[],
-        &custom,
-    );
+    let config =
+        generate_zone_ruleset_with_custom(&zones, &[], &FirewallPolicy::default(), &[], &custom);
 
     assert!(
         config.contains("-A SFGW-INPUT -i br-iot -p udp --dport 53 -j ACCEPT"),
@@ -1448,13 +1438,8 @@ fn custom_zone_iot_allows_dns_dhcp() {
 fn custom_zone_iot_allows_outbound_blocks_inter_vlan() {
     let zones = zones_with_custom();
     let custom = vec![iot_custom_zone()];
-    let config = generate_zone_ruleset_with_custom(
-        &zones,
-        &[],
-        &FirewallPolicy::default(),
-        &[],
-        &custom,
-    );
+    let config =
+        generate_zone_ruleset_with_custom(&zones, &[], &FirewallPolicy::default(), &[], &custom);
 
     // IoT outbound (to WAN) = ACCEPT.
     assert!(
@@ -1479,13 +1464,8 @@ fn custom_zone_iot_allows_outbound_blocks_inter_vlan() {
 fn custom_zone_vpn_allows_lan_access() {
     let zones = zones_with_custom();
     let custom = vec![vpn_custom_zone()];
-    let config = generate_zone_ruleset_with_custom(
-        &zones,
-        &[],
-        &FirewallPolicy::default(),
-        &[],
-        &custom,
-    );
+    let config =
+        generate_zone_ruleset_with_custom(&zones, &[], &FirewallPolicy::default(), &[], &custom);
 
     // VPN to LAN = ACCEPT (VPN-like zone gets LAN access).
     assert!(
@@ -1510,13 +1490,8 @@ fn custom_zone_vpn_allows_lan_access() {
 fn custom_zone_catchall_drop_present() {
     let zones = zones_with_custom();
     let custom = vec![iot_custom_zone()];
-    let config = generate_zone_ruleset_with_custom(
-        &zones,
-        &[],
-        &FirewallPolicy::default(),
-        &[],
-        &custom,
-    );
+    let config =
+        generate_zone_ruleset_with_custom(&zones, &[], &FirewallPolicy::default(), &[], &custom);
 
     assert!(
         config.contains("-A SFGW-INPUT -i br-iot -j DROP"),
@@ -1531,13 +1506,8 @@ fn custom_zone_mgmt_blocked_regardless_of_policy() {
     let mut permissive = iot_custom_zone();
     permissive.policy_forward = Action::Accept;
     let custom = vec![permissive];
-    let config = generate_zone_ruleset_with_custom(
-        &zones,
-        &[],
-        &FirewallPolicy::default(),
-        &[],
-        &custom,
-    );
+    let config =
+        generate_zone_ruleset_with_custom(&zones, &[], &FirewallPolicy::default(), &[], &custom);
 
     assert!(
         config.contains("-A SFGW-FORWARD -i br-iot -o br-mgmt -j DROP"),

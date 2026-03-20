@@ -26,6 +26,10 @@ pub enum NetError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Input validation error — returned to the caller with details.
+    #[error("validation error: {0}")]
+    Validation(String),
+
     /// Wrapped anyhow error for internal context propagation.
     #[error(transparent)]
     Internal(#[from] anyhow::Error),

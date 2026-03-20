@@ -14,15 +14,23 @@
 //! If any step fails, the device remains in "Adopting" state and can be retried.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use russh::ChannelMsg;
 use russh::client;
+use tokio::sync::Semaphore;
 
 use crate::crypto;
 use crate::state::{HardwareFingerprint, UbntDevice, UbntDeviceState};
+
+/// Maximum number of concurrent SSH provisioning sessions.
+///
+/// Limits resource exhaustion if many devices try to adopt simultaneously.
+/// 3 is sufficient for typical deployments (rarely more than a few devices
+/// adopt at once) while preventing SSH socket/memory exhaustion.
+static SSH_PROVISION_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(3));
 
 /// Factory default credentials on all UniFi devices.
 const FACTORY_USERNAME: &str = "ubnt";
@@ -31,8 +39,14 @@ const FACTORY_PASSWORD: &str = "ubnt";
 /// SSH connection timeout.
 const SSH_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// SSH channel read timeout.
+/// SSH channel read timeout (per-message).
 const CHANNEL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Total deadline for a single SSH command execution.
+///
+/// Prevents a slow device from hanging us indefinitely by sending data
+/// just often enough to avoid the per-message timeout.
+const COMMAND_TOTAL_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Result of a successful provisioning SSH session.
 #[derive(Debug)]
@@ -64,6 +78,13 @@ pub struct ProvisionResult {
 /// 6. Next inform from device (CBC, default key) → handler delivers authkey in mgmt_cfg
 /// 7. Device switches to GCM with our authkey → handler delivers system_cfg
 pub async fn provision_device(db: &sfgw_db::Db, device: &UbntDevice) -> Result<ProvisionResult> {
+    // Acquire a permit from the global semaphore to limit concurrent SSH sessions.
+    // This prevents resource exhaustion when many devices adopt simultaneously.
+    let _permit = SSH_PROVISION_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|_| anyhow::anyhow!("SSH provisioning semaphore closed"))?;
+
     let addr: SocketAddr = format!("{}:22", device.source_ip)
         .parse()
         .with_context(|| format!("invalid device IP for SSH: {}", device.source_ip))?;
@@ -176,6 +197,9 @@ async fn ssh_connect(addr: SocketAddr) -> Result<client::Handle<SshHandler>> {
 }
 
 /// Execute a command on an SSH session and return stdout as string.
+///
+/// Uses both a per-message timeout (`CHANNEL_TIMEOUT`) and a total deadline
+/// (`COMMAND_TOTAL_TIMEOUT`) to prevent slow-drip data attacks.
 async fn ssh_exec(session: &mut client::Handle<SshHandler>, cmd: &str) -> Result<String> {
     let mut channel = session
         .channel_open_session()
@@ -187,44 +211,61 @@ async fn ssh_exec(session: &mut client::Handle<SshHandler>, cmd: &str) -> Result
         .await
         .with_context(|| format!("failed to exec: {cmd}"))?;
 
-    let mut output = Vec::new();
+    // Wrap the entire read loop in a total deadline so a device sending
+    // data slowly (just under per-message timeout) can't hang us forever.
+    let read_loop = async {
+        let mut output = Vec::new();
 
-    loop {
-        let msg = tokio::time::timeout(CHANNEL_TIMEOUT, channel.wait()).await;
+        loop {
+            let msg = tokio::time::timeout(CHANNEL_TIMEOUT, channel.wait()).await;
 
-        match msg {
-            Ok(Some(ChannelMsg::Data { data })) => {
-                output.extend_from_slice(&data);
-                if output.len() > 65536 {
-                    bail!("command output too large (>64KB)");
+            match msg {
+                Ok(Some(ChannelMsg::Data { data })) => {
+                    output.extend_from_slice(&data);
+                    if output.len() > 65536 {
+                        bail!("command output too large (>64KB)");
+                    }
                 }
-            }
-            Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
-                tracing::debug!(
-                    stderr = %String::from_utf8_lossy(&data),
-                    cmd = %cmd,
-                    "SSH stderr"
-                );
-            }
-            Ok(Some(ChannelMsg::Eof | ChannelMsg::Close)) => break,
-            Ok(Some(ChannelMsg::ExitStatus { exit_status })) => {
-                if exit_status != 0 {
-                    bail!("command '{}' exited with status {}", cmd, exit_status);
+                Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
+                    tracing::debug!(
+                        stderr = %String::from_utf8_lossy(&data),
+                        cmd = %cmd,
+                        "SSH stderr"
+                    );
                 }
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => break,
-            Err(_) => {
-                if output.is_empty() {
-                    bail!("timeout reading output from: {cmd}");
+                Ok(Some(ChannelMsg::Eof | ChannelMsg::Close)) => break,
+                Ok(Some(ChannelMsg::ExitStatus { exit_status })) => {
+                    if exit_status != 0 {
+                        bail!("command '{}' exited with status {}", cmd, exit_status);
+                    }
                 }
-                break;
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => {
+                    if output.is_empty() {
+                        bail!("timeout reading output from: {cmd}");
+                    }
+                    break;
+                }
             }
         }
-    }
 
-    String::from_utf8(output).with_context(|| format!("non-UTF8 output from: {cmd}"))
+        String::from_utf8(output).with_context(|| format!("non-UTF8 output from: {cmd}"))
+    };
+
+    tokio::select! {
+        result = read_loop => result,
+        _ = tokio::time::sleep(COMMAND_TOTAL_TIMEOUT) => {
+            bail!("total command timeout ({:?}) exceeded for: {cmd}", COMMAND_TOTAL_TIMEOUT);
+        }
+    }
 }
+
+/// Maximum length for any fingerprint field value.
+///
+/// Real UniFi hardware fields are short (4-64 chars). Anything longer
+/// is suspicious and may indicate injection or a spoofed device.
+const FINGERPRINT_FIELD_MAX_LEN: usize = 256;
 
 /// Parse `/proc/ubnthal/system.info` key=value format.
 fn parse_system_info(text: &str) -> Result<HardwareFingerprint> {
@@ -244,6 +285,17 @@ fn parse_system_info(text: &str) -> Result<HardwareFingerprint> {
         if let Some((key, val)) = line.split_once('=') {
             let key = key.trim();
             let val = val.trim();
+
+            // Validate length for ALL fingerprint fields before storing
+            if val.len() > FINGERPRINT_FIELD_MAX_LEN {
+                bail!(
+                    "fingerprint field '{}' exceeds max length ({} > {})",
+                    key,
+                    val.len(),
+                    FINGERPRINT_FIELD_MAX_LEN
+                );
+            }
+
             match key {
                 "cpuid" => fp.cpuid = val.into(),
                 "serialno" => fp.serialno = val.into(),
@@ -461,14 +513,17 @@ pub struct VerifyResult {
     pub ssh_user_ok: bool,
     /// Whether iptables restricts SSH to gateway only.
     pub iptables_ok: bool,
-    /// Raw system_cfg from device (for debugging).
+    /// Whether the hardware fingerprint (CPUID + serial) still matches.
+    /// `false` indicates a possible device swap — critical security event.
+    pub fingerprint_ok: bool,
+    /// Detailed error descriptions (for debugging).
     pub errors: Vec<String>,
 }
 
 impl VerifyResult {
     /// All checks passed.
     pub fn is_ok(&self) -> bool {
-        self.authkey_ok && self.ssh_user_ok && self.iptables_ok
+        self.authkey_ok && self.ssh_user_ok && self.iptables_ok && self.fingerprint_ok
     }
 }
 
@@ -480,7 +535,15 @@ impl VerifyResult {
 /// - `users.1.name` is our SSH user
 /// - `users.2.shell=/bin/false` (ubnt disabled)
 /// - `iptables` has ACCEPT for gateway + DROP for rest
-pub async fn verify_config_applied(device: &UbntDevice) -> Result<VerifyResult> {
+/// - Hardware fingerprint (CPUID + serial) still matches stored values
+///   (detects device swap between adoption and verification)
+pub async fn verify_config_applied(device: &UbntDevice, db: &sfgw_db::Db) -> Result<VerifyResult> {
+    // Acquire a permit — verification also opens an SSH session.
+    let _permit = SSH_PROVISION_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|_| anyhow::anyhow!("SSH provisioning semaphore closed"))?;
+
     let username = device
         .ssh_username
         .as_deref()
@@ -508,11 +571,78 @@ pub async fn verify_config_applied(device: &UbntDevice) -> Result<VerifyResult> 
         .await
         .context("failed to read system.cfg")?;
 
+    // Re-read hardware fingerprint to detect device swap
+    let fp_output = ssh_exec(&mut session, "cat /proc/ubnthal/system.info")
+        .await
+        .context("failed to re-read system.info during verification")?;
+
     let _ = session
         .disconnect(russh::Disconnect::ByApplication, "", "en")
         .await;
 
     let mut errors = Vec::new();
+
+    // Check hardware fingerprint matches stored values (CPUID + serial)
+    // If these changed, the device may have been physically swapped.
+    let fingerprint_ok = match (parse_system_info(&fp_output), &device.fingerprint) {
+        (Ok(current_fp), Some(stored_fp)) => {
+            let cpuid_match = current_fp.cpuid == stored_fp.cpuid;
+            let serial_match = current_fp.serialno == stored_fp.serialno;
+            if !cpuid_match || !serial_match {
+                tracing::error!(
+                    mac = %device.mac,
+                    stored_cpuid = %stored_fp.cpuid,
+                    current_cpuid = %current_fp.cpuid,
+                    stored_serial = %stored_fp.serialno,
+                    current_serial = %current_fp.serialno,
+                    "CRITICAL: hardware fingerprint mismatch — possible device swap"
+                );
+
+                // Log IDS critical alert — device identity changed between adoption and verification
+                if let Err(ids_err) = sfgw_ids::log_event(
+                    db,
+                    "critical",
+                    "ubnt-inform",
+                    Some(&device.mac),
+                    Some(&device.source_ip),
+                    None,
+                    None,
+                    &format!(
+                        "Hardware fingerprint mismatch during verification for {} — \
+                         stored CPUID={}, current CPUID={}, stored serial={}, current serial={}. \
+                         Device may have been swapped.",
+                        device.model_display,
+                        stored_fp.cpuid,
+                        current_fp.cpuid,
+                        stored_fp.serialno,
+                        current_fp.serialno,
+                    ),
+                )
+                .await
+                {
+                    tracing::warn!(error = %ids_err, "failed to log fingerprint mismatch to IDS");
+                }
+
+                errors.push(format!(
+                    "hardware fingerprint mismatch (cpuid: {}→{}, serial: {}→{})",
+                    stored_fp.cpuid, current_fp.cpuid, stored_fp.serialno, current_fp.serialno,
+                ));
+                false
+            } else {
+                true
+            }
+        }
+        (Ok(_), None) => {
+            tracing::warn!(mac = %device.mac, "no stored fingerprint to compare — skipping fingerprint re-check");
+            true
+        }
+        (Err(e), _) => {
+            errors.push(format!(
+                "failed to parse system.info during verification: {e}"
+            ));
+            false
+        }
+    };
 
     // Check authkey
     let authkey_ok = system_cfg
@@ -552,6 +682,7 @@ pub async fn verify_config_applied(device: &UbntDevice) -> Result<VerifyResult> 
         authkey_ok,
         ssh_user_ok: ssh_user_ok && (ubnt_disabled || username == "ubnt"),
         iptables_ok,
+        fingerprint_ok,
         errors,
     };
 
@@ -663,5 +794,42 @@ mfgweek=2341
         let pw = generate_ssh_password().unwrap();
         assert_eq!(pw.len(), 24);
         assert!(pw.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn parse_system_info_rejects_oversized_field() {
+        let long_val = "A".repeat(FINGERPRINT_FIELD_MAX_LEN + 1);
+        let text = format!("cpuid=a0b1c2d3\nserialro=ABC123\nsystemid={}\n", long_val);
+        let err = parse_system_info(&text).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds max length"),
+            "expected length error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_system_info_accepts_max_length_field() {
+        let max_val = "A".repeat(FINGERPRINT_FIELD_MAX_LEN);
+        let text = format!(
+            "cpuid=a0b1c2d3\nserialno=ABC123456789\nsystemid={}\n",
+            max_val
+        );
+        let fp = parse_system_info(&text).unwrap();
+        assert_eq!(fp.systemid.len(), FINGERPRINT_FIELD_MAX_LEN);
+    }
+
+    #[test]
+    fn verify_result_requires_fingerprint_ok() {
+        let result = VerifyResult {
+            authkey_ok: true,
+            ssh_user_ok: true,
+            iptables_ok: true,
+            fingerprint_ok: false,
+            errors: vec!["fingerprint mismatch".into()],
+        };
+        assert!(
+            !result.is_ok(),
+            "VerifyResult should fail when fingerprint_ok is false"
+        );
     }
 }

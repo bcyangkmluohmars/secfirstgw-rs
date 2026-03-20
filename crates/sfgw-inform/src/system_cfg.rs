@@ -58,6 +58,16 @@ pub struct WirelessNetworkCfg {
     pub l2_isolation: bool,
     pub band: String,
     pub vlan_id: Option<u16>,
+    /// Radio channel (0 = auto).
+    pub channel: u16,
+    /// TX power in dBm (0 = auto).
+    pub tx_power: u16,
+    /// Bandwidth mode for ieee_mode calculation.
+    pub bandwidth: sfgw_net::wireless::WirelessBandwidth,
+    /// 802.11r fast roaming.
+    pub fast_roaming: bool,
+    /// Band steering (prefer 5 GHz).
+    pub band_steering: bool,
 }
 
 /// Configuration parameters for generating system_cfg + mgmt_cfg.
@@ -78,6 +88,101 @@ pub struct SystemCfg {
     /// Wireless networks to push to APs (ignored for switches).
     #[serde(skip)]
     pub wireless_networks: Vec<WirelessNetworkCfg>,
+}
+
+/// VAP (Virtual Access Point) assignment for a single wireless network.
+///
+/// Shows which radio interfaces this network will be assigned to, based on
+/// its band setting and its position in the network list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VapAssignment {
+    /// Network ID from the database.
+    pub network_id: Option<i64>,
+    /// SSID for reference.
+    pub ssid: String,
+    /// VAP device name on 2.4 GHz radio (None if not on this radio).
+    pub vap_2g: Option<String>,
+    /// VAP device name on 5 GHz radio (None if not on this radio).
+    pub vap_5g: Option<String>,
+}
+
+/// Compute VAP assignments for a list of wireless networks.
+///
+/// Returns the assignment for each network, respecting the MAX_VAPS_PER_RADIO limit.
+/// Networks beyond the limit on a given radio will have `None` for that radio's VAP.
+pub fn compute_vap_assignments(networks: &[WirelessNetworkCfg]) -> Vec<VapAssignment> {
+    let mut vap_idx_2g: usize = 0;
+    let mut vap_idx_5g: usize = 0;
+    let mut result = Vec::with_capacity(networks.len());
+
+    for net in networks {
+        let on_2g = net.band == "both" || net.band == "2g";
+        let on_5g = net.band == "both" || net.band == "5g";
+
+        let vap_2g = if on_2g && vap_idx_2g < MAX_VAPS_PER_RADIO {
+            let dev = vap_devname(false, vap_idx_2g);
+            vap_idx_2g += 1;
+            Some(dev)
+        } else {
+            None
+        };
+
+        let vap_5g = if on_5g && vap_idx_5g < MAX_VAPS_PER_RADIO {
+            let dev = vap_devname(true, vap_idx_5g);
+            vap_idx_5g += 1;
+            Some(dev)
+        } else {
+            None
+        };
+
+        result.push(VapAssignment {
+            network_id: None, // Caller should fill from DB IDs
+            ssid: net.ssid.clone(),
+            vap_2g,
+            vap_5g,
+        });
+    }
+
+    result
+}
+
+/// Count how many VAPs would be used per radio for the given networks.
+///
+/// Returns `(count_2g, count_5g)`.
+pub fn count_vaps_per_radio(networks: &[WirelessNetworkCfg]) -> (usize, usize) {
+    let mut count_2g: usize = 0;
+    let mut count_5g: usize = 0;
+
+    for net in networks {
+        if net.band == "both" || net.band == "2g" {
+            count_2g += 1;
+        }
+        if net.band == "both" || net.band == "5g" {
+            count_5g += 1;
+        }
+    }
+
+    (count_2g, count_5g)
+}
+
+/// Validate that the wireless network configuration does not exceed VAP limits.
+///
+/// Returns `Ok(())` if within limits, or `Err` with a description of the violation.
+pub fn validate_vap_limits(networks: &[WirelessNetworkCfg]) -> std::result::Result<(), String> {
+    let (count_2g, count_5g) = count_vaps_per_radio(networks);
+
+    if count_2g > MAX_VAPS_PER_RADIO {
+        return Err(format!(
+            "too many networks on 2.4 GHz radio: {count_2g} (max {MAX_VAPS_PER_RADIO})"
+        ));
+    }
+    if count_5g > MAX_VAPS_PER_RADIO {
+        return Err(format!(
+            "too many networks on 5 GHz radio: {count_5g} (max {MAX_VAPS_PER_RADIO})"
+        ));
+    }
+
+    Ok(())
 }
 
 /// Load enabled wireless networks from DB and convert to `WirelessNetworkCfg`.
@@ -102,6 +207,11 @@ pub async fn load_wireless_networks(db: &sfgw_db::Db) -> Vec<WirelessNetworkCfg>
                     sfgw_net::wireless::WirelessBand::FiveGhz => "5g".into(),
                 },
                 vlan_id: n.vlan_id,
+                channel: n.channel,
+                tx_power: n.tx_power,
+                bandwidth: n.bandwidth,
+                fast_roaming: n.fast_roaming,
+                band_steering: n.band_steering,
             })
             .collect(),
         Err(e) => {
@@ -180,6 +290,27 @@ pub fn generate_system_cfg(cfg: &SystemCfg) -> Option<String> {
     }
 }
 
+/// Maximum number of VAPs (Virtual Access Points) per radio.
+///
+/// UAP-AC-Pro hardware supports up to 4 VAPs per radio (ath0..ath3 on 2.4 GHz,
+/// ath10..ath13 on 5 GHz). Exceeding this limit causes the AP firmware to reject
+/// the config or behave unpredictably.
+pub const MAX_VAPS_PER_RADIO: usize = 4;
+
+/// Compute the VAP device name for a given radio and VAP index within that radio.
+///
+/// Radio 0 (2.4 GHz): ath0 (primary), ath1, ath2, ath3
+/// Radio 1 (5 GHz):   ath10 (primary), ath11, ath12, ath13
+///
+/// `vap_index` is 0-based within the radio (0 = primary VAP).
+fn vap_devname(is_5ghz: bool, vap_index: usize) -> String {
+    if is_5ghz {
+        format!("ath1{vap_index}")
+    } else {
+        format!("ath{vap_index}")
+    }
+}
+
 /// Push aaa.N.* + wireless.N.* entries for a single WLAN on a single radio.
 ///
 /// Reference: real UAP-AC-Pro system_cfg dump with WPA2-PSK WLAN.
@@ -214,7 +345,23 @@ fn push_aaa_wireless(
 
     lines.push(format!("aaa.{i}.pmf.status={pmf_status}"));
     lines.push(format!("aaa.{i}.pmf.mode={pmf_mode}"));
-    lines.push(format!("aaa.{i}.ft.status=disabled"));
+
+    // 802.11r fast roaming (FT)
+    if net.fast_roaming {
+        lines.push(format!("aaa.{i}.ft.status=enabled"));
+        lines.push(format!("aaa.{i}.ft_over_ds=1"));
+        lines.push(format!("aaa.{i}.ft_key_method=1"));
+        // Auto-generate FT MDID from SSID hash (4 hex chars, deterministic per SSID)
+        let mdid = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&net.ssid, &mut hasher);
+            format!("{:04x}", std::hash::Hasher::finish(&hasher) as u16)
+        };
+        lines.push(format!("aaa.{i}.ft_mdid={mdid}"));
+    } else {
+        lines.push(format!("aaa.{i}.ft.status=disabled"));
+    }
+
     lines.push(format!("aaa.{i}.country_beacon=disabled"));
     lines.push(format!("aaa.{i}.11k.status=disabled"));
     lines.push(format!("aaa.{i}.br.devname={br_dev}"));
@@ -274,6 +421,25 @@ fn push_aaa_wireless(
         "wireless.{i}.dtim_period={}",
         if is_5ghz { "3" } else { "1" }
     ));
+
+    // Channel override (0 = auto, already set on radio, skip)
+    if net.channel != 0 {
+        lines.push(format!("wireless.{i}.channel={}", net.channel));
+    }
+
+    // TX power override (0 = auto)
+    if net.tx_power != 0 {
+        lines.push(format!("wireless.{i}.txpower={}", net.tx_power));
+    }
+
+    // HT mode (bandwidth)
+    let htmode = net.bandwidth.to_ieee_mode(is_5ghz);
+    lines.push(format!("wireless.{i}.htmode={htmode}"));
+
+    // Band steering
+    if net.band_steering {
+        lines.push(format!("wireless.{i}.band_steering=prefer_5g"));
+    }
 }
 
 /// AP system_cfg — based on real UAP-AC-Pro dump from adopted device.
@@ -298,6 +464,21 @@ fn generate_ap_system_cfg(cfg: &SystemCfg) -> String {
         lines.push("users.2.status=enabled".into());
     }
 
+    // Resolve radio-level settings from the first applicable network per band.
+    // If multiple networks exist on the same band, the first one's settings win.
+    let (ch_2g, txp_2g, bw_2g) = cfg
+        .wireless_networks
+        .iter()
+        .find(|n| n.band == "both" || n.band == "2g")
+        .map(|n| (n.channel, n.tx_power, n.bandwidth.clone()))
+        .unwrap_or((0, 0, sfgw_net::wireless::WirelessBandwidth::Auto));
+    let (ch_5g, txp_5g, bw_5g) = cfg
+        .wireless_networks
+        .iter()
+        .find(|n| n.band == "both" || n.band == "5g")
+        .map(|n| (n.channel, n.tx_power, n.bandwidth.clone()))
+        .unwrap_or((0, 0, sfgw_net::wireless::WirelessBandwidth::Auto));
+
     // radio — enabled on APs, minimal config (let device use defaults)
     lines.push("radio.status=enabled".into());
     lines.push("radio.countrycode=276".into());
@@ -306,10 +487,20 @@ fn generate_ap_system_cfg(cfg: &SystemCfg) -> String {
     lines.push("radio.1.phyname=wifi0".into());
     lines.push("radio.1.mode=master".into());
     lines.push("radio.1.rate.auto=enabled".into());
-    lines.push("radio.1.txpower_mode=auto".into());
-    lines.push("radio.1.txpower=auto".into());
-    lines.push("radio.1.channel=auto".into());
-    lines.push("radio.1.ieee_mode=11nght20".into());
+    if txp_2g == 0 {
+        lines.push("radio.1.txpower_mode=auto".into());
+        lines.push("radio.1.txpower=auto".into());
+    } else {
+        lines.push("radio.1.txpower_mode=custom".into());
+        lines.push(format!("radio.1.txpower={txp_2g}"));
+    }
+    if ch_2g == 0 {
+        lines.push("radio.1.channel=auto".into());
+    } else {
+        lines.push(format!("radio.1.channel={ch_2g}"));
+    }
+    lines.push(format!("radio.1.ieee_mode={}", bw_2g.to_ieee_mode(false)));
+    // radio.1.devname is the primary VAP on 2.4 GHz (always ath0)
     lines.push("radio.1.devname=ath0".into());
     lines.push("radio.1.status=enabled".into());
     lines.push("radio.1.ampdu.status=enabled".into());
@@ -320,37 +511,63 @@ fn generate_ap_system_cfg(cfg: &SystemCfg) -> String {
     lines.push("radio.2.phyname=wifi1".into());
     lines.push("radio.2.mode=master".into());
     lines.push("radio.2.rate.auto=enabled".into());
-    lines.push("radio.2.txpower_mode=auto".into());
-    lines.push("radio.2.txpower=auto".into());
-    lines.push("radio.2.channel=auto".into());
-    lines.push("radio.2.ieee_mode=11naht40".into());
-    lines.push("radio.2.devname=ath1".into());
+    if txp_5g == 0 {
+        lines.push("radio.2.txpower_mode=auto".into());
+        lines.push("radio.2.txpower=auto".into());
+    } else {
+        lines.push("radio.2.txpower_mode=custom".into());
+        lines.push(format!("radio.2.txpower={txp_5g}"));
+    }
+    if ch_5g == 0 {
+        lines.push("radio.2.channel=auto".into());
+    } else {
+        lines.push(format!("radio.2.channel={ch_5g}"));
+    }
+    lines.push(format!("radio.2.ieee_mode={}", bw_5g.to_ieee_mode(true)));
+    // radio.2.devname is the primary VAP on 5 GHz (always ath10)
+    lines.push("radio.2.devname=ath10".into());
     lines.push("radio.2.status=enabled".into());
     lines.push("radio.2.ampdu.status=enabled".into());
     lines.push("radio.2.antenna.gain=3".into());
     lines.push("radio.2.antenna=-1".into());
 
-    // aaa + wireless — dynamic from configured WLANs
+    // aaa + wireless — dynamic from configured WLANs (multi-VAP per radio)
+    //
+    // Each radio supports up to MAX_VAPS_PER_RADIO VAPs:
+    //   Radio 0 (2.4 GHz): ath0 (primary), ath1, ath2, ath3
+    //   Radio 1 (5 GHz):   ath10 (primary), ath11, ath12, ath13
+    //
+    // Networks are grouped by band and assigned VAP indices in order.
+    // "both" band networks get a VAP on each radio.
+    //
     // Track which wifi interfaces map to which VLAN for bridge port assignment.
     // ath_to_vlan: (devname, vlan_id_option)
-    let mut ath_to_vlan: Vec<(&str, Option<u16>)> = Vec::new();
+    let mut ath_to_vlan: Vec<(String, Option<u16>)> = Vec::new();
 
     lines.push("aaa.status=enabled".into());
     lines.push("wireless.status=enabled".into());
 
-    let mut idx = 1u32;
+    // Count VAPs per radio to assign correct devnames
+    let mut vap_idx_2g: usize = 0; // next VAP index on 2.4 GHz radio
+    let mut vap_idx_5g: usize = 0; // next VAP index on 5 GHz radio
+    let mut idx = 1u32; // global aaa/wireless index (1-based)
+
     for net in &cfg.wireless_networks {
         let on_2g = net.band == "both" || net.band == "2g";
         let on_5g = net.band == "both" || net.band == "5g";
 
-        if on_2g {
-            push_aaa_wireless(&mut lines, idx, net, "ath0", "wifi0", false);
-            ath_to_vlan.push(("ath0", net.vlan_id));
+        if on_2g && vap_idx_2g < MAX_VAPS_PER_RADIO {
+            let devname = vap_devname(false, vap_idx_2g);
+            push_aaa_wireless(&mut lines, idx, net, &devname, "wifi0", false);
+            ath_to_vlan.push((devname, net.vlan_id));
+            vap_idx_2g += 1;
             idx += 1;
         }
-        if on_5g {
-            push_aaa_wireless(&mut lines, idx, net, "ath1", "wifi1", true);
-            ath_to_vlan.push(("ath1", net.vlan_id));
+        if on_5g && vap_idx_5g < MAX_VAPS_PER_RADIO {
+            let devname = vap_devname(true, vap_idx_5g);
+            push_aaa_wireless(&mut lines, idx, net, &devname, "wifi1", true);
+            ath_to_vlan.push((devname, net.vlan_id));
+            vap_idx_5g += 1;
             idx += 1;
         }
     }
@@ -399,9 +616,21 @@ fn generate_ap_system_cfg(cfg: &SystemCfg) -> String {
     lines.push("bridge.1.stp.status=disabled".into());
     lines.push("bridge.1.port.1.devname=eth0".into());
     if !all_vlans {
-        // Only include wifi in br0 if there are untagged WLANs (or no WLANs)
-        lines.push("bridge.1.port.2.devname=ath0".into());
-        lines.push("bridge.1.port.3.devname=ath1".into());
+        // Add all untagged VAPs to br0 (or primary VAPs if no WLANs configured)
+        let untagged_vaps: Vec<&String> = ath_to_vlan
+            .iter()
+            .filter(|(_, vid)| vid.is_none())
+            .map(|(dev, _)| dev)
+            .collect();
+        if untagged_vaps.is_empty() && cfg.wireless_networks.is_empty() {
+            // No WLANs — include primary VAPs in br0 as defaults
+            lines.push("bridge.1.port.2.devname=ath0".into());
+            lines.push("bridge.1.port.3.devname=ath10".into());
+        } else {
+            for (port_idx, dev) in (2u32..).zip(untagged_vaps.iter()) {
+                lines.push(format!("bridge.1.port.{port_idx}.devname={dev}"));
+            }
+        }
     }
 
     // VLAN bridges — one br0.{vid} per unique VLAN
@@ -422,8 +651,8 @@ fn generate_ap_system_cfg(cfg: &SystemCfg) -> String {
                 lines.push(format!("bridge.{bridge_idx}.port.1.devname=eth0.{vid}"));
                 // Additional ports: wifi interfaces assigned to this VLAN
                 let mut port_idx = 2u32;
-                for &(ath_dev, ath_vid) in &ath_to_vlan {
-                    if ath_vid == Some(vid) {
+                for (ath_dev, ath_vid) in &ath_to_vlan {
+                    if *ath_vid == Some(vid) {
                         lines.push(format!(
                             "bridge.{bridge_idx}.port.{port_idx}.devname={ath_dev}"
                         ));
@@ -496,13 +725,38 @@ fn generate_ap_system_cfg(cfg: &SystemCfg) -> String {
     lines.push("resolv.nameserver.1.status=disabled".into());
     lines.push("resolv.nameserver.2.status=disabled".into());
 
-    // ebtables
+    // ebtables — broadcast/multicast storm protection per VAP
     lines.push("ebtables.status=enabled".into());
     lines.push("ebtables.add_vlan.status=disabled".into());
-    lines.push("ebtables.1.cmd=-t nat -A PREROUTING --in-interface ath0 -d BGA -j DROP".into());
-    lines.push("ebtables.2.cmd=-t nat -A POSTROUTING --out-interface ath0 -d BGA -j DROP".into());
-    lines.push("ebtables.3.cmd=-t nat -A PREROUTING --in-interface ath1 -d BGA -j DROP".into());
-    lines.push("ebtables.4.cmd=-t nat -A POSTROUTING --out-interface ath1 -d BGA -j DROP".into());
+    {
+        let mut eb_idx = 1u32;
+        // Generate ebtables rules for all active VAPs
+        let active_vaps: Vec<&String> = ath_to_vlan.iter().map(|(dev, _)| dev).collect();
+        if active_vaps.is_empty() {
+            // No WLANs — still protect primary VAPs
+            for iface in &["ath0", "ath10"] {
+                lines.push(format!(
+                    "ebtables.{eb_idx}.cmd=-t nat -A PREROUTING --in-interface {iface} -d BGA -j DROP"
+                ));
+                eb_idx += 1;
+                lines.push(format!(
+                    "ebtables.{eb_idx}.cmd=-t nat -A POSTROUTING --out-interface {iface} -d BGA -j DROP"
+                ));
+                eb_idx += 1;
+            }
+        } else {
+            for iface in &active_vaps {
+                lines.push(format!(
+                    "ebtables.{eb_idx}.cmd=-t nat -A PREROUTING --in-interface {iface} -d BGA -j DROP"
+                ));
+                eb_idx += 1;
+                lines.push(format!(
+                    "ebtables.{eb_idx}.cmd=-t nat -A POSTROUTING --out-interface {iface} -d BGA -j DROP"
+                ));
+                eb_idx += 1;
+            }
+        }
+    }
 
     // iptables — restrict SSH to gateway MGMT IP only
     lines.push(format!(
@@ -766,7 +1020,7 @@ mod tests {
         assert!(result.contains("bridge.1.devname=br0"));
         assert!(result.contains("radio.status=enabled"));
         assert!(result.contains("radio.1.devname=ath0"));
-        assert!(result.contains("radio.2.devname=ath1"));
+        assert!(result.contains("radio.2.devname=ath10"));
         assert!(result.contains("switch.status=disabled"));
         assert!(result.contains("sshd.1.ifname=br0"));
         assert!(result.contains("dhcpc.1.devname=br0"));
@@ -798,10 +1052,15 @@ mod tests {
             l2_isolation: false,
             band: "both".into(),
             vlan_id: None,
+            channel: 0,
+            tx_power: 0,
+            bandwidth: sfgw_net::wireless::WirelessBandwidth::Auto,
+            fast_roaming: false,
+            band_steering: false,
         }];
         let result = generate_system_cfg(&cfg).unwrap();
 
-        // Should have aaa + wireless entries for both radios (idx 1 = 2.4GHz, idx 2 = 5GHz)
+        // Should have aaa + wireless entries for both radios (idx 1 = 2.4GHz ath0, idx 2 = 5GHz ath10)
         assert!(result.contains("aaa.1.ssid=MyNetwork"));
         assert!(result.contains("aaa.1.devname=ath0"));
         assert!(result.contains("aaa.1.wpa.psk=testpass123"));
@@ -810,7 +1069,7 @@ mod tests {
         assert!(result.contains("wireless.1.parent=wifi0"));
 
         assert!(result.contains("aaa.2.ssid=MyNetwork"));
-        assert!(result.contains("aaa.2.devname=ath1"));
+        assert!(result.contains("aaa.2.devname=ath10"));
         assert!(result.contains("aaa.2.wpa.psk=testpass123"));
         assert!(result.contains("wireless.2.ssid=MyNetwork"));
         assert!(result.contains("wireless.2.parent=wifi1"));
@@ -828,11 +1087,16 @@ mod tests {
             l2_isolation: true,
             band: "5g".into(),
             vlan_id: None,
+            channel: 0,
+            tx_power: 0,
+            bandwidth: sfgw_net::wireless::WirelessBandwidth::Auto,
+            fast_roaming: false,
+            band_steering: false,
         }];
         let result = generate_system_cfg(&cfg).unwrap();
 
-        // 5GHz only — should be idx 1 on ath1
-        assert!(result.contains("aaa.1.devname=ath1"));
+        // 5GHz only — should be idx 1 on ath10 (primary 5GHz VAP)
+        assert!(result.contains("aaa.1.devname=ath10"));
         assert!(result.contains("aaa.1.wpa.key.1.mgmt=SAE"));
         assert!(result.contains("aaa.1.pmf.status=enabled"));
         assert!(result.contains("aaa.1.pmf.mode=2"));
@@ -855,6 +1119,11 @@ mod tests {
             l2_isolation: false,
             band: "both".into(),
             vlan_id: Some(10),
+            channel: 0,
+            tx_power: 0,
+            bandwidth: sfgw_net::wireless::WirelessBandwidth::Auto,
+            fast_roaming: false,
+            band_steering: false,
         }];
         let result = generate_system_cfg(&cfg).unwrap();
 
@@ -867,15 +1136,15 @@ mod tests {
         assert!(result.contains("vlan.1.devname=eth0"));
         assert!(result.contains("vlan.1.id=10"));
 
-        // VLAN bridge with uplink + wifi interfaces
+        // VLAN bridge with uplink + wifi interfaces (multi-VAP names)
         assert!(result.contains("bridge.2.devname=br0.10"));
         assert!(result.contains("bridge.2.port.1.devname=eth0.10"));
         assert!(result.contains("bridge.2.port.2.devname=ath0"));
-        assert!(result.contains("bridge.2.port.3.devname=ath1"));
+        assert!(result.contains("bridge.2.port.3.devname=ath10"));
 
         // wifi interfaces should NOT be in br0 when all WLANs are VLAN-tagged
         assert!(!result.contains("bridge.1.port.2.devname=ath0"));
-        assert!(!result.contains("bridge.1.port.3.devname=ath1"));
+        assert!(!result.contains("bridge.1.port.3.devname=ath10"));
     }
 
     #[test]
@@ -886,5 +1155,413 @@ mod tests {
         // No aaa.1 or wireless.1 entries
         assert!(!result.contains("aaa.1."));
         assert!(!result.contains("wireless.1."));
+    }
+
+    #[test]
+    fn ap_system_cfg_custom_channel_and_txpower() {
+        let mut cfg = test_ap_cfg();
+        cfg.wireless_networks = vec![WirelessNetworkCfg {
+            ssid: "AdvNet".into(),
+            security: "wpa2".into(),
+            psk: Some("testpass123".into()),
+            hidden: false,
+            is_guest: false,
+            l2_isolation: false,
+            band: "both".into(),
+            vlan_id: None,
+            channel: 6,
+            tx_power: 20,
+            bandwidth: sfgw_net::wireless::WirelessBandwidth::Ht40,
+            fast_roaming: false,
+            band_steering: false,
+        }];
+        let result = generate_system_cfg(&cfg).unwrap();
+
+        // Radio-level channel and TX power
+        assert!(result.contains("radio.1.channel=6"));
+        assert!(result.contains("radio.1.txpower=20"));
+        assert!(result.contains("radio.1.txpower_mode=custom"));
+        assert!(result.contains("radio.1.ieee_mode=11nght40"));
+
+        // Same network on 5GHz radio
+        assert!(result.contains("radio.2.channel=6")); // same channel applied to both
+        assert!(result.contains("radio.2.txpower=20"));
+        assert!(result.contains("radio.2.ieee_mode=11naht40"));
+
+        // Per-WLAN entries
+        assert!(result.contains("wireless.1.channel=6"));
+        assert!(result.contains("wireless.1.txpower=20"));
+        assert!(result.contains("wireless.1.htmode=11nght40"));
+        assert!(result.contains("wireless.2.channel=6"));
+        assert!(result.contains("wireless.2.txpower=20"));
+        assert!(result.contains("wireless.2.htmode=11naht40"));
+    }
+
+    #[test]
+    fn ap_system_cfg_fast_roaming() {
+        let mut cfg = test_ap_cfg();
+        cfg.wireless_networks = vec![WirelessNetworkCfg {
+            ssid: "RoamNet".into(),
+            security: "wpa2".into(),
+            psk: Some("testpass123".into()),
+            hidden: false,
+            is_guest: false,
+            l2_isolation: false,
+            band: "5g".into(),
+            vlan_id: None,
+            channel: 0,
+            tx_power: 0,
+            bandwidth: sfgw_net::wireless::WirelessBandwidth::Auto,
+            fast_roaming: true,
+            band_steering: false,
+        }];
+        let result = generate_system_cfg(&cfg).unwrap();
+
+        assert!(result.contains("aaa.1.ft.status=enabled"));
+        assert!(result.contains("aaa.1.ft_over_ds=1"));
+        assert!(result.contains("aaa.1.ft_key_method=1"));
+        assert!(result.contains("aaa.1.ft_mdid="));
+    }
+
+    #[test]
+    fn ap_system_cfg_band_steering() {
+        let mut cfg = test_ap_cfg();
+        cfg.wireless_networks = vec![WirelessNetworkCfg {
+            ssid: "SteerNet".into(),
+            security: "wpa2".into(),
+            psk: Some("testpass123".into()),
+            hidden: false,
+            is_guest: false,
+            l2_isolation: false,
+            band: "both".into(),
+            vlan_id: None,
+            channel: 0,
+            tx_power: 0,
+            bandwidth: sfgw_net::wireless::WirelessBandwidth::Auto,
+            fast_roaming: false,
+            band_steering: true,
+        }];
+        let result = generate_system_cfg(&cfg).unwrap();
+
+        // Band steering on both radio entries
+        assert!(result.contains("wireless.1.band_steering=prefer_5g"));
+        assert!(result.contains("wireless.2.band_steering=prefer_5g"));
+    }
+
+    #[test]
+    fn ap_system_cfg_vht80() {
+        let mut cfg = test_ap_cfg();
+        cfg.wireless_networks = vec![WirelessNetworkCfg {
+            ssid: "FastNet".into(),
+            security: "wpa2".into(),
+            psk: Some("testpass123".into()),
+            hidden: false,
+            is_guest: false,
+            l2_isolation: false,
+            band: "5g".into(),
+            vlan_id: None,
+            channel: 36,
+            tx_power: 0,
+            bandwidth: sfgw_net::wireless::WirelessBandwidth::Vht80,
+            fast_roaming: false,
+            band_steering: false,
+        }];
+        let result = generate_system_cfg(&cfg).unwrap();
+
+        assert!(result.contains("radio.2.ieee_mode=11acvht80"));
+        assert!(result.contains("radio.2.channel=36"));
+        assert!(result.contains("wireless.1.htmode=11acvht80"));
+        assert!(result.contains("wireless.1.channel=36"));
+    }
+
+    /// Helper to build a test WirelessNetworkCfg.
+    fn test_wlan(ssid: &str, band: &str, vlan_id: Option<u16>) -> WirelessNetworkCfg {
+        WirelessNetworkCfg {
+            ssid: ssid.into(),
+            security: "wpa2".into(),
+            psk: Some("testpass123".into()),
+            hidden: false,
+            is_guest: false,
+            l2_isolation: false,
+            band: band.into(),
+            vlan_id,
+            channel: 0,
+            tx_power: 0,
+            bandwidth: sfgw_net::wireless::WirelessBandwidth::Auto,
+            fast_roaming: false,
+            band_steering: false,
+        }
+    }
+
+    #[test]
+    fn vap_devname_2g() {
+        assert_eq!(vap_devname(false, 0), "ath0");
+        assert_eq!(vap_devname(false, 1), "ath1");
+        assert_eq!(vap_devname(false, 2), "ath2");
+        assert_eq!(vap_devname(false, 3), "ath3");
+    }
+
+    #[test]
+    fn vap_devname_5g() {
+        assert_eq!(vap_devname(true, 0), "ath10");
+        assert_eq!(vap_devname(true, 1), "ath11");
+        assert_eq!(vap_devname(true, 2), "ath12");
+        assert_eq!(vap_devname(true, 3), "ath13");
+    }
+
+    #[test]
+    fn multi_ssid_both_band_vap_assignment() {
+        // Two SSIDs, both on "both" bands — should get ath0+ath10 and ath1+ath11
+        let mut cfg = test_ap_cfg();
+        cfg.wireless_networks = vec![
+            test_wlan("Home", "both", None),
+            test_wlan("Guest", "both", Some(3002)),
+        ];
+        let result = generate_system_cfg(&cfg).unwrap();
+
+        // First SSID: ath0 (2.4GHz), ath10 (5GHz)
+        assert!(result.contains("aaa.1.ssid=Home"));
+        assert!(result.contains("aaa.1.devname=ath0"));
+        assert!(result.contains("wireless.1.parent=wifi0"));
+        assert!(result.contains("aaa.2.ssid=Home"));
+        assert!(result.contains("aaa.2.devname=ath10"));
+        assert!(result.contains("wireless.2.parent=wifi1"));
+
+        // Second SSID: ath1 (2.4GHz), ath11 (5GHz)
+        assert!(result.contains("aaa.3.ssid=Guest"));
+        assert!(result.contains("aaa.3.devname=ath1"));
+        assert!(result.contains("wireless.3.parent=wifi0"));
+        assert!(result.contains("aaa.4.ssid=Guest"));
+        assert!(result.contains("aaa.4.devname=ath11"));
+        assert!(result.contains("wireless.4.parent=wifi1"));
+    }
+
+    #[test]
+    fn multi_ssid_mixed_bands() {
+        // One on 2g only, one on 5g only, one on both
+        let mut cfg = test_ap_cfg();
+        cfg.wireless_networks = vec![
+            test_wlan("IoT", "2g", Some(100)),
+            test_wlan("Fast", "5g", None),
+            test_wlan("Main", "both", None),
+        ];
+        let result = generate_system_cfg(&cfg).unwrap();
+
+        // IoT: 2.4GHz only → ath0
+        assert!(result.contains("aaa.1.ssid=IoT"));
+        assert!(result.contains("aaa.1.devname=ath0"));
+
+        // Fast: 5GHz only → ath10
+        assert!(result.contains("aaa.2.ssid=Fast"));
+        assert!(result.contains("aaa.2.devname=ath10"));
+
+        // Main: both → ath1 (2nd 2.4GHz VAP), ath11 (2nd 5GHz VAP)
+        assert!(result.contains("aaa.3.ssid=Main"));
+        assert!(result.contains("aaa.3.devname=ath1"));
+        assert!(result.contains("aaa.4.ssid=Main"));
+        assert!(result.contains("aaa.4.devname=ath11"));
+    }
+
+    #[test]
+    fn multi_ssid_bridge_untagged() {
+        // Two untagged SSIDs on both bands — all 4 VAPs should be in br0
+        let mut cfg = test_ap_cfg();
+        cfg.wireless_networks = vec![
+            test_wlan("Net1", "both", None),
+            test_wlan("Net2", "both", None),
+        ];
+        let result = generate_system_cfg(&cfg).unwrap();
+
+        // br0 should have eth0 + all 4 untagged VAPs
+        assert!(result.contains("bridge.1.port.1.devname=eth0"));
+        assert!(result.contains("bridge.1.port.2.devname=ath0"));
+        assert!(result.contains("bridge.1.port.3.devname=ath10"));
+        assert!(result.contains("bridge.1.port.4.devname=ath1"));
+        assert!(result.contains("bridge.1.port.5.devname=ath11"));
+    }
+
+    #[test]
+    fn multi_ssid_bridge_mixed_vlan() {
+        // One untagged, one VLAN-tagged — untagged in br0, tagged in br0.{vid}
+        let mut cfg = test_ap_cfg();
+        cfg.wireless_networks = vec![
+            test_wlan("Main", "both", None),
+            test_wlan("Guest", "both", Some(3002)),
+        ];
+        let result = generate_system_cfg(&cfg).unwrap();
+
+        // Untagged (Main) VAPs in br0
+        assert!(result.contains("bridge.1.port.2.devname=ath0"));
+        assert!(result.contains("bridge.1.port.3.devname=ath10"));
+
+        // VLAN bridge for Guest
+        assert!(result.contains("bridge.2.devname=br0.3002"));
+        assert!(result.contains("bridge.2.port.1.devname=eth0.3002"));
+        assert!(result.contains("bridge.2.port.2.devname=ath1"));
+        assert!(result.contains("bridge.2.port.3.devname=ath11"));
+    }
+
+    #[test]
+    fn multi_ssid_ebtables() {
+        // Two SSIDs on both bands — ebtables should cover all 4 VAPs
+        let mut cfg = test_ap_cfg();
+        cfg.wireless_networks = vec![
+            test_wlan("Net1", "both", None),
+            test_wlan("Net2", "both", None),
+        ];
+        let result = generate_system_cfg(&cfg).unwrap();
+
+        // ebtables rules for ath0, ath10, ath1, ath11
+        assert!(
+            result
+                .contains("ebtables.1.cmd=-t nat -A PREROUTING --in-interface ath0 -d BGA -j DROP")
+        );
+        assert!(
+            result.contains(
+                "ebtables.2.cmd=-t nat -A POSTROUTING --out-interface ath0 -d BGA -j DROP"
+            )
+        );
+        assert!(
+            result.contains(
+                "ebtables.3.cmd=-t nat -A PREROUTING --in-interface ath10 -d BGA -j DROP"
+            )
+        );
+        assert!(
+            result.contains(
+                "ebtables.4.cmd=-t nat -A POSTROUTING --out-interface ath10 -d BGA -j DROP"
+            )
+        );
+        assert!(
+            result
+                .contains("ebtables.5.cmd=-t nat -A PREROUTING --in-interface ath1 -d BGA -j DROP")
+        );
+        assert!(
+            result.contains(
+                "ebtables.6.cmd=-t nat -A POSTROUTING --out-interface ath1 -d BGA -j DROP"
+            )
+        );
+        assert!(
+            result.contains(
+                "ebtables.7.cmd=-t nat -A PREROUTING --in-interface ath11 -d BGA -j DROP"
+            )
+        );
+        assert!(
+            result.contains(
+                "ebtables.8.cmd=-t nat -A POSTROUTING --out-interface ath11 -d BGA -j DROP"
+            )
+        );
+    }
+
+    #[test]
+    fn multi_ssid_netconf_vlan_bridges() {
+        // Multiple SSIDs with different VLANs
+        let mut cfg = test_ap_cfg();
+        cfg.wireless_networks = vec![
+            test_wlan("LAN", "both", Some(10)),
+            test_wlan("Guest", "both", Some(3002)),
+        ];
+        let result = generate_system_cfg(&cfg).unwrap();
+
+        // netconf entries for both VLAN bridges
+        assert!(result.contains("netconf.3.devname=br0.10"));
+        assert!(result.contains("netconf.4.devname=eth0.10"));
+        assert!(result.contains("netconf.5.devname=br0.3002"));
+        assert!(result.contains("netconf.6.devname=eth0.3002"));
+    }
+
+    #[test]
+    fn vap_limit_validation() {
+        // 4 networks on "both" = 4 per radio — should be OK
+        let nets: Vec<WirelessNetworkCfg> = (0..4)
+            .map(|i| test_wlan(&format!("Net{i}"), "both", None))
+            .collect();
+        assert!(validate_vap_limits(&nets).is_ok());
+
+        // 5 networks on "both" = 5 per radio — should fail
+        let nets: Vec<WirelessNetworkCfg> = (0..5)
+            .map(|i| test_wlan(&format!("Net{i}"), "both", None))
+            .collect();
+        assert!(validate_vap_limits(&nets).is_err());
+
+        // 4 on 2g + 4 on 5g = OK (different radios)
+        let mut nets: Vec<WirelessNetworkCfg> = (0..4)
+            .map(|i| test_wlan(&format!("Net2g{i}"), "2g", None))
+            .collect();
+        nets.extend((0..4).map(|i| test_wlan(&format!("Net5g{i}"), "5g", None)));
+        assert!(validate_vap_limits(&nets).is_ok());
+
+        // 5 on 2g only — should fail
+        let nets: Vec<WirelessNetworkCfg> = (0..5)
+            .map(|i| test_wlan(&format!("Net{i}"), "2g", None))
+            .collect();
+        let err = validate_vap_limits(&nets).unwrap_err();
+        assert!(
+            err.contains("2.4 GHz"),
+            "error should mention 2.4 GHz: {err}"
+        );
+    }
+
+    #[test]
+    fn vap_count_per_radio() {
+        let nets = vec![
+            test_wlan("A", "both", None),
+            test_wlan("B", "2g", None),
+            test_wlan("C", "5g", None),
+        ];
+        let (c2g, c5g) = count_vaps_per_radio(&nets);
+        assert_eq!(c2g, 2); // A + B
+        assert_eq!(c5g, 2); // A + C
+    }
+
+    #[test]
+    fn compute_vap_assignments_basic() {
+        let nets = vec![
+            test_wlan("Home", "both", None),
+            test_wlan("IoT", "2g", None),
+            test_wlan("Fast", "5g", None),
+        ];
+        let assignments = compute_vap_assignments(&nets);
+        assert_eq!(assignments.len(), 3);
+
+        // Home: ath0 + ath10
+        assert_eq!(assignments[0].vap_2g.as_deref(), Some("ath0"));
+        assert_eq!(assignments[0].vap_5g.as_deref(), Some("ath10"));
+
+        // IoT: ath1 (2.4 only)
+        assert_eq!(assignments[1].vap_2g.as_deref(), Some("ath1"));
+        assert_eq!(assignments[1].vap_5g, None);
+
+        // Fast: ath11 (5 only)
+        assert_eq!(assignments[2].vap_2g, None);
+        assert_eq!(assignments[2].vap_5g.as_deref(), Some("ath11"));
+    }
+
+    #[test]
+    fn four_ssids_both_band_max_vaps() {
+        // Maximum: 4 SSIDs on both bands = ath0..ath3 + ath10..ath13
+        let mut cfg = test_ap_cfg();
+        cfg.wireless_networks = (0..4)
+            .map(|i| test_wlan(&format!("Net{i}"), "both", None))
+            .collect();
+        let result = generate_system_cfg(&cfg).unwrap();
+
+        // Verify all 8 VAPs are created (4 per radio)
+        for i in 0..4 {
+            let ssid = format!("Net{i}");
+            let ath_2g = format!("ath{i}");
+            let ath_5g = format!("ath1{i}");
+            assert!(
+                result.contains(&format!("devname={ath_2g}")),
+                "missing 2.4GHz VAP {ath_2g} for {ssid}"
+            );
+            assert!(
+                result.contains(&format!("devname={ath_5g}")),
+                "missing 5GHz VAP {ath_5g} for {ssid}"
+            );
+        }
+
+        // aaa/wireless indices should be 1..8
+        assert!(result.contains("aaa.8.ssid=Net3"));
+        assert!(!result.contains("aaa.9."));
     }
 }

@@ -1645,11 +1645,7 @@ fn emit_custom_zone_rules(
     // Forward to LAN: VPN zones get ACCEPT, IoT/custom get their forward policy.
     // Check if this is a VPN-like zone (name contains "vpn").
     let is_vpn_like = cz.name.contains("vpn");
-    let lan_fwd = if is_vpn_like {
-        "ACCEPT"
-    } else {
-        fwd_target
-    };
+    let lan_fwd = if is_vpn_like { "ACCEPT" } else { fwd_target };
     for cz_iface in cz_ifaces {
         for lan in lan_ifaces {
             writeln!(

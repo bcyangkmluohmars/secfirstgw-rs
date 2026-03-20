@@ -22,7 +22,7 @@ members = [
 exclude = ["tools/ssh-diag"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/bcyangkmluohmars/secfirstgw-rs"
@@ -39,7 +39,7 @@ axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 # Database
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 # Memory security
 zeroize = { version = "1", features = ["derive"] }
 secrecy = "0.10"
@@ -74,6 +74,8 @@ ksmbd-control = "0.1"
 nfs-server = "0.1"
 # Disk encryption
 libcryptsetup-rs = "0.9"
+# HTTP client (for DDNS updates)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 # Misc
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }

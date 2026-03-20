@@ -81,7 +81,7 @@ export default function Inform() {
     pollRef.current = setInterval(() => {
       api.getInformDevices()
         .then(res => setDevices(res.devices))
-        .catch(() => {})
+        .catch(() => { /* poll retry on next interval */ })
     }, POLL_INTERVAL)
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
@@ -131,10 +131,10 @@ export default function Inform() {
     }
   }
 
-  const handleConfirm = () => {
+  const handleConfirm = async () => {
     if (!confirm) return
-    if (confirm.type === 'adopt') handleAdopt(confirm.mac)
-    else if (confirm.type === 'remove') handleRemove(confirm.mac)
+    if (confirm.type === 'adopt') await handleAdopt(confirm.mac)
+    else if (confirm.type === 'remove') await handleRemove(confirm.mac)
   }
 
   if (loading) return <Spinner label="Loading Inform settings..." />

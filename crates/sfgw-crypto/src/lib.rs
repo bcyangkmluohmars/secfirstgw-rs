@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #![deny(unsafe_code)]
 
+pub mod db_key;
 pub mod secure_mem;
 
 use anyhow::Context;

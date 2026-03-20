@@ -5,14 +5,20 @@ import { api, type DeviceSummary } from '../api'
 import { PageHeader, Spinner, Button, Badge, Tabs, EmptyState, Modal } from '../components/ui'
 import { useToast } from '../hooks/useToast'
 
-const stateVariant = (s: string) => {
-  switch (s) {
+const stateVariant = (d: DeviceSummary) => {
+  if (d.adopted) return 'success' as const
+  switch (d.state) {
     case 'Discovered': return 'info' as const
     case 'Pending': return 'warning' as const
     case 'Approved': case 'Adopted': return 'success' as const
     case 'Rejected': return 'danger' as const
     default: return 'neutral' as const
   }
+}
+
+const stateLabel = (d: DeviceSummary) => {
+  if (d.adopted) return 'UniFi Inform'
+  return d.state
 }
 
 export default function Devices() {
@@ -103,22 +109,23 @@ export default function Devices() {
               <tbody>
                 {currentList.map((d) => (
                   <tr key={d.id} className="border-b border-navy-800/30 hover:bg-navy-800/20 transition-colors">
-                    <td className="px-4 py-3"><Badge variant={stateVariant(d.state)}>{d.state}</Badge></td>
+                    <td className="px-4 py-3"><Badge variant={stateVariant(d)}>{stateLabel(d)}</Badge></td>
                     <td className="px-4 py-3 text-gray-200 text-sm">{d.name || <span className="text-navy-500 italic">unnamed</span>}</td>
                     <td className="px-4 py-3 font-mono text-gray-400 text-xs">{d.model || '---'}</td>
                     <td className="px-4 py-3 font-mono text-gray-400 text-xs tabular-nums">{d.ip || '---'}</td>
                     <td className="px-4 py-3 font-mono text-gray-400 text-xs">{d.mac}</td>
                     <td className="px-4 py-3 text-navy-500 text-xs">{d.last_seen ? new Date(d.last_seen).toLocaleString() : '---'}</td>
                     <td className="px-4 py-3">
-                      <div className="flex gap-2">
-                        {(d.state === 'Pending' || d.state === 'Discovered') && (
-                          <>
-                            <Button size="sm" onClick={() => handleApprove(d)}>Approve</Button>
-                            <Button size="sm" variant="danger" onClick={() => handleReject(d.mac)}>Reject</Button>
-                          </>
-                        )}
-                        {d.adopted && <Button size="sm" variant="secondary" onClick={() => handleViewConfig(d.mac)}>Config</Button>}
-                      </div>
+                      {!d.adopted && (
+                        <div className="flex gap-2">
+                          {(d.state === 'Pending' || d.state === 'Discovered') && (
+                            <>
+                              <Button size="sm" onClick={() => handleApprove(d)}>Approve</Button>
+                              <Button size="sm" variant="danger" onClick={() => handleReject(d.mac)}>Reject</Button>
+                            </>
+                          )}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ))}
