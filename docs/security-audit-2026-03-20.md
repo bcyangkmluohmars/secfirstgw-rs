@@ -327,8 +327,8 @@ TLS 1.3 akzeptiert auch TLS_AES_128_GCM_SHA256. Kein Vulnerability, aber für ma
 | **H3** | SSH Credentials SecureBox wrapping | OPEN | |
 | **M1** | TLS Session Binding fehlt in validate_session() | OPEN | |
 | **M2** | E2EE Envelope Keys nicht an TLS Session gebunden | OPEN | |
-| **M3** | DDNS URL-Parameter nicht URL-encoded | OPEN | |
-| **M4** | DDNS server Feld nicht gegen interne IPs validiert | OPEN | |
+| **M3** | DDNS URL-Parameter nicht URL-encoded | **FIXED** | `sec: DDNS URL encoding + SSRF validation` |
+| **M4** | DDNS server Feld nicht gegen interne IPs validiert | **FIXED** | `sec: DDNS URL encoding + SSRF validation` |
 | **M5** | UPnP SSDP bindet auf 0.0.0.0:1900 | OPEN | |
 | **M8** | DNSSEC AD-Flag nicht gesetzt | OPEN | |
 | **M10** | IPv6: Kein NDP Rate Limiting, kein DHCPv6 | OPEN | |

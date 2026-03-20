@@ -438,6 +438,63 @@ fn build_http_client() -> std::result::Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
+/// Validate that a DDNS server address is not a private/loopback IP (SSRF prevention).
+///
+/// Rejects: 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+/// 169.254.0.0/16, ::1, fc00::/7, fe80::/10, and "localhost".
+fn validate_server_not_private(server: &str) -> std::result::Result<(), String> {
+    // Extract host, handling IPv6 bracket notation (e.g., "[::1]:8080").
+    let host = if server.starts_with('[') {
+        // IPv6 bracket notation: [::1]:port → ::1
+        server
+            .strip_prefix('[')
+            .and_then(|s| s.split(']').next())
+            .unwrap_or(server)
+    } else if server.parse::<IpAddr>().is_ok() {
+        // Raw IP (IPv4 or IPv6 without port) — use as-is.
+        server
+    } else {
+        // Hostname with optional port: "example.com:8080" → "example.com".
+        server.split(':').next().unwrap_or(server)
+    };
+
+    // Reject localhost by name.
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err("DDNS server must not be localhost".to_string());
+    }
+
+    // Try to parse as IP address directly.
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_private_ip(&ip) {
+            return Err(format!(
+                "DDNS server must not be a private/loopback address: {ip}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Check if an IP address is private, loopback, or link-local.
+fn is_private_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()          // 127.0.0.0/8
+                || v4.is_private()    // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                || v4.is_link_local() // 169.254.0.0/16
+                || v4.is_unspecified() // 0.0.0.0
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()          // ::1
+                || v6.is_unspecified() // ::
+                // fc00::/7 (unique local) — check first byte
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // fe80::/10 (link-local) — check first 10 bits
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
 /// Perform a DynDNS2 protocol update.
 ///
 /// Protocol: `GET /nic/update?hostname=<host>&myip=<ip>` with HTTP Basic auth.
@@ -454,10 +511,30 @@ async fn update_dyndns2(config: &DdnsConfig, ip: &str) -> DdnsUpdateResult {
     let username = config.username.as_deref().unwrap_or("");
     let password = config.password.as_deref().unwrap_or("");
 
-    let url = format!(
-        "https://{server}/nic/update?hostname={hostname}&myip={ip}",
-        hostname = config.hostname,
-    );
+    // SSRF prevention: reject private/loopback server addresses.
+    if let Err(e) = validate_server_not_private(server) {
+        return DdnsUpdateResult {
+            success: false,
+            status: e,
+            ip: ip.to_string(),
+        };
+    }
+
+    // Build URL with proper encoding of user-controlled parameters.
+    let base = format!("https://{server}/nic/update");
+    let url = match url::Url::parse_with_params(
+        &base,
+        &[("hostname", config.hostname.as_str()), ("myip", ip)],
+    ) {
+        Ok(u) => u,
+        Err(e) => {
+            return DdnsUpdateResult {
+                success: false,
+                status: format!("invalid DDNS URL: {e}"),
+                ip: ip.to_string(),
+            };
+        }
+    };
 
     let client = match build_http_client() {
         Ok(c) => c,
@@ -471,7 +548,7 @@ async fn update_dyndns2(config: &DdnsConfig, ip: &str) -> DdnsUpdateResult {
     };
 
     let resp = client
-        .get(&url)
+        .get(url)
         .basic_auth(username, Some(password))
         .send()
         .await;
@@ -507,7 +584,20 @@ async fn update_duckdns(config: &DdnsConfig, ip: &str) -> DdnsUpdateResult {
         .strip_suffix(".duckdns.org")
         .unwrap_or(&config.hostname);
 
-    let url = format!("https://www.duckdns.org/update?domains={subdomain}&token={token}&ip={ip}");
+    // Build URL with proper encoding of user-controlled parameters.
+    let url = match url::Url::parse_with_params(
+        "https://www.duckdns.org/update",
+        &[("domains", subdomain), ("token", token), ("ip", ip)],
+    ) {
+        Ok(u) => u,
+        Err(e) => {
+            return DdnsUpdateResult {
+                success: false,
+                status: format!("invalid DuckDNS URL: {e}"),
+                ip: ip.to_string(),
+            };
+        }
+    };
 
     let client = match build_http_client() {
         Ok(c) => c,
@@ -520,7 +610,7 @@ async fn update_duckdns(config: &DdnsConfig, ip: &str) -> DdnsUpdateResult {
         }
     };
 
-    let resp = client.get(&url).send().await;
+    let resp = client.get(url).send().await;
 
     match resp {
         Ok(r) => {
@@ -564,13 +654,28 @@ async fn update_cloudflare(config: &DdnsConfig, ip: &str) -> DdnsUpdateResult {
     };
 
     // Step 1: Find the DNS record ID
-    let list_url = format!(
-        "https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?type=A&name={hostname}",
-        hostname = config.hostname,
+    // Cloudflare API uses path segments for zone_id (not query params), so we
+    // URL-encode it to prevent path traversal. The hostname is a query param
+    // and gets properly encoded by Url::parse_with_params.
+    let list_base = format!(
+        "https://api.cloudflare.com/client/v4/zones/{}/dns_records",
+        url::form_urlencoded::byte_serialize(zone_id.as_bytes()).collect::<String>(),
     );
+    let list_url =
+        match url::Url::parse_with_params(&list_base, &[("type", "A"), ("name", &config.hostname)])
+        {
+            Ok(u) => u,
+            Err(e) => {
+                return DdnsUpdateResult {
+                    success: false,
+                    status: format!("invalid Cloudflare URL: {e}"),
+                    ip: ip.to_string(),
+                };
+            }
+        };
 
     let list_resp = client
-        .get(&list_url)
+        .get(list_url)
         .header("Authorization", format!("Bearer {api_token}"))
         .header("Content-Type", "application/json")
         .send()
@@ -615,9 +720,12 @@ async fn update_cloudflare(config: &DdnsConfig, ip: &str) -> DdnsUpdateResult {
         }
     };
 
-    // Step 2: Update the record
-    let update_url =
-        format!("https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/{record_id}");
+    // Step 2: Update the record (URL-encode path segments to prevent traversal).
+    let update_url = format!(
+        "https://api.cloudflare.com/client/v4/zones/{}/dns_records/{}",
+        url::form_urlencoded::byte_serialize(zone_id.as_bytes()).collect::<String>(),
+        url::form_urlencoded::byte_serialize(record_id.as_bytes()).collect::<String>(),
+    );
 
     let update_body = serde_json::json!({
         "type": "A",
@@ -1149,5 +1257,29 @@ mod tests {
         assert_eq!(back.hostname, "test.example.com");
         assert_eq!(back.provider, "dyndns2");
         assert_eq!(back.last_ip.as_deref(), Some("1.2.3.4"));
+    }
+
+    #[test]
+    fn test_ssrf_rejects_private_ips() {
+        assert!(validate_server_not_private("localhost").is_err());
+        assert!(validate_server_not_private("127.0.0.1").is_err());
+        assert!(validate_server_not_private("10.0.0.1").is_err());
+        assert!(validate_server_not_private("192.168.1.1").is_err());
+        assert!(validate_server_not_private("172.16.0.1").is_err());
+        assert!(validate_server_not_private("169.254.1.1").is_err());
+        assert!(validate_server_not_private("::1").is_err());
+        assert!(validate_server_not_private("0.0.0.0").is_err());
+        // With port
+        assert!(validate_server_not_private("localhost:8080").is_err());
+        assert!(validate_server_not_private("192.168.1.1:443").is_err());
+    }
+
+    #[test]
+    fn test_ssrf_allows_public_servers() {
+        assert!(validate_server_not_private("members.dyndns.org").is_ok());
+        assert!(validate_server_not_private("api.cloudflare.com").is_ok());
+        assert!(validate_server_not_private("1.1.1.1").is_ok());
+        assert!(validate_server_not_private("8.8.8.8").is_ok());
+        assert!(validate_server_not_private("example.com:443").is_ok());
     }
 }
