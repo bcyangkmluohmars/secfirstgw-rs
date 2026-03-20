@@ -58,6 +58,10 @@ pub async fn serve(
     // Protected API + read-only public endpoints: 120 requests per minute per IP.
     // Dashboard loads ~8-10 API calls at once, so 60 was too tight for power users.
     let general_limiter = RateLimiter::new(120, Duration::from_secs(60));
+    // Critical mutations (firewall apply, backup/restore, firmware update, VPN lifecycle,
+    // log destroy, device adoption): 5 requests per minute per IP.
+    // These are expensive or destructive operations that should not be spammable.
+    let critical_limiter = RateLimiter::new(5, Duration::from_secs(60));
 
     // ----- CORS -----
     let listen_host = if listen_addr.ip().is_unspecified() {
@@ -98,7 +102,37 @@ pub async fn serve(
         ));
     let public_routes = auth_rate_limited.merge(public_status);
 
-    // ----- Protected routes (auth required, general rate limit) -----
+    // ----- Critical routes (auth required, strict 5/min rate limit) -----
+    // These are expensive or destructive operations: firewall/QoS apply, firmware
+    // update/rollback, backup/restore, log destruction, VPN lifecycle, WAN reconnect,
+    // device adoption.  An authenticated attacker should not be able to spam these.
+    let critical_routes = Router::new()
+        .route("/api/v1/firewall/apply", post(fw_apply_rules))
+        .route("/api/v1/qos/apply", post(qos_apply))
+        .route("/api/v1/system/update/apply", post(update_apply_handler))
+        .route(
+            "/api/v1/system/update/rollback",
+            post(update_rollback_handler),
+        )
+        .route("/api/v1/settings/backup", get(backup_handler))
+        .route("/api/v1/settings/restore", post(restore_handler))
+        .route("/api/v1/logs/{date}/destroy", post(logs_destroy_day))
+        .route("/api/v1/vpn/tunnels/{id}/start", post(vpn_start_tunnel))
+        .route("/api/v1/vpn/tunnels/{id}/stop", post(vpn_stop_tunnel))
+        .route("/api/v1/vpn/sites/{id}/start", post(vpn_start_mesh))
+        .route("/api/v1/vpn/sites/{id}/stop", post(vpn_stop_mesh))
+        .route("/api/v1/wan/{interface}/reconnect", post(wan_reconnect))
+        .route(
+            "/api/v1/inform/devices/{mac}/adopt",
+            post(inform_device_adopt),
+        )
+        .layer(axum::middleware::from_fn(e2ee::e2ee_layer))
+        .layer(axum::middleware::from_fn_with_state(
+            critical_limiter.clone(),
+            ratelimit::rate_limit_middleware,
+        ));
+
+    // ----- Protected routes (auth required, general 120/min rate limit) -----
     let protected_routes = Router::new()
         // System
         .route("/api/v1/status", get(status_handler))
@@ -131,7 +165,6 @@ pub async fn serve(
             put(fw_update_rule).delete(fw_delete_rule),
         )
         .route("/api/v1/firewall/rules/{id}/toggle", post(fw_toggle_rule))
-        .route("/api/v1/firewall/apply", post(fw_apply_rules))
         // VPN tunnels
         .route(
             "/api/v1/vpn/tunnels",
@@ -141,8 +174,6 @@ pub async fn serve(
             "/api/v1/vpn/tunnels/{id}",
             get(vpn_get_tunnel).delete(vpn_delete_tunnel),
         )
-        .route("/api/v1/vpn/tunnels/{id}/start", post(vpn_start_tunnel))
-        .route("/api/v1/vpn/tunnels/{id}/stop", post(vpn_stop_tunnel))
         .route("/api/v1/vpn/tunnels/{id}/status", get(vpn_get_status))
         // VPN peers
         .route(
@@ -168,8 +199,6 @@ pub async fn serve(
                 .put(vpn_update_mesh)
                 .delete(vpn_delete_mesh),
         )
-        .route("/api/v1/vpn/sites/{id}/start", post(vpn_start_mesh))
-        .route("/api/v1/vpn/sites/{id}/stop", post(vpn_stop_mesh))
         .route("/api/v1/vpn/sites/{id}/status", get(vpn_mesh_status))
         .route("/api/v1/vpn/sites/{id}/peers", post(vpn_add_mesh_peer))
         .route(
@@ -206,7 +235,6 @@ pub async fn serve(
             get(wan_get).put(wan_set).delete(wan_delete),
         )
         .route("/api/v1/wan/{interface}/status", get(wan_status))
-        .route("/api/v1/wan/{interface}/reconnect", post(wan_reconnect))
         .route(
             "/api/v1/wan/{interface}/health-config",
             get(wan_health_config_get).put(wan_health_config_set),
@@ -260,10 +288,6 @@ pub async fn serve(
         )
         .route("/api/v1/inform/devices", get(inform_devices_list))
         .route(
-            "/api/v1/inform/devices/{mac}/adopt",
-            post(inform_device_adopt),
-        )
-        .route(
             "/api/v1/inform/devices/{mac}/ignore",
             post(inform_device_ignore),
         )
@@ -290,7 +314,6 @@ pub async fn serve(
             "/api/v1/qos/rules/{id}",
             put(qos_update_rule).delete(qos_delete_rule),
         )
-        .route("/api/v1/qos/apply", post(qos_apply))
         .route("/api/v1/qos/stats", get(qos_stats))
         // UPnP / NAT-PMP
         .route(
@@ -301,23 +324,14 @@ pub async fn serve(
         .route("/api/v1/upnp/mappings/{id}", delete(upnp_delete_mapping))
         // Firmware Update
         .route("/api/v1/system/update/check", get(update_check_handler))
-        .route("/api/v1/system/update/apply", post(update_apply_handler))
-        .route(
-            "/api/v1/system/update/rollback",
-            post(update_rollback_handler),
-        )
         .route(
             "/api/v1/system/update/settings",
             get(update_settings_get).put(update_settings_set),
         )
-        // Backup / Restore
-        .route("/api/v1/settings/backup", get(backup_handler))
-        .route("/api/v1/settings/restore", post(restore_handler))
         // Forward-secret encrypted logs
         .route("/api/v1/logs/days", get(logs_list_days))
         .route("/api/v1/logs/status", get(logs_key_status))
         .route("/api/v1/logs/{date}/export", get(logs_export_day))
-        .route("/api/v1/logs/{date}/destroy", post(logs_destroy_day))
         .layer(axum::middleware::from_fn(e2ee::e2ee_layer))
         .layer(axum::middleware::from_fn_with_state(
             general_limiter.clone(),
@@ -342,6 +356,7 @@ pub async fn serve(
 
         Router::new()
             .merge(public_routes)
+            .merge(critical_routes)
             .merge(protected_routes)
             .merge(sse_routes)
             .layer(cors)
@@ -359,6 +374,7 @@ pub async fn serve(
     } else {
         Router::new()
             .merge(public_routes)
+            .merge(critical_routes)
             .merge(protected_routes)
             .merge(sse_routes)
             .layer(cors)
