@@ -464,12 +464,12 @@ fn validate_server_not_private(server: &str) -> std::result::Result<(), String> 
     }
 
     // Try to parse as IP address directly.
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_private_ip(&ip) {
-            return Err(format!(
-                "DDNS server must not be a private/loopback address: {ip}"
-            ));
-        }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && is_private_ip(&ip)
+    {
+        return Err(format!(
+            "DDNS server must not be a private/loopback address: {ip}"
+        ));
     }
 
     Ok(())

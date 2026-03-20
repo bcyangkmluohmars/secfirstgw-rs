@@ -46,12 +46,13 @@ pub fn derive_credential_key() -> Result<CredentialKey, CryptoError> {
 
     let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, CREDENTIAL_KEY_SALT);
     let prk = salt.extract(&ikm);
-    let info_refs = [CREDENTIAL_KEY_INFO.as_ref()];
-    let okm = prk
-        .expand(&info_refs, HkdfLen(32))
-        .map_err(|_| CryptoError::CryptoFailed("HKDF expand failed for credential key".to_string()))?;
-    okm.fill(&mut key)
-        .map_err(|_| CryptoError::CryptoFailed("HKDF fill failed for credential key".to_string()))?;
+    let info_refs = [CREDENTIAL_KEY_INFO];
+    let okm = prk.expand(&info_refs, HkdfLen(32)).map_err(|_| {
+        CryptoError::CryptoFailed("HKDF expand failed for credential key".to_string())
+    })?;
+    okm.fill(&mut key).map_err(|_| {
+        CryptoError::CryptoFailed("HKDF fill failed for credential key".to_string())
+    })?;
 
     ikm.zeroize();
 
@@ -134,10 +135,15 @@ impl CredentialKey {
         let mut in_out = ciphertext_and_tag.to_vec();
         let plaintext = key
             .open_in_place(nonce, Aad::empty(), &mut in_out)
-            .map_err(|_| CryptoError::CryptoFailed("AES-GCM decrypt failed (wrong key or tampered)".to_string()))?;
+            .map_err(|_| {
+                CryptoError::CryptoFailed(
+                    "AES-GCM decrypt failed (wrong key or tampered)".to_string(),
+                )
+            })?;
 
-        String::from_utf8(plaintext.to_vec())
-            .map_err(|_| CryptoError::CryptoFailed("decrypted credential is not valid UTF-8".to_string()))
+        String::from_utf8(plaintext.to_vec()).map_err(|_| {
+            CryptoError::CryptoFailed("decrypted credential is not valid UTF-8".to_string())
+        })
     }
 
     /// Check whether a value is already encrypted.
@@ -167,7 +173,9 @@ mod tests {
     fn decrypt_plaintext_passthrough() {
         let key = derive_credential_key().expect("key derivation should succeed");
         let plaintext = "legacy-unencrypted-password";
-        let result = key.decrypt(plaintext).expect("plaintext passthrough should succeed");
+        let result = key
+            .decrypt(plaintext)
+            .expect("plaintext passthrough should succeed");
         assert_eq!(result, plaintext);
     }
 
@@ -177,7 +185,10 @@ mod tests {
         let plaintext = "same-password";
         let enc1 = key.encrypt(plaintext).unwrap();
         let enc2 = key.encrypt(plaintext).unwrap();
-        assert_ne!(enc1, enc2, "random nonces should produce different ciphertexts");
+        assert_ne!(
+            enc1, enc2,
+            "random nonces should produce different ciphertexts"
+        );
 
         // Both should decrypt to the same value
         assert_eq!(key.decrypt(&enc1).unwrap(), plaintext);

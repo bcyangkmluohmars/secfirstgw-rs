@@ -390,9 +390,7 @@ pub async fn generate_config(db: &sfgw_db::Db) -> Result<String> {
     // was compiled with --enable-dnssec. If not, override the config
     // setting to prevent startup failures.
     if dns_config.dnssec && !dnsmasq_supports_dnssec() {
-        tracing::warn!(
-            "DNSSEC requested but dnsmasq binary lacks DNSSEC support — disabling"
-        );
+        tracing::warn!("DNSSEC requested but dnsmasq binary lacks DNSSEC support — disabling");
         dns_config.dnssec = false;
     }
 

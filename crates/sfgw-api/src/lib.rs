@@ -449,7 +449,9 @@ async fn serve_http_redirect(addr: SocketAddr, https_port: u16) -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("HTTP→HTTPS redirect listening on {addr}");
-    axum::serve(listener, app).await.context("HTTP redirect server error")
+    axum::serve(listener, app)
+        .await
+        .context("HTTP redirect server error")
 }
 
 // ---------------------------------------------------------------------------
