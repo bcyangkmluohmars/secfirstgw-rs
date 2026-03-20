@@ -1442,3 +1442,79 @@ fn input_rule(
         enabled: true,
     }
 }
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_zone_name_rejects_reserved() {
+        assert!(validate_zone_name("wan").is_err());
+        assert!(validate_zone_name("lan").is_err());
+        assert!(validate_zone_name("dmz").is_err());
+        assert!(validate_zone_name("guest").is_err());
+        assert!(validate_zone_name("mgmt").is_err());
+        assert!(validate_zone_name("void").is_err());
+    }
+
+    #[test]
+    fn validate_zone_name_accepts_valid() {
+        assert!(validate_zone_name("iot").is_ok());
+        assert!(validate_zone_name("vpn").is_ok());
+        assert!(validate_zone_name("cameras").is_ok());
+        assert!(validate_zone_name("lab-net").is_ok());
+        assert!(validate_zone_name("zone42").is_ok());
+    }
+
+    #[test]
+    fn validate_zone_name_rejects_invalid_format() {
+        assert!(validate_zone_name("").is_err(), "empty");
+        assert!(validate_zone_name("A").is_err(), "uppercase");
+        assert!(validate_zone_name("1zone").is_err(), "starts with digit");
+        assert!(validate_zone_name("zone_net").is_err(), "underscore");
+        assert!(validate_zone_name("zone net").is_err(), "space");
+        assert!(
+            validate_zone_name("abcdefghijklmnopqrstuvwxyzabcdefgh").is_err(),
+            "too long"
+        );
+    }
+
+    #[test]
+    fn validate_custom_vlan_id_range() {
+        assert!(validate_custom_vlan_id(0).is_err(), "VLAN 0 reserved");
+        assert!(validate_custom_vlan_id(1).is_err(), "VLAN 1 reserved");
+        assert!(validate_custom_vlan_id(2).is_ok());
+        assert!(validate_custom_vlan_id(4094).is_ok());
+        assert!(validate_custom_vlan_id(4095).is_err(), "VLAN 4095 reserved");
+    }
+
+    #[test]
+    fn firewall_zone_from_role_custom() {
+        assert_eq!(FirewallZone::from_role("iot"), FirewallZone::IoT);
+        assert_eq!(FirewallZone::from_role("vpn"), FirewallZone::Vpn);
+        assert!(matches!(
+            FirewallZone::from_role("cameras"),
+            FirewallZone::Custom(_)
+        ));
+    }
+
+    #[test]
+    fn iot_preset_has_dns_dhcp() {
+        let preset = iot_zone_preset(40);
+        assert_eq!(preset.name, "iot");
+        assert_eq!(preset.vlan_id, 40);
+        assert_eq!(preset.policy_outbound, Action::Accept);
+        assert_eq!(preset.policy_forward, Action::Drop);
+        assert_eq!(preset.allowed_services.len(), 2);
+    }
+
+    #[test]
+    fn vpn_preset_has_dns() {
+        let preset = vpn_zone_preset(50);
+        assert_eq!(preset.name, "vpn");
+        assert_eq!(preset.policy_outbound, Action::Accept);
+        assert_eq!(preset.allowed_services.len(), 1);
+    }
+}

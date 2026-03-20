@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Action, FirewallPolicy, FirewallRule, RuleDetail};
+use crate::{Action, AllowedService, CustomZone, FirewallPolicy, FirewallRule, RuleDetail};
 
 #[test]
 fn default_ruleset_contains_drop_policy() {
@@ -1085,6 +1085,221 @@ fn test_zone_policy_has_vlan_id() {
     );
 }
 
+// ── Issue fix tests ──────────────────────────────────────────────
+
+/// Issue 1: User-defined rules MUST appear BEFORE zone catch-all DROPs.
+/// Previously, user rules were emitted after each zone's catch-all DROP,
+/// meaning they were silently ignored by iptables.
+#[test]
+fn user_rules_appear_before_zone_catchall_drops() {
+    let rules = vec![FirewallRule {
+        id: Some(1),
+        chain: "input".to_string(),
+        priority: 500,
+        detail: RuleDetail {
+            action: Action::Accept,
+            protocol: "tcp".to_string(),
+            source: "any".to_string(),
+            destination: "any".to_string(),
+            port: Some("9090".to_string()),
+            comment: Some("custom service".to_string()),
+            vlan: None,
+            rate_limit: None,
+        },
+        enabled: true,
+    }];
+    let config = generate_zone_ruleset(&test_zones(), &rules, &FirewallPolicy::default(), &[]);
+
+    let user_rule_pos = config
+        .find("--dport 9090 -j ACCEPT")
+        .expect("user rule must be present in output");
+    let catchall_drop_pos = config
+        .find("drop all WAN input")
+        .expect("WAN catch-all DROP must be present");
+
+    assert!(
+        user_rule_pos < catchall_drop_pos,
+        "user-defined rules must appear BEFORE zone catch-all DROPs.\n\
+         User rule at byte {user_rule_pos}, catch-all DROP at byte {catchall_drop_pos}"
+    );
+
+    // Also verify all zone catch-all DROPs are after user rules.
+    let lan_drop_pos = config
+        .find("drop all other LAN input")
+        .expect("LAN catch-all DROP must be present");
+    assert!(
+        user_rule_pos < lan_drop_pos,
+        "user rule must appear before LAN catch-all DROP"
+    );
+}
+
+/// Issue 1: Zone catch-all DROPs section header must exist and be last.
+#[test]
+fn zone_catchall_drops_section_exists() {
+    let config = generate_zone_ruleset(&test_zones(), &[], &FirewallPolicy::default(), &[]);
+    assert!(
+        config.contains("Zone catch-all DROPs (must be last)"),
+        "catch-all DROP section must have identifying comment"
+    );
+}
+
+/// Issue 2: validate_no_lockout must NOT be bypassable via crafted comments.
+/// A rule that DROPs SSH but has a comment containing "--dport 22 -j ACCEPT"
+/// previously passed validation. Now it must fail.
+#[test]
+fn validate_no_lockout_rejects_comment_bypass() {
+    // Craft a malicious ruleset: DROP SSH, but comment tricks the old validator.
+    let config = r#"*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+:SFGW-INPUT - [0:0]
+-A INPUT -j SFGW-INPUT
+-A SFGW-INPUT -i lo -j ACCEPT
+-A SFGW-INPUT -p tcp --dport 22 -j DROP -m comment --comment "fake --dport 22 -j ACCEPT in comment"
+COMMIT
+"#;
+
+    let result = validate_no_lockout(config);
+    assert!(
+        result.is_err(),
+        "validate_no_lockout must reject a ruleset where the only SSH rule is DROP with a crafted comment"
+    );
+}
+
+/// Issue 2: validate_no_lockout must PASS when a real SSH ACCEPT rule exists.
+#[test]
+fn validate_no_lockout_passes_real_ssh_accept() {
+    let config = r#"*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+:SFGW-INPUT - [0:0]
+-A INPUT -j SFGW-INPUT
+-A SFGW-INPUT -i lo -j ACCEPT
+-A SFGW-INPUT -i br-mgmt -p tcp --dport 22 -j ACCEPT -m comment --comment "SSH on MGMT"
+COMMIT
+"#;
+
+    let result = validate_no_lockout(config);
+    assert!(
+        result.is_ok(),
+        "validate_no_lockout must pass when real SSH ACCEPT exists: {result:?}"
+    );
+}
+
+/// Issue 2: validate_no_lockout must reject a ruleset with NO SSH rules at all.
+#[test]
+fn validate_no_lockout_rejects_no_ssh_rules() {
+    let config = r#"*filter
+:INPUT DROP [0:0]
+:SFGW-INPUT - [0:0]
+-A INPUT -j SFGW-INPUT
+-A SFGW-INPUT -i lo -j ACCEPT
+COMMIT
+"#;
+
+    let result = validate_no_lockout(config);
+    assert!(
+        result.is_err(),
+        "validate_no_lockout must reject a ruleset with no SSH rules at all"
+    );
+}
+
+/// Issue 3: Port forward ACCEPT rules must include WAN input interface restriction.
+#[test]
+fn port_forward_accept_restricted_to_wan_in_zone_mode() {
+    let fwd = vec![PortForward {
+        protocol: "tcp".to_string(),
+        external_port: 8443,
+        internal_ip: "192.168.1.100".to_string(),
+        internal_port: 443,
+        comment: Some("HTTPS forward".to_string()),
+        enabled: true,
+        wan_interface: None,
+    }];
+    let config = generate_zone_ruleset(&test_zones(), &[], &FirewallPolicy::default(), &fwd);
+
+    // The ACCEPT rule in FORWARD chain must have -i <wan_iface> restriction.
+    let accept_lines: Vec<&str> = config
+        .lines()
+        .filter(|l| l.contains("allow fwd:") && l.contains("-j ACCEPT"))
+        .collect();
+
+    assert!(
+        !accept_lines.is_empty(),
+        "port forward ACCEPT rules must exist"
+    );
+
+    for line in &accept_lines {
+        assert!(
+            line.contains("-i eth0") || line.contains("-i ppp0"),
+            "port forward ACCEPT rule must be restricted to WAN interface: {line}"
+        );
+    }
+}
+
+/// Issue 3: Port forward with specific wan_interface uses that interface in ACCEPT.
+#[test]
+fn port_forward_accept_uses_specific_wan_interface() {
+    let fwd = vec![PortForward {
+        protocol: "tcp".to_string(),
+        external_port: 443,
+        internal_ip: "192.168.1.100".to_string(),
+        internal_port: 443,
+        comment: Some("HTTPS on ppp0 only".to_string()),
+        enabled: true,
+        wan_interface: Some("ppp0".to_string()),
+    }];
+    let config = generate_zone_ruleset(&test_zones(), &[], &FirewallPolicy::default(), &fwd);
+
+    let accept_lines: Vec<&str> = config
+        .lines()
+        .filter(|l| l.contains("allow fwd:") && l.contains("-j ACCEPT"))
+        .collect();
+
+    assert_eq!(
+        accept_lines.len(),
+        1,
+        "specific wan_interface should produce exactly 1 ACCEPT rule, got: {accept_lines:?}"
+    );
+    assert!(
+        accept_lines[0].contains("-i ppp0"),
+        "ACCEPT rule should use ppp0: {}",
+        accept_lines[0]
+    );
+    assert!(
+        !accept_lines[0].contains("-i eth0"),
+        "ACCEPT rule should NOT use eth0 when wan_interface is ppp0"
+    );
+}
+
+/// Issue 3: Legacy mode (no zones) still generates ACCEPT without interface.
+#[test]
+fn port_forward_accept_legacy_no_interface() {
+    let fwd = vec![PortForward {
+        protocol: "tcp".to_string(),
+        external_port: 8443,
+        internal_ip: "192.168.1.100".to_string(),
+        internal_port: 443,
+        comment: None,
+        enabled: true,
+        wan_interface: None,
+    }];
+    let config = generate_ruleset_with_forwards(&[], &FirewallPolicy::default(), &fwd);
+
+    let accept_line = config
+        .lines()
+        .find(|l| l.contains("allow fwd:") && l.contains("-j ACCEPT"))
+        .expect("port forward ACCEPT rule must exist in legacy mode");
+
+    // Legacy mode has no WAN interface info, so no -i restriction.
+    assert!(
+        !accept_line.contains("-i "),
+        "legacy mode should not have -i restriction: {accept_line}"
+    );
+}
+
 /// VLAN isolation rules appear BEFORE zone-specific rules in the generated ruleset.
 #[test]
 fn test_vlan_isolation_rules_appear_before_zone_rules() {
@@ -1100,5 +1315,232 @@ fn test_vlan_isolation_rules_appear_before_zone_rules() {
     assert!(
         void_drop_pos < wan_zone_rules_pos,
         "VLAN isolation rules must appear before WAN zone rules"
+    );
+}
+
+// ── Custom zone tests ──────────────────────────────────────────────
+
+fn iot_custom_zone() -> CustomZone {
+    CustomZone {
+        id: Some(1),
+        name: "iot".to_string(),
+        vlan_id: 40,
+        policy_inbound: Action::Drop,
+        policy_outbound: Action::Accept,
+        policy_forward: Action::Drop,
+        allowed_services: vec![
+            AllowedService {
+                protocol: "udp".to_string(),
+                port: 53,
+                description: Some("DNS".to_string()),
+            },
+            AllowedService {
+                protocol: "udp".to_string(),
+                port: 67,
+                description: Some("DHCP".to_string()),
+            },
+        ],
+        description: "IoT devices".to_string(),
+    }
+}
+
+fn vpn_custom_zone() -> CustomZone {
+    CustomZone {
+        id: Some(2),
+        name: "vpn".to_string(),
+        vlan_id: 50,
+        policy_inbound: Action::Drop,
+        policy_outbound: Action::Accept,
+        policy_forward: Action::Drop,
+        allowed_services: vec![AllowedService {
+            protocol: "udp".to_string(),
+            port: 53,
+            description: Some("DNS".to_string()),
+        }],
+        description: "VPN clients".to_string(),
+    }
+}
+
+fn zones_with_custom() -> Vec<ZonePolicy> {
+    vec![
+        ZonePolicy {
+            zone: FirewallZone::Wan,
+            interfaces: vec!["eth8".to_string()],
+            vlan_id: None,
+        },
+        ZonePolicy {
+            zone: FirewallZone::Lan,
+            interfaces: vec!["br-lan".to_string()],
+            vlan_id: Some(10),
+        },
+        ZonePolicy {
+            zone: FirewallZone::Mgmt,
+            interfaces: vec!["br-mgmt".to_string()],
+            vlan_id: Some(99),
+        },
+        ZonePolicy {
+            zone: FirewallZone::IoT,
+            interfaces: vec!["br-iot".to_string()],
+            vlan_id: Some(40),
+        },
+        ZonePolicy {
+            zone: FirewallZone::Vpn,
+            interfaces: vec!["br-vpn".to_string()],
+            vlan_id: Some(50),
+        },
+    ]
+}
+
+#[test]
+fn custom_zone_iot_blocks_management_ports() {
+    let zones = zones_with_custom();
+    let custom = vec![iot_custom_zone()];
+    let config = generate_zone_ruleset_with_custom(
+        &zones,
+        &[],
+        &FirewallPolicy::default(),
+        &[],
+        &custom,
+    );
+
+    // IoT zone must block SSH, HTTPS, HTTP, Inform to gateway.
+    assert!(
+        config.contains("-A SFGW-INPUT -i br-iot -p tcp --dport 22 -j DROP"),
+        "IoT must block SSH: {config}"
+    );
+    assert!(
+        config.contains("-A SFGW-INPUT -i br-iot -p tcp --dport 443 -j DROP"),
+        "IoT must block HTTPS"
+    );
+    assert!(
+        config.contains("-A SFGW-INPUT -i br-iot -p tcp --dport 80 -j DROP"),
+        "IoT must block HTTP"
+    );
+    assert!(
+        config.contains("-A SFGW-INPUT -i br-iot -p tcp --dport 8080 -j DROP"),
+        "IoT must block Inform"
+    );
+}
+
+#[test]
+fn custom_zone_iot_allows_dns_dhcp() {
+    let zones = zones_with_custom();
+    let custom = vec![iot_custom_zone()];
+    let config = generate_zone_ruleset_with_custom(
+        &zones,
+        &[],
+        &FirewallPolicy::default(),
+        &[],
+        &custom,
+    );
+
+    assert!(
+        config.contains("-A SFGW-INPUT -i br-iot -p udp --dport 53 -j ACCEPT"),
+        "IoT must allow DNS"
+    );
+    assert!(
+        config.contains("-A SFGW-INPUT -i br-iot -p udp --dport 67 -j ACCEPT"),
+        "IoT must allow DHCP"
+    );
+}
+
+#[test]
+fn custom_zone_iot_allows_outbound_blocks_inter_vlan() {
+    let zones = zones_with_custom();
+    let custom = vec![iot_custom_zone()];
+    let config = generate_zone_ruleset_with_custom(
+        &zones,
+        &[],
+        &FirewallPolicy::default(),
+        &[],
+        &custom,
+    );
+
+    // IoT outbound (to WAN) = ACCEPT.
+    assert!(
+        config.contains("-A SFGW-FORWARD -i br-iot -o eth8 -j ACCEPT"),
+        "IoT must allow outbound to WAN"
+    );
+
+    // IoT to MGMT = always DROP (security invariant).
+    assert!(
+        config.contains("-A SFGW-FORWARD -i br-iot -o br-mgmt -j DROP"),
+        "IoT must block access to MGMT"
+    );
+
+    // IoT to LAN = DROP (forward policy is drop).
+    assert!(
+        config.contains("-A SFGW-FORWARD -i br-iot -o br-lan -j DROP"),
+        "IoT must block access to LAN"
+    );
+}
+
+#[test]
+fn custom_zone_vpn_allows_lan_access() {
+    let zones = zones_with_custom();
+    let custom = vec![vpn_custom_zone()];
+    let config = generate_zone_ruleset_with_custom(
+        &zones,
+        &[],
+        &FirewallPolicy::default(),
+        &[],
+        &custom,
+    );
+
+    // VPN to LAN = ACCEPT (VPN-like zone gets LAN access).
+    assert!(
+        config.contains("-A SFGW-FORWARD -i br-vpn -o br-lan -j ACCEPT"),
+        "VPN must allow access to LAN: {config}"
+    );
+
+    // VPN to MGMT = always DROP.
+    assert!(
+        config.contains("-A SFGW-FORWARD -i br-vpn -o br-mgmt -j DROP"),
+        "VPN must block access to MGMT"
+    );
+
+    // VPN to WAN = ACCEPT (outbound policy).
+    assert!(
+        config.contains("-A SFGW-FORWARD -i br-vpn -o eth8 -j ACCEPT"),
+        "VPN must allow outbound to WAN"
+    );
+}
+
+#[test]
+fn custom_zone_catchall_drop_present() {
+    let zones = zones_with_custom();
+    let custom = vec![iot_custom_zone()];
+    let config = generate_zone_ruleset_with_custom(
+        &zones,
+        &[],
+        &FirewallPolicy::default(),
+        &[],
+        &custom,
+    );
+
+    assert!(
+        config.contains("-A SFGW-INPUT -i br-iot -j DROP"),
+        "Custom zone must have catch-all DROP"
+    );
+}
+
+#[test]
+fn custom_zone_mgmt_blocked_regardless_of_policy() {
+    // Even with forward=accept, MGMT must be blocked.
+    let zones = zones_with_custom();
+    let mut permissive = iot_custom_zone();
+    permissive.policy_forward = Action::Accept;
+    let custom = vec![permissive];
+    let config = generate_zone_ruleset_with_custom(
+        &zones,
+        &[],
+        &FirewallPolicy::default(),
+        &[],
+        &custom,
+    );
+
+    assert!(
+        config.contains("-A SFGW-FORWARD -i br-iot -o br-mgmt -j DROP"),
+        "MGMT must ALWAYS be blocked from custom zones, even with permissive forward policy"
     );
 }
