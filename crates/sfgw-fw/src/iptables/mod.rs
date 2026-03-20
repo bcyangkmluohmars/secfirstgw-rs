@@ -503,6 +503,24 @@ pub fn filter_config_to_ipv6(config: &str) -> String {
         }
         if line == "COMMIT" {
             if in_filter {
+                // Link-local (fe80::/10) filtering: drop link-local sourced packets
+                // in the FORWARD chain. Link-local traffic should never cross zone
+                // boundaries.
+                writeln!(
+                    out,
+                    "# ── IPv6 link-local zone isolation ──"
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "-A SFGW-FORWARD -s fe80::/10 -j DROP -m comment --comment \"drop link-local forwards\""
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "-A SFGW-FORWARD -d fe80::/10 -j DROP -m comment --comment \"drop link-local forwards\""
+                )
+                .unwrap();
                 out.push_str("COMMIT\n");
                 in_filter = false;
             }
@@ -577,25 +595,6 @@ pub fn filter_config_to_ipv6(config: &str) -> String {
         out.push_str(line);
         out.push('\n');
     }
-
-    // Link-local (fe80::/10) filtering: drop link-local sourced packets
-    // from WAN/DMZ/GUEST zones in the FORWARD chain. Link-local traffic
-    // should never cross zone boundaries.
-    writeln!(
-        out,
-        "# ── IPv6 link-local zone isolation ──"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "-A SFGW-FORWARD -s fe80::/10 -j DROP -m comment --comment \"drop link-local forwards\""
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "-A SFGW-FORWARD -d fe80::/10 -j DROP -m comment --comment \"drop link-local forwards\""
-    )
-    .unwrap();
 
     out
 }

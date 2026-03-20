@@ -472,7 +472,7 @@ pub async fn load_rules(db: &sfgw_db::Db) -> Result<Vec<FirewallRule>, FwError> 
         });
     }
 
-    tracing::info!("loaded {} firewall rules from database", rules.len());
+    tracing::debug!("loaded {} firewall rules from database", rules.len());
     Ok(rules)
 }
 

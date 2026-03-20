@@ -3980,10 +3980,19 @@ async fn update_check_handler(
     match update_check_inner(&db).await {
         Ok(result) => (StatusCode::OK, Json(json!(result))),
         Err(e) => {
-            tracing::error!("update check failed: {e:#}");
+            tracing::warn!("update check failed: {e:#}");
+            // Return a valid response with no update available instead of 500.
+            // Common cause: private repo without auth token configured.
+            let current_version = env!("CARGO_PKG_VERSION");
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "failed to check for updates" })),
+                StatusCode::OK,
+                Json(json!({
+                    "current_version": current_version,
+                    "update_available": false,
+                    "available": null,
+                    "checked_at": chrono::Utc::now().to_rfc3339(),
+                    "check_error": format!("{e:#}")
+                })),
             )
         }
     }

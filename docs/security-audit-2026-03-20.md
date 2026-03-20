@@ -16,7 +16,7 @@
 | **M5** | UPnP SSDP auf 0.0.0.0:1900 | MEDIUM | **FIXED** | `sec: UPnP SSDP bind to LAN IP + peer validation` |
 | **M6** | Default Chain Policies ACCEPT | MEDIUM | **ALREADY FIXED** | `FirewallPolicy::default()` = DROP seit Erstimplementierung |
 | **M7** | rp_filter=0 | MEDIUM | **ALREADY FIXED** | `clean-and-install.sh` setzt rp_filter=1 |
-| **M8** | DNSSEC AD-Flag fehlt | MEDIUM | **FIXED** | `sec: IPv6 NDP rate limiting + DHCPv6 + link-local isolation + DNSSEC` |
+| **M8** | DNSSEC AD-Flag fehlt | MEDIUM | **DEFERRED** | UDM dnsmasq compiled with `no-DNSSEC` — template conditional ready, activates with custom dnsmasq build |
 | **M9** | Static Files ohne Security Headers | MEDIUM | **ALREADY FIXED** | `security_headers_middleware` auf Root-Router |
 | **M10** | IPv6 NDP/DHCPv6 fehlt | MEDIUM | **FIXED** | `sec: IPv6 NDP rate limiting + DHCPv6 + link-local isolation + DNSSEC` |
 | **M11** | WAN ICMP ohne Rate Limit | LOW-MEDIUM | **FIXED** | `sec: WAN ICMP rate limiting + oversized payload drop` |
@@ -34,7 +34,7 @@
 
 ## Summary
 
-- **21 FIXED** (H1, H2, H3, L1, L2, L5, L6, L7, L8, L10, M3, M4, M5, M8, M10, M11, M12 + L3, M6, M7, M9 already fixed)
+- **20 FIXED** (H1, H2, H3, L1, L2, L5, L6, L7, L10, M3, M4, M5, M10, M11, M12 + L3, M6, M7, M9 already fixed)
 - **1 MITIGATED** (L9 zone_pin available, documented)
-- **1 DEFERRED** (M1+M2 TLS Session Binding → P2, requires RFC 9266 Channel Binding)
+- **2 DEFERRED** (M1+M2 TLS Session Binding → P2, requires RFC 9266 Channel Binding; M8 DNSSEC requires custom dnsmasq; L8 TTL requires custom kernel)
 - **1 N/A** (L4 epmd, Stock-Firmware)

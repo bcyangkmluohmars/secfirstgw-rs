@@ -376,13 +376,59 @@ fn cidr_to_netmask(subnet: &str) -> String {
 const DNSMASQ_TEMPLATE: &str = include_str!("templates/dnsmasq.conf.tera");
 
 /// Render the dnsmasq configuration from the current database state.
+///
+/// Automatically detects whether the installed dnsmasq binary supports
+/// DNSSEC and disables it in the config if not (stock UDM dnsmasq is
+/// compiled with `no-DNSSEC`).
 pub async fn generate_config(db: &sfgw_db::Db) -> Result<String> {
-    let dns_config = load_dns_config(db).await?;
+    let mut dns_config = load_dns_config(db).await?;
     let dhcp_ranges = load_dhcp_ranges(db).await?;
     let static_leases = load_static_leases(db).await?;
     let dns_overrides = load_dns_overrides(db).await?;
 
+    // Auto-detect DNSSEC support: check if the installed dnsmasq binary
+    // was compiled with --enable-dnssec. If not, override the config
+    // setting to prevent startup failures.
+    if dns_config.dnssec && !dnsmasq_supports_dnssec() {
+        tracing::warn!(
+            "DNSSEC requested but dnsmasq binary lacks DNSSEC support — disabling"
+        );
+        dns_config.dnssec = false;
+    }
+
     render_template(&dns_config, &dhcp_ranges, &static_leases, &dns_overrides)
+}
+
+/// Check if the installed dnsmasq binary supports DNSSEC.
+///
+/// Parses the `Compile time options` line from `dnsmasq --version` output.
+/// Returns `false` if dnsmasq is not found or reports `no-DNSSEC`.
+fn dnsmasq_supports_dnssec() -> bool {
+    let output = match std::process::Command::new("dnsmasq")
+        .arg("--version")
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Look for "DNSSEC" in compile options (present as either "DNSSEC" or "no-DNSSEC")
+    for line in stdout.lines() {
+        if line.contains("Compile time options") || line.starts_with("Compile time options") {
+            // "no-DNSSEC" means not supported, bare "DNSSEC" means supported
+            if line.contains("no-DNSSEC") {
+                return false;
+            }
+            if line.contains("DNSSEC") {
+                return true;
+            }
+        }
+    }
+    // dnsmasq --version outputs compile options across multiple lines
+    if stdout.contains("no-DNSSEC") {
+        return false;
+    }
+    stdout.contains("DNSSEC")
 }
 
 /// Pure render function (useful for testing without DB).
