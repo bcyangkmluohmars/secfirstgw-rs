@@ -287,6 +287,20 @@ pub fn generate_ruleset_with_forwards(
 /// ACCEPT action) rather than string matching on the whole line. This
 /// prevents bypass via crafted comments containing "ssh" or "--dport 22".
 fn validate_no_lockout(config: &str) -> Result<()> {
+    validate_ssh_accept(config, "IPv4")?;
+
+    // Also validate the IPv6 ruleset that will be generated from this config.
+    // Without this check, IPv6 SSH could be locked out silently.
+    let ipv6_config = filter_config_to_ipv6(config);
+    validate_ssh_accept(&ipv6_config, "IPv6")?;
+
+    Ok(())
+}
+
+/// Check that a ruleset contains at least one SSH ACCEPT rule.
+///
+/// Accepts both `-p tcp` and `-p 6` (protocol number) as valid TCP matches.
+fn validate_ssh_accept(config: &str, label: &str) -> Result<()> {
     let has_ssh_accept = config.lines().any(|line| {
         // Strip the comment portion to prevent bypass via crafted comments.
         let rule_part = if let Some(idx) = line.find("-m comment") {
@@ -296,14 +310,16 @@ fn validate_no_lockout(config: &str) -> Result<()> {
         };
 
         // Must be a rule line (starts with -A), target TCP port 22, and ACCEPT.
+        // Accept both `-p tcp` and `-p 6` (IP protocol number for TCP).
+        let is_tcp = rule_part.contains("-p tcp") || rule_part.contains("-p 6");
         rule_part.starts_with("-A SFGW-INPUT")
-            && rule_part.contains("-p tcp")
+            && is_tcp
             && rule_part.contains("--dport 22")
             && rule_part.contains("-j ACCEPT")
     });
     if !has_ssh_accept {
         bail!(
-            "REFUSING to apply ruleset: no SSH ACCEPT rule found — would lock out all management access"
+            "REFUSING to apply ruleset: no {label} SSH ACCEPT rule found — would lock out management access"
         );
     }
     Ok(())

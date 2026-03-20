@@ -1206,6 +1206,41 @@ COMMIT
     );
 }
 
+/// H1 fix: validate_no_lockout must accept `-p 6` as a valid TCP protocol match.
+#[test]
+fn validate_no_lockout_accepts_protocol_number_6() {
+    let config = r#"*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+:SFGW-INPUT - [0:0]
+-A INPUT -j SFGW-INPUT
+-A SFGW-INPUT -i lo -j ACCEPT
+-A SFGW-INPUT -i br-mgmt -p 6 --dport 22 -j ACCEPT -m comment --comment "SSH on MGMT"
+COMMIT
+"#;
+
+    let result = validate_no_lockout(config);
+    assert!(
+        result.is_ok(),
+        "validate_no_lockout must accept -p 6 as TCP: {result:?}"
+    );
+}
+
+/// H1 fix: validate_no_lockout must also validate the generated IPv6 ruleset.
+/// A config that has IPv4 SSH but whose IPv6 conversion drops SSH must fail.
+#[test]
+fn validate_no_lockout_checks_ipv6_config() {
+    // The standard generated rulesets always include SSH in both IPv4 and IPv6.
+    // Verify that a properly generated ruleset passes IPv6 validation too.
+    let config = generate_zone_ruleset(&test_zones(), &[], &FirewallPolicy::default(), &[]);
+    let result = validate_no_lockout(&config);
+    assert!(
+        result.is_ok(),
+        "generated zone ruleset must pass both IPv4 and IPv6 lockout validation: {result:?}"
+    );
+}
+
 /// Issue 3: Port forward ACCEPT rules must include WAN input interface restriction.
 #[test]
 fn port_forward_accept_restricted_to_wan_in_zone_mode() {

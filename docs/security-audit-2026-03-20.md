@@ -323,7 +323,7 @@ TLS 1.3 akzeptiert auch TLS_AES_128_GCM_SHA256. Kein Vulnerability, aber für ma
 | **M6** | Default Chain Policies auf DROP | **ALREADY FIXED** | `FirewallPolicy::default()` setzt INPUT=DROP, FORWARD=DROP seit Erstimplementierung. Live-Scan war pre-install State. |
 | **M7** | rp_filter=1 setzen | **ALREADY FIXED** | `clean-and-install.sh` setzt `net.ipv4.conf.all.rp_filter=1` seit Erstimplementierung. Live-Scan war pre-install State. |
 | **M9** | Security Headers auf Static Files | **ALREADY FIXED** | `security_headers_middleware` ist als `.layer()` auf Root-Router, wirkt auf alle Routes inkl. fallback ServeDir. |
-| **H1** | SSH Lockout Validation IPv6 | OPEN | |
+| **H1** | SSH Lockout Validation IPv6 | **FIXED** | `sec: SSH lockout validation — IPv6 + protocol number 6 alias` |
 | **H3** | SSH Credentials SecureBox wrapping | OPEN | |
 | **M1** | TLS Session Binding fehlt in validate_session() | OPEN | |
 | **M2** | E2EE Envelope Keys nicht an TLS Session gebunden | OPEN | |
