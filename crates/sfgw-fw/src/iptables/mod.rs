@@ -506,11 +506,7 @@ pub fn filter_config_to_ipv6(config: &str) -> String {
                 // Link-local (fe80::/10) filtering: drop link-local sourced packets
                 // in the FORWARD chain. Link-local traffic should never cross zone
                 // boundaries.
-                writeln!(
-                    out,
-                    "# ── IPv6 link-local zone isolation ──"
-                )
-                .unwrap();
+                writeln!(out, "# ── IPv6 link-local zone isolation ──").unwrap();
                 writeln!(
                     out,
                     "-A SFGW-FORWARD -s fe80::/10 -j DROP -m comment --comment \"drop link-local forwards\""

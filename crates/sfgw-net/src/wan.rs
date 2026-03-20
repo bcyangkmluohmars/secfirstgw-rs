@@ -412,7 +412,9 @@ pub fn validate_wan_config(config: &WanPortConfig) -> std::result::Result<(), Wa
         .parse()
         .map_err(|_| WanValidationError::HealthCheck(config.health_check.clone()))?;
     match health_ip {
-        IpAddr::V4(ip) if ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() => {
+        IpAddr::V4(ip)
+            if ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() =>
+        {
             return Err(WanValidationError::HealthCheck(config.health_check.clone()));
         }
         IpAddr::V6(ip) if ip.is_loopback() || ip.is_unspecified() => {
