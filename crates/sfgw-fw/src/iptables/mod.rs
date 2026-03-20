@@ -1044,6 +1044,13 @@ fn emit_hardened_defaults(out: &mut String) {
     )
     .unwrap();
 
+    // Allow HTTP on MGMT for 301 redirect to HTTPS.
+    writeln!(
+        out,
+        "-A SFGW-INPUT -i br-mgmt -p tcp --dport 80 -j ACCEPT -m comment --comment \"HTTP redirect on MGMT\""
+    )
+    .unwrap();
+
     // Allow SSH on MGMT only.
     writeln!(
         out,
@@ -1444,6 +1451,13 @@ fn emit_mgmt_zone_rules(
         writeln!(
             out,
             "-A SFGW-INPUT -i {iface} -p tcp --dport 443 -j ACCEPT -m comment --comment \"web UI on MGMT\""
+        )
+        .unwrap();
+
+        // HTTP → HTTPS redirect (port 80, 301 only — no plaintext content served).
+        writeln!(
+            out,
+            "-A SFGW-INPUT -i {iface} -p tcp --dport 80 -j ACCEPT -m comment --comment \"HTTP redirect on MGMT\""
         )
         .unwrap();
 

@@ -395,6 +395,16 @@ pub async fn serve(
             .layer(tower_http::trace::TraceLayer::new_for_http())
     };
 
+    // ----- HTTP → HTTPS redirect (port 80 → 443) -----
+    // Spawned before the TLS server so it's ready when TLS comes up.
+    let https_port = listen_addr.port();
+    let redirect_addr: SocketAddr = SocketAddr::new(listen_addr.ip(), 80);
+    tokio::spawn(async move {
+        if let Err(e) = serve_http_redirect(redirect_addr, https_port).await {
+            tracing::warn!("HTTP redirect listener failed: {e}");
+        }
+    });
+
     // ----- TLS 1.3 configuration -----
     let tls_config = tls::load_or_create_tls_config().context("failed to configure TLS")?;
     let rustls_config = tls::into_axum_rustls_config(tls_config).await?;
@@ -407,6 +417,39 @@ pub async fn serve(
         .context("API server error")?;
 
     Ok(())
+}
+
+/// Minimal HTTP server on port 80 that 301-redirects everything to HTTPS.
+/// No routes, no middleware — just a redirect. Keeps attack surface minimal.
+async fn serve_http_redirect(addr: SocketAddr, https_port: u16) -> Result<()> {
+    use axum::response::Redirect;
+
+    let app = Router::new().fallback(
+        move |req: axum::http::Request<axum::body::Body>| async move {
+            let host = req
+                .headers()
+                .get(axum::http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("localhost");
+            // Strip port from host if present (e.g. "10.0.0.1:80" → "10.0.0.1")
+            let host_no_port = host.split(':').next().unwrap_or(host);
+            let path_and_query = req
+                .uri()
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/");
+            let https_uri = if https_port == 443 {
+                format!("https://{host_no_port}{path_and_query}")
+            } else {
+                format!("https://{host_no_port}:{https_port}{path_and_query}")
+            };
+            Redirect::permanent(&https_uri)
+        },
+    );
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("HTTP→HTTPS redirect listening on {addr}");
+    axum::serve(listener, app).await.context("HTTP redirect server error")
 }
 
 // ---------------------------------------------------------------------------

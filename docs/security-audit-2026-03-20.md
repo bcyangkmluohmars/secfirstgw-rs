@@ -16,12 +16,12 @@
 | **M5** | UPnP SSDP auf 0.0.0.0:1900 | MEDIUM | **FIXED** | `sec: UPnP SSDP bind to LAN IP + peer validation` |
 | **M6** | Default Chain Policies ACCEPT | MEDIUM | **ALREADY FIXED** | `FirewallPolicy::default()` = DROP seit Erstimplementierung |
 | **M7** | rp_filter=0 | MEDIUM | **ALREADY FIXED** | `clean-and-install.sh` setzt rp_filter=1 |
-| **M8** | DNSSEC AD-Flag fehlt | MEDIUM | OPEN | |
+| **M8** | DNSSEC AD-Flag fehlt | MEDIUM | **FIXED** | `sec: IPv6 NDP rate limiting + DHCPv6 + link-local isolation + DNSSEC` |
 | **M9** | Static Files ohne Security Headers | MEDIUM | **ALREADY FIXED** | `security_headers_middleware` auf Root-Router |
-| **M10** | IPv6 NDP/DHCPv6 fehlt | MEDIUM | OPEN | |
+| **M10** | IPv6 NDP/DHCPv6 fehlt | MEDIUM | **FIXED** | `sec: IPv6 NDP rate limiting + DHCPv6 + link-local isolation + DNSSEC` |
 | **M11** | WAN ICMP ohne Rate Limit | LOW-MEDIUM | **FIXED** | `sec: WAN ICMP rate limiting + oversized payload drop` |
 | **M12** | SSE Token in URL | MEDIUM | **FIXED** | `sec: short-lived SSE tokens — prevent session token in URL` |
-| **L1** | Kein HTTP→HTTPS Redirect | LOW | OPEN | |
+| **L1** | Kein HTTP→HTTPS Redirect | LOW | **FIXED** | `sec: HTTP→HTTPS 301 redirect on port 80` |
 | **L2** | Doppelte iptables-Regeln | LOW | OPEN | |
 | **L3** | LAN→Guest Forwarding | LOW | OPEN | |
 | **L4** | epmd auf Loopback | INFO | OPEN | |
@@ -34,7 +34,7 @@
 
 ## Summary
 
-- **9 FIXED** (H1, H2, M3, M4, M5, M11, M12 + M6, M7, M9 already fixed)
-- **4 OPEN MEDIUM** (H3, M1, M2, M8, M10)
-- **6 OPEN LOW/INFO** (L1-L3, L5-L6, L9)
+- **12 FIXED** (H1, H2, L1, M3, M4, M5, M8, M10, M11, M12 + M6, M7, M9 already fixed)
+- **2 OPEN MEDIUM** (H3, M1+M2)
+- **5 OPEN LOW** (L2, L3, L5, L6, L9)
 - **4 OPEN INFO** (L4, L7, L8, L10)
