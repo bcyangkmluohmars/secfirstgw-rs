@@ -329,7 +329,7 @@ TLS 1.3 akzeptiert auch TLS_AES_128_GCM_SHA256. Kein Vulnerability, aber für ma
 | **M2** | E2EE Envelope Keys nicht an TLS Session gebunden | OPEN | |
 | **M3** | DDNS URL-Parameter nicht URL-encoded | **FIXED** | `sec: DDNS URL encoding + SSRF validation` |
 | **M4** | DDNS server Feld nicht gegen interne IPs validiert | **FIXED** | `sec: DDNS URL encoding + SSRF validation` |
-| **M5** | UPnP SSDP bindet auf 0.0.0.0:1900 | OPEN | |
+| **M5** | UPnP SSDP bindet auf 0.0.0.0:1900 | **FIXED** | `sec: UPnP SSDP bind to LAN IP + peer validation` |
 | **M8** | DNSSEC AD-Flag nicht gesetzt | OPEN | |
 | **M10** | IPv6: Kein NDP Rate Limiting, kein DHCPv6 | OPEN | |
 | **M11** | WAN ICMP Echo Reply ohne Rate Limiting | OPEN | |

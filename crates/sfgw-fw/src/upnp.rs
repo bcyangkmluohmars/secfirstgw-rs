@@ -564,15 +564,33 @@ pub async fn start(db: &sfgw_db::Db, lan_ip: Ipv4Addr) -> Result<UpnpHandle> {
 /// Responds to M-SEARCH requests from LAN clients looking for
 /// InternetGatewayDevice services.
 async fn run_ssdp_listener(handle: UpnpHandle) -> Result<()> {
-    let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, SSDP_PORT);
-    let socket = UdpSocket::bind(bind_addr)
-        .await
-        .context("failed to bind SSDP socket")?;
+    // Bind to LAN IP specifically instead of 0.0.0.0 to prevent accepting
+    // SSDP packets from non-LAN interfaces (WAN, MGMT, DMZ).
+    // Multicast reception still works when multicast membership is set.
+    let bind_addr = SocketAddrV4::new(handle.lan_ip, SSDP_PORT);
+    let socket = match UdpSocket::bind(bind_addr).await {
+        Ok(s) => s,
+        Err(_) => {
+            // Fallback: some kernels require binding to INADDR_ANY for multicast.
+            // In that case, we rely on peer IP validation below for security.
+            tracing::warn!(
+                "binding SSDP to {} failed, falling back to 0.0.0.0:{}",
+                handle.lan_ip,
+                SSDP_PORT
+            );
+            UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, SSDP_PORT))
+                .await
+                .context("failed to bind SSDP socket")?
+        }
+    };
 
     // Join multicast group on the LAN interface
     socket
         .join_multicast_v4(SSDP_MULTICAST, handle.lan_ip)
         .context("failed to join SSDP multicast group")?;
+
+    // Pre-compute LAN /24 network for peer validation.
+    let lan_octets = handle.lan_ip.octets();
 
     tracing::info!(
         bind = %bind_addr,
@@ -589,6 +607,23 @@ async fn run_ssdp_listener(handle: UpnpHandle) -> Result<()> {
                 continue;
             }
         };
+
+        // Peer IP validation: only respond to sources in the same /24 as the LAN IP.
+        // This prevents non-LAN hosts from probing UPnP even if the socket is bound
+        // to 0.0.0.0 (fallback case).
+        if let IpAddr::V4(peer_ip) = peer.ip() {
+            let peer_octets = peer_ip.octets();
+            if peer_octets[0] != lan_octets[0]
+                || peer_octets[1] != lan_octets[1]
+                || peer_octets[2] != lan_octets[2]
+            {
+                tracing::debug!(peer = %peer, "SSDP: ignoring request from non-LAN source");
+                continue;
+            }
+        } else {
+            // IPv6 sources — UPnP/SSDP is IPv4 only, ignore.
+            continue;
+        }
 
         let msg = String::from_utf8_lossy(&buf[..len]);
 
