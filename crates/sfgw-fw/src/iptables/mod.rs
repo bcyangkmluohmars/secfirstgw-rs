@@ -971,6 +971,10 @@ fn emit_nat_table(out: &mut String, body: impl FnOnce(&mut String)) {
 /// Without this, packets forwarded through the gateway have TTL decremented
 /// by 1, leaking to external observers that a NAT device is present and
 /// how many hops the internal host is from the gateway.
+///
+/// Currently unused: UDM Pro kernel 4.19 lacks xt_TTL. Re-enable when
+/// running a custom kernel with xt_TTL support.
+#[allow(dead_code)]
 fn emit_mangle_table(out: &mut String, wan_ifaces: &[&str]) {
     if wan_ifaces.is_empty() {
         return;
