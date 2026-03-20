@@ -9,10 +9,13 @@
 use crate::{NetError, Result};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fmt;
 use std::net::{IpAddr, Ipv6Addr};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 // ── Default helpers for serde ───────────────────────────────────────
 
@@ -1511,6 +1514,926 @@ impl fmt::Display for WanConnectionType {
     }
 }
 
+// ── Extended health checks ──────────────────────────────────────────
+
+/// Type of health check to perform on a WAN interface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+#[derive(Default)]
+pub enum HealthCheckType {
+    /// ICMP ping (default, legacy behavior).
+    #[default]
+    Icmp,
+    /// HTTP GET request — check that the URL returns the expected status code.
+    Http {
+        /// Full URL to probe, e.g. "http://connectivitycheck.gstatic.com/generate_204".
+        url: String,
+        /// Expected HTTP status code (default 200).
+        #[serde(default = "default_http_status")]
+        expected_status: u16,
+    },
+    /// DNS resolution — resolve a domain via a specific server and check for answers.
+    Dns {
+        /// Domain to resolve, e.g. "google.com".
+        domain: String,
+        /// DNS server to query, e.g. "8.8.8.8" or "2001:4860:4860::8888".
+        server: String,
+    },
+}
+
+fn default_http_status() -> u16 {
+    200
+}
+
+impl fmt::Display for HealthCheckType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Icmp => write!(f, "icmp"),
+            Self::Http { url, .. } => write!(f, "http({})", url),
+            Self::Dns { domain, server } => write!(f, "dns({}@{})", domain, server),
+        }
+    }
+}
+
+/// Per-interface health check configuration stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WanHealthConfig {
+    /// Interface name (FK to wan_configs).
+    pub interface: String,
+    /// Health check type and parameters.
+    #[serde(default)]
+    pub health_check_type: HealthCheckType,
+    /// Maximum state changes within `flap_window_secs` before suppressing failover.
+    #[serde(default = "default_flap_threshold")]
+    pub flap_threshold: u32,
+    /// Flap detection sliding window in seconds.
+    #[serde(default = "default_flap_window")]
+    pub flap_window_secs: u32,
+    /// If true, preserve existing connections on failover (conntrack-based).
+    #[serde(default)]
+    pub sticky_sessions: bool,
+    /// Pin a specific zone's traffic to this WAN interface.
+    #[serde(default)]
+    pub zone_pin: Option<String>,
+}
+
+fn default_flap_threshold() -> u32 {
+    5
+}
+
+fn default_flap_window() -> u32 {
+    60
+}
+
+/// A logged flap event for diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlapEvent {
+    pub id: i64,
+    pub interface: String,
+    pub new_state: String,
+    pub suppressed: bool,
+    pub timestamp: String,
+}
+
+/// Validation errors for health check configuration.
+#[derive(Debug, thiserror::Error)]
+pub enum HealthConfigValidationError {
+    #[error("invalid interface name: {0}")]
+    InterfaceName(String),
+    #[error("invalid HTTP URL '{0}': must start with http:// or https://")]
+    HttpUrl(String),
+    #[error("invalid expected_status {0}: must be 100-599")]
+    HttpStatus(u16),
+    #[error("invalid DNS domain '{0}': must not be empty and max 253 chars")]
+    DnsDomain(String),
+    #[error("invalid DNS server '{0}': must be a valid IP address")]
+    DnsServer(String),
+    #[error("invalid flap_threshold {0}: must be 1-100")]
+    FlapThreshold(u32),
+    #[error("invalid flap_window_secs {0}: must be 10-3600")]
+    FlapWindow(u32),
+    #[error("invalid zone_pin '{0}': must be a recognized zone name")]
+    ZonePin(String),
+}
+
+/// Validate a WanHealthConfig.
+pub fn validate_health_config(
+    config: &WanHealthConfig,
+) -> std::result::Result<(), HealthConfigValidationError> {
+    validate_interface_name(&config.interface)
+        .map_err(|_| HealthConfigValidationError::InterfaceName(config.interface.clone()))?;
+
+    match &config.health_check_type {
+        HealthCheckType::Icmp => {}
+        HealthCheckType::Http {
+            url,
+            expected_status,
+        } => {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(HealthConfigValidationError::HttpUrl(url.clone()));
+            }
+            // Reject URLs with shell metacharacters or control characters
+            if url.len() > 2048
+                || url.chars().any(|c| c.is_control())
+                || url.contains('`')
+                || url.contains('$')
+            {
+                return Err(HealthConfigValidationError::HttpUrl(url.clone()));
+            }
+            if *expected_status < 100 || *expected_status > 599 {
+                return Err(HealthConfigValidationError::HttpStatus(*expected_status));
+            }
+        }
+        HealthCheckType::Dns { domain, server } => {
+            if domain.is_empty() || domain.len() > 253 {
+                return Err(HealthConfigValidationError::DnsDomain(domain.clone()));
+            }
+            // Basic domain validation: alphanumeric, hyphens, dots
+            if !domain
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+            {
+                return Err(HealthConfigValidationError::DnsDomain(domain.clone()));
+            }
+            server
+                .parse::<IpAddr>()
+                .map_err(|_| HealthConfigValidationError::DnsServer(server.clone()))?;
+        }
+    }
+
+    if config.flap_threshold == 0 || config.flap_threshold > 100 {
+        return Err(HealthConfigValidationError::FlapThreshold(
+            config.flap_threshold,
+        ));
+    }
+    if config.flap_window_secs < 10 || config.flap_window_secs > 3600 {
+        return Err(HealthConfigValidationError::FlapWindow(
+            config.flap_window_secs,
+        ));
+    }
+
+    if let Some(ref zone) = config.zone_pin {
+        // Validate zone name: non-empty, alphanumeric/underscore/dash, max 32 chars
+        if zone.is_empty()
+            || zone.len() > 32
+            || !zone
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(HealthConfigValidationError::ZonePin(zone.clone()));
+        }
+    }
+
+    Ok(())
+}
+
+// ── Health check database operations ────────────────────────────────
+
+/// Get the health config for a WAN interface.
+#[must_use = "health config result should be checked"]
+pub async fn get_health_config(
+    db: &sfgw_db::Db,
+    interface: &str,
+) -> Result<Option<WanHealthConfig>> {
+    validate_interface_name(interface).map_err(|e| NetError::Internal(e.into()))?;
+
+    let conn = db.lock().await;
+    let mut stmt = conn
+        .prepare(
+            "SELECT health_check_type, health_check_config, flap_threshold, \
+             flap_window_secs, sticky_sessions, zone_pin \
+             FROM wan_health_config WHERE interface = ?1",
+        )
+        .context("failed to prepare wan_health_config query")?;
+
+    let result = stmt.query_row(rusqlite::params![interface], |row| {
+        let check_type: String = row.get(0)?;
+        let check_config: String = row.get(1)?;
+        let flap_threshold: u32 = row.get(2)?;
+        let flap_window_secs: u32 = row.get(3)?;
+        let sticky: i32 = row.get(4)?;
+        let zone_pin: Option<String> = row.get(5)?;
+        Ok((
+            check_type,
+            check_config,
+            flap_threshold,
+            flap_window_secs,
+            sticky,
+            zone_pin,
+        ))
+    });
+
+    match result {
+        Ok((check_type, check_config, flap_threshold, flap_window_secs, sticky, zone_pin)) => {
+            let health_check_type = parse_health_check_type(&check_type, &check_config)?;
+            Ok(Some(WanHealthConfig {
+                interface: interface.to_string(),
+                health_check_type,
+                flap_threshold,
+                flap_window_secs,
+                sticky_sessions: sticky != 0,
+                zone_pin,
+            }))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(NetError::Database(e)),
+    }
+}
+
+/// Save or update health config for a WAN interface.
+pub async fn set_health_config(db: &sfgw_db::Db, config: &WanHealthConfig) -> Result<()> {
+    validate_health_config(config).map_err(|e| NetError::Internal(e.into()))?;
+
+    let (type_str, config_json) = serialize_health_check_type(&config.health_check_type)?;
+
+    let conn = db.lock().await;
+    conn.execute(
+        "INSERT INTO wan_health_config \
+         (interface, health_check_type, health_check_config, flap_threshold, \
+          flap_window_secs, sticky_sessions, zone_pin, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now')) \
+         ON CONFLICT(interface) DO UPDATE SET \
+             health_check_type = excluded.health_check_type, \
+             health_check_config = excluded.health_check_config, \
+             flap_threshold = excluded.flap_threshold, \
+             flap_window_secs = excluded.flap_window_secs, \
+             sticky_sessions = excluded.sticky_sessions, \
+             zone_pin = excluded.zone_pin, \
+             updated_at = datetime('now')",
+        rusqlite::params![
+            config.interface,
+            type_str,
+            config_json,
+            config.flap_threshold,
+            config.flap_window_secs,
+            config.sticky_sessions as i32,
+            config.zone_pin,
+        ],
+    )
+    .context("failed to upsert wan_health_config")?;
+
+    tracing::info!(
+        interface = %config.interface,
+        check_type = %config.health_check_type,
+        flap_threshold = config.flap_threshold,
+        sticky = config.sticky_sessions,
+        "WAN health config saved"
+    );
+    Ok(())
+}
+
+/// List all health configs.
+#[must_use = "health config list result should be checked"]
+pub async fn list_health_configs(db: &sfgw_db::Db) -> Result<Vec<WanHealthConfig>> {
+    let conn = db.lock().await;
+    let mut stmt = conn
+        .prepare(
+            "SELECT interface, health_check_type, health_check_config, flap_threshold, \
+             flap_window_secs, sticky_sessions, zone_pin \
+             FROM wan_health_config ORDER BY interface",
+        )
+        .context("failed to prepare wan_health_config list query")?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let interface: String = row.get(0)?;
+            let check_type: String = row.get(1)?;
+            let check_config: String = row.get(2)?;
+            let flap_threshold: u32 = row.get(3)?;
+            let flap_window_secs: u32 = row.get(4)?;
+            let sticky: i32 = row.get(5)?;
+            let zone_pin: Option<String> = row.get(6)?;
+            Ok((
+                interface,
+                check_type,
+                check_config,
+                flap_threshold,
+                flap_window_secs,
+                sticky,
+                zone_pin,
+            ))
+        })
+        .context("failed to query wan_health_config")?;
+
+    let mut configs = Vec::new();
+    for row in rows {
+        let (
+            interface,
+            check_type,
+            check_config,
+            flap_threshold,
+            flap_window_secs,
+            sticky,
+            zone_pin,
+        ) = row?;
+        let health_check_type = parse_health_check_type(&check_type, &check_config)?;
+        configs.push(WanHealthConfig {
+            interface,
+            health_check_type,
+            flap_threshold,
+            flap_window_secs,
+            sticky_sessions: sticky != 0,
+            zone_pin,
+        });
+    }
+    Ok(configs)
+}
+
+/// Log a flap event.
+pub async fn log_flap_event(
+    db: &sfgw_db::Db,
+    interface: &str,
+    new_state: &str,
+    suppressed: bool,
+) -> Result<()> {
+    let conn = db.lock().await;
+    conn.execute(
+        "INSERT INTO wan_flap_log (interface, new_state, suppressed) VALUES (?1, ?2, ?3)",
+        rusqlite::params![interface, new_state, suppressed as i32],
+    )
+    .context("failed to insert wan_flap_log")?;
+
+    // Prune old entries (keep last 1000 per interface)
+    conn.execute(
+        "DELETE FROM wan_flap_log WHERE interface = ?1 AND id NOT IN \
+         (SELECT id FROM wan_flap_log WHERE interface = ?1 ORDER BY timestamp DESC LIMIT 1000)",
+        rusqlite::params![interface],
+    )
+    .context("failed to prune wan_flap_log")?;
+
+    Ok(())
+}
+
+/// Get recent flap events, optionally filtered by interface.
+#[must_use = "flap log result should be checked"]
+pub async fn get_flap_log(
+    db: &sfgw_db::Db,
+    interface: Option<&str>,
+    limit: u32,
+) -> Result<Vec<FlapEvent>> {
+    let conn = db.lock().await;
+    let limit = limit.min(500); // Cap at 500
+
+    let events = if let Some(iface) = interface {
+        validate_interface_name(iface).map_err(|e| NetError::Internal(e.into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, interface, new_state, suppressed, timestamp \
+                 FROM wan_flap_log WHERE interface = ?1 \
+                 ORDER BY timestamp DESC LIMIT ?2",
+            )
+            .context("failed to prepare flap_log query")?;
+        let rows = stmt
+            .query_map(rusqlite::params![iface, limit], map_flap_row)
+            .context("failed to query flap_log")?;
+        rows.filter_map(|r| r.ok()).collect()
+    } else {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, interface, new_state, suppressed, timestamp \
+                 FROM wan_flap_log ORDER BY timestamp DESC LIMIT ?1",
+            )
+            .context("failed to prepare flap_log query")?;
+        let rows = stmt
+            .query_map(rusqlite::params![limit], map_flap_row)
+            .context("failed to query flap_log")?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    Ok(events)
+}
+
+fn map_flap_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FlapEvent> {
+    Ok(FlapEvent {
+        id: row.get(0)?,
+        interface: row.get(1)?,
+        new_state: row.get(2)?,
+        suppressed: row.get::<_, i32>(3)? != 0,
+        timestamp: row.get(4)?,
+    })
+}
+
+// ── Health check type serialization helpers ─────────────────────────
+
+fn parse_health_check_type(type_str: &str, config_json: &str) -> Result<HealthCheckType> {
+    match type_str {
+        "icmp" => Ok(HealthCheckType::Icmp),
+        "http" => {
+            #[derive(Deserialize)]
+            struct HttpCfg {
+                url: String,
+                #[serde(default = "default_http_status")]
+                expected_status: u16,
+            }
+            let cfg: HttpCfg =
+                serde_json::from_str(config_json).context("invalid HTTP health check config")?;
+            Ok(HealthCheckType::Http {
+                url: cfg.url,
+                expected_status: cfg.expected_status,
+            })
+        }
+        "dns" => {
+            #[derive(Deserialize)]
+            struct DnsCfg {
+                domain: String,
+                server: String,
+            }
+            let cfg: DnsCfg =
+                serde_json::from_str(config_json).context("invalid DNS health check config")?;
+            Ok(HealthCheckType::Dns {
+                domain: cfg.domain,
+                server: cfg.server,
+            })
+        }
+        other => Err(NetError::Internal(anyhow::anyhow!(
+            "unknown health check type: {other}"
+        ))),
+    }
+}
+
+fn serialize_health_check_type(hct: &HealthCheckType) -> Result<(String, String)> {
+    match hct {
+        HealthCheckType::Icmp => Ok(("icmp".to_string(), "{}".to_string())),
+        HealthCheckType::Http {
+            url,
+            expected_status,
+        } => {
+            let json = serde_json::json!({ "url": url, "expected_status": expected_status });
+            Ok(("http".to_string(), json.to_string()))
+        }
+        HealthCheckType::Dns { domain, server } => {
+            let json = serde_json::json!({ "domain": domain, "server": server });
+            Ok(("dns".to_string(), json.to_string()))
+        }
+    }
+}
+
+// ── Extended health check execution ─────────────────────────────────
+
+/// Perform a health check using the configured type.
+///
+/// Returns `(healthy, latency_ms)`.
+pub async fn perform_health_check(
+    interface: &str,
+    target: &str,
+    health_type: &HealthCheckType,
+) -> (bool, u64) {
+    let start = std::time::Instant::now();
+    let healthy = match health_type {
+        HealthCheckType::Icmp => perform_icmp_check(interface, target).await,
+        HealthCheckType::Http {
+            url,
+            expected_status,
+        } => perform_http_check(interface, url, *expected_status).await,
+        HealthCheckType::Dns { domain, server } => {
+            perform_dns_check(interface, domain, server).await
+        }
+    };
+    let latency = start.elapsed().as_millis() as u64;
+    (healthy, latency)
+}
+
+/// ICMP ping health check (existing behavior).
+async fn perform_icmp_check(interface: &str, target: &str) -> bool {
+    match Command::new("ping")
+        .args(["-I", interface, "-c", "1", "-W", "2", target])
+        .output()
+        .await
+    {
+        Ok(output) => output.status.success(),
+        Err(e) => {
+            tracing::debug!(
+                interface,
+                target,
+                "ICMP health check failed to execute: {e}"
+            );
+            false
+        }
+    }
+}
+
+/// HTTP GET health check with 5s timeout.
+///
+/// Uses reqwest to make the request. The interface binding is done via
+/// the system's routing table (the request goes out the correct WAN
+/// because we set up per-interface routing tables in sfgw-fw).
+async fn perform_http_check(interface: &str, url: &str, expected_status: u16) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(interface, url, "failed to build HTTP client: {e}");
+            return false;
+        }
+    };
+
+    match client.get(url).send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let ok = status == expected_status;
+            if !ok {
+                tracing::debug!(
+                    interface,
+                    url,
+                    status,
+                    expected_status,
+                    "HTTP health check: unexpected status"
+                );
+            }
+            ok
+        }
+        Err(e) => {
+            tracing::debug!(interface, url, "HTTP health check failed: {e}");
+            false
+        }
+    }
+}
+
+/// DNS resolve health check.
+///
+/// Uses the `dig` command to query a domain via a specific server.
+/// Succeeds if the answer section contains at least one record.
+async fn perform_dns_check(interface: &str, domain: &str, server: &str) -> bool {
+    // Use dig with short timeout: dig @server domain +short +time=3 +tries=1
+    let server_arg = format!("@{server}");
+    match Command::new("dig")
+        .args([&server_arg, domain, "+short", "+time=3", "+tries=1"])
+        .output()
+        .await
+    {
+        Ok(output) => {
+            if !output.status.success() {
+                tracing::debug!(interface, domain, server, "DNS health check: dig failed");
+                return false;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let has_answer = stdout.lines().any(|l| !l.trim().is_empty());
+            if !has_answer {
+                tracing::debug!(
+                    interface,
+                    domain,
+                    server,
+                    "DNS health check: no answer records"
+                );
+            }
+            has_answer
+        }
+        Err(e) => {
+            tracing::debug!(
+                interface,
+                domain,
+                server,
+                "DNS health check failed to execute dig: {e}"
+            );
+            false
+        }
+    }
+}
+
+// ── Flap detection ──────────────────────────────────────────────────
+
+/// Tracks state transitions for a single WAN interface in a sliding window.
+#[derive(Debug)]
+pub struct FlapDetector {
+    /// Timestamps of state changes within the window.
+    transitions: VecDeque<std::time::Instant>,
+    /// Max transitions before we suppress.
+    threshold: u32,
+    /// Window duration.
+    window: std::time::Duration,
+}
+
+impl FlapDetector {
+    /// Create a new flap detector.
+    pub fn new(threshold: u32, window_secs: u32) -> Self {
+        Self {
+            transitions: VecDeque::new(),
+            threshold,
+            window: std::time::Duration::from_secs(window_secs as u64),
+        }
+    }
+
+    /// Record a state change. Returns `true` if failover should be suppressed
+    /// (i.e., the interface is flapping).
+    pub fn record_transition(&mut self) -> bool {
+        let now = std::time::Instant::now();
+
+        // Remove transitions outside the window
+        while let Some(front) = self.transitions.front() {
+            if now.duration_since(*front) > self.window {
+                self.transitions.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        self.transitions.push_back(now);
+
+        let flapping = self.transitions.len() as u32 >= self.threshold;
+        if flapping {
+            tracing::warn!(
+                transitions = self.transitions.len(),
+                threshold = self.threshold,
+                window_secs = self.window.as_secs(),
+                "flap detection: interface is flapping, suppressing failover"
+            );
+        }
+        flapping
+    }
+
+    /// Check if currently in flapping state without recording a new transition.
+    pub fn is_flapping(&self) -> bool {
+        let now = std::time::Instant::now();
+        let recent = self
+            .transitions
+            .iter()
+            .filter(|t| now.duration_since(**t) <= self.window)
+            .count();
+        recent as u32 >= self.threshold
+    }
+}
+
+/// Shared flap detector state across the WAN health monitor.
+pub type FlapDetectorMap = Arc<Mutex<std::collections::HashMap<String, FlapDetector>>>;
+
+/// Create a new shared flap detector map.
+pub fn new_flap_detector_map() -> FlapDetectorMap {
+    Arc::new(Mutex::new(std::collections::HashMap::new()))
+}
+
+// ── Sticky sessions (conntrack preservation) ────────────────────────
+
+/// When failing over with sticky sessions enabled, mark existing connections
+/// to continue using the old WAN interface while routing new connections
+/// via the new WAN.
+///
+/// Uses iptables-legacy (UDM Pro kernel 4.19, no nf_tables) to set
+/// connection marks based on the outgoing interface, and ip rule to route
+/// marked traffic via the old interface's routing table.
+pub async fn apply_sticky_sessions(
+    old_interface: &str,
+    old_gateway: &str,
+    table_id: u32,
+) -> Result<()> {
+    validate_interface_name(old_interface).map_err(|e| NetError::Internal(e.into()))?;
+    let _gw: IpAddr = old_gateway
+        .parse()
+        .map_err(|_| NetError::Internal(anyhow::anyhow!("invalid gateway: {}", old_gateway)))?;
+
+    let mark = format!("0x{:x}", table_id);
+    let table_str = table_id.to_string();
+
+    // Mark established/related connections going out the old interface
+    // so they continue using the old route.
+    let mark_result = Command::new("iptables-legacy")
+        .args([
+            "-t",
+            "mangle",
+            "-A",
+            "OUTPUT",
+            "-o",
+            old_interface,
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "ESTABLISHED,RELATED",
+            "-j",
+            "CONNMARK",
+            "--set-mark",
+            &mark,
+        ])
+        .output()
+        .await
+        .context("failed to execute iptables-legacy for sticky sessions")?;
+
+    if !mark_result.status.success() {
+        let stderr = String::from_utf8_lossy(&mark_result.stderr);
+        tracing::warn!(
+            interface = old_interface,
+            "failed to set connmark for sticky sessions: {}",
+            stderr.trim()
+        );
+    }
+
+    // Restore marks from connection tracking to packets
+    let restore_result = Command::new("iptables-legacy")
+        .args([
+            "-t",
+            "mangle",
+            "-A",
+            "PREROUTING",
+            "-j",
+            "CONNMARK",
+            "--restore-mark",
+        ])
+        .output()
+        .await
+        .context("failed to add connmark restore rule")?;
+
+    if !restore_result.status.success() {
+        let stderr = String::from_utf8_lossy(&restore_result.stderr);
+        tracing::debug!("connmark restore rule may already exist: {}", stderr.trim());
+    }
+
+    // Add ip rule: packets with this mark use the old routing table
+    let rule_result = Command::new("ip")
+        .args(["rule", "add", "fwmark", &mark, "table", &table_str])
+        .output()
+        .await
+        .context("failed to add ip rule for sticky sessions")?;
+
+    if !rule_result.status.success() {
+        let stderr = String::from_utf8_lossy(&rule_result.stderr);
+        tracing::warn!(
+            "failed to add ip rule for fwmark {}: {}",
+            mark,
+            stderr.trim()
+        );
+    }
+
+    tracing::info!(
+        interface = old_interface,
+        mark = mark.as_str(),
+        table = table_id,
+        "sticky sessions: existing connections preserved via old route"
+    );
+
+    Ok(())
+}
+
+/// Remove sticky session rules for an interface (cleanup after full transition).
+pub async fn remove_sticky_sessions(old_interface: &str, table_id: u32) -> Result<()> {
+    validate_interface_name(old_interface).map_err(|e| NetError::Internal(e.into()))?;
+
+    let mark = format!("0x{:x}", table_id);
+    let table_str = table_id.to_string();
+
+    // Remove the mangle OUTPUT rule
+    let _ = Command::new("iptables-legacy")
+        .args([
+            "-t",
+            "mangle",
+            "-D",
+            "OUTPUT",
+            "-o",
+            old_interface,
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "ESTABLISHED,RELATED",
+            "-j",
+            "CONNMARK",
+            "--set-mark",
+            &mark,
+        ])
+        .output()
+        .await;
+
+    // Remove the ip rule
+    let _ = Command::new("ip")
+        .args(["rule", "del", "fwmark", &mark, "table", &table_str])
+        .output()
+        .await;
+
+    tracing::info!(
+        interface = old_interface,
+        "sticky sessions: rules removed for old interface"
+    );
+
+    Ok(())
+}
+
+// ── Per-zone WAN pinning ────────────────────────────────────────────
+
+/// Apply iptables rules to pin a specific zone's traffic to a WAN interface.
+///
+/// Uses fwmark + ip rule to route zone-originated traffic via a specific
+/// routing table. The zone is identified by its VLAN interface (e.g. br10 for VLAN 10).
+pub async fn apply_zone_pin(
+    zone_interface: &str,
+    wan_interface: &str,
+    wan_gateway: &str,
+    table_id: u32,
+) -> Result<()> {
+    validate_interface_name(zone_interface).map_err(|e| NetError::Internal(e.into()))?;
+    validate_interface_name(wan_interface).map_err(|e| NetError::Internal(e.into()))?;
+    let _gw: IpAddr = wan_gateway
+        .parse()
+        .map_err(|_| NetError::Internal(anyhow::anyhow!("invalid gateway: {}", wan_gateway)))?;
+
+    let mark = format!("0x{:x}", 200 + table_id); // Use 200+ range for zone pins
+    let table_str = table_id.to_string();
+
+    // Ensure the routing table has the correct default route
+    let route_result = Command::new("ip")
+        .args([
+            "route",
+            "replace",
+            "default",
+            "via",
+            wan_gateway,
+            "dev",
+            wan_interface,
+            "table",
+            &table_str,
+        ])
+        .output()
+        .await
+        .context("failed to set zone-pin routing table")?;
+
+    if !route_result.status.success() {
+        let stderr = String::from_utf8_lossy(&route_result.stderr);
+        tracing::warn!("failed to set zone-pin route: {}", stderr.trim());
+    }
+
+    // Mark traffic from the zone interface
+    let mark_result = Command::new("iptables-legacy")
+        .args([
+            "-t",
+            "mangle",
+            "-A",
+            "PREROUTING",
+            "-i",
+            zone_interface,
+            "-j",
+            "MARK",
+            "--set-mark",
+            &mark,
+        ])
+        .output()
+        .await
+        .context("failed to set zone-pin mark")?;
+
+    if !mark_result.status.success() {
+        let stderr = String::from_utf8_lossy(&mark_result.stderr);
+        tracing::warn!(
+            "failed to set zone-pin mark for {}: {}",
+            zone_interface,
+            stderr.trim()
+        );
+    }
+
+    // Add ip rule for the mark
+    let rule_result = Command::new("ip")
+        .args(["rule", "add", "fwmark", &mark, "table", &table_str])
+        .output()
+        .await
+        .context("failed to add zone-pin ip rule")?;
+
+    if !rule_result.status.success() {
+        let stderr = String::from_utf8_lossy(&rule_result.stderr);
+        tracing::debug!("zone-pin ip rule may already exist: {}", stderr.trim());
+    }
+
+    tracing::info!(
+        zone = zone_interface,
+        wan = wan_interface,
+        mark = mark.as_str(),
+        table = table_id,
+        "zone pin applied: {} traffic via {}",
+        zone_interface,
+        wan_interface
+    );
+
+    Ok(())
+}
+
+/// Remove zone-pin rules for a zone interface.
+pub async fn remove_zone_pin(zone_interface: &str, table_id: u32) -> Result<()> {
+    validate_interface_name(zone_interface).map_err(|e| NetError::Internal(e.into()))?;
+
+    let mark = format!("0x{:x}", 200 + table_id);
+    let table_str = table_id.to_string();
+
+    let _ = Command::new("iptables-legacy")
+        .args([
+            "-t",
+            "mangle",
+            "-D",
+            "PREROUTING",
+            "-i",
+            zone_interface,
+            "-j",
+            "MARK",
+            "--set-mark",
+            &mark,
+        ])
+        .output()
+        .await;
+
+    let _ = Command::new("ip")
+        .args(["rule", "del", "fwmark", &mark, "table", &table_str])
+        .output()
+        .await;
+
+    tracing::info!(zone = zone_interface, "zone pin removed");
+
+    Ok(())
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2173,5 +3096,391 @@ mod tests {
             ),
             "static"
         );
+    }
+
+    // ── Health check type tests ─────────────────────────────────────
+
+    #[test]
+    fn health_check_type_serde_icmp() {
+        let hct = HealthCheckType::Icmp;
+        let json = serde_json::to_string(&hct).expect("serialize");
+        let back: HealthCheckType = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(hct, back);
+    }
+
+    #[test]
+    fn health_check_type_serde_http() {
+        let hct = HealthCheckType::Http {
+            url: "http://connectivitycheck.gstatic.com/generate_204".to_string(),
+            expected_status: 204,
+        };
+        let json = serde_json::to_string(&hct).expect("serialize");
+        let back: HealthCheckType = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(hct, back);
+    }
+
+    #[test]
+    fn health_check_type_serde_dns() {
+        let hct = HealthCheckType::Dns {
+            domain: "google.com".to_string(),
+            server: "8.8.8.8".to_string(),
+        };
+        let json = serde_json::to_string(&hct).expect("serialize");
+        let back: HealthCheckType = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(hct, back);
+    }
+
+    #[test]
+    fn health_check_type_display() {
+        assert_eq!(format!("{}", HealthCheckType::Icmp), "icmp");
+        assert_eq!(
+            format!(
+                "{}",
+                HealthCheckType::Http {
+                    url: "http://example.com".to_string(),
+                    expected_status: 200,
+                }
+            ),
+            "http(http://example.com)"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                HealthCheckType::Dns {
+                    domain: "google.com".to_string(),
+                    server: "8.8.8.8".to_string(),
+                }
+            ),
+            "dns(google.com@8.8.8.8)"
+        );
+    }
+
+    // ── Health config validation tests ──────────────────────────────
+
+    fn sample_health_config() -> WanHealthConfig {
+        WanHealthConfig {
+            interface: "eth0".to_string(),
+            health_check_type: HealthCheckType::Icmp,
+            flap_threshold: 5,
+            flap_window_secs: 60,
+            sticky_sessions: false,
+            zone_pin: None,
+        }
+    }
+
+    #[test]
+    fn validate_health_config_icmp_ok() {
+        assert!(validate_health_config(&sample_health_config()).is_ok());
+    }
+
+    #[test]
+    fn validate_health_config_http_ok() {
+        let mut cfg = sample_health_config();
+        cfg.health_check_type = HealthCheckType::Http {
+            url: "http://connectivitycheck.gstatic.com/generate_204".to_string(),
+            expected_status: 204,
+        };
+        assert!(validate_health_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn validate_health_config_http_bad_url() {
+        let mut cfg = sample_health_config();
+        cfg.health_check_type = HealthCheckType::Http {
+            url: "ftp://not-http.com".to_string(),
+            expected_status: 200,
+        };
+        assert!(validate_health_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_health_config_http_bad_url_injection() {
+        let mut cfg = sample_health_config();
+        cfg.health_check_type = HealthCheckType::Http {
+            url: "http://evil.com/`whoami`".to_string(),
+            expected_status: 200,
+        };
+        assert!(validate_health_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_health_config_http_bad_status() {
+        let mut cfg = sample_health_config();
+        cfg.health_check_type = HealthCheckType::Http {
+            url: "http://example.com".to_string(),
+            expected_status: 0,
+        };
+        assert!(validate_health_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_health_config_dns_ok() {
+        let mut cfg = sample_health_config();
+        cfg.health_check_type = HealthCheckType::Dns {
+            domain: "google.com".to_string(),
+            server: "8.8.8.8".to_string(),
+        };
+        assert!(validate_health_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn validate_health_config_dns_bad_domain() {
+        let mut cfg = sample_health_config();
+        cfg.health_check_type = HealthCheckType::Dns {
+            domain: "goo gle.com".to_string(),
+            server: "8.8.8.8".to_string(),
+        };
+        assert!(validate_health_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_health_config_dns_bad_server() {
+        let mut cfg = sample_health_config();
+        cfg.health_check_type = HealthCheckType::Dns {
+            domain: "google.com".to_string(),
+            server: "not-an-ip".to_string(),
+        };
+        assert!(validate_health_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_health_config_bad_flap_threshold() {
+        let mut cfg = sample_health_config();
+        cfg.flap_threshold = 0;
+        assert!(validate_health_config(&cfg).is_err());
+        cfg.flap_threshold = 101;
+        assert!(validate_health_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_health_config_bad_flap_window() {
+        let mut cfg = sample_health_config();
+        cfg.flap_window_secs = 9;
+        assert!(validate_health_config(&cfg).is_err());
+        cfg.flap_window_secs = 3601;
+        assert!(validate_health_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_health_config_zone_pin_ok() {
+        let mut cfg = sample_health_config();
+        cfg.zone_pin = Some("DMZ".to_string());
+        assert!(validate_health_config(&cfg).is_ok());
+        cfg.zone_pin = Some("LAN".to_string());
+        assert!(validate_health_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn validate_health_config_zone_pin_bad() {
+        let mut cfg = sample_health_config();
+        cfg.zone_pin = Some("".to_string());
+        assert!(validate_health_config(&cfg).is_err());
+        cfg.zone_pin = Some("zone with spaces".to_string());
+        assert!(validate_health_config(&cfg).is_err());
+    }
+
+    // ── Flap detector tests ────────────────────────────────────────
+
+    #[test]
+    fn flap_detector_no_flap() {
+        let mut detector = FlapDetector::new(5, 60);
+        // 4 transitions should not trigger
+        for _ in 0..4 {
+            assert!(!detector.record_transition());
+        }
+    }
+
+    #[test]
+    fn flap_detector_flapping() {
+        let mut detector = FlapDetector::new(3, 60);
+        assert!(!detector.record_transition());
+        assert!(!detector.record_transition());
+        assert!(detector.record_transition()); // 3rd = flapping
+        assert!(detector.is_flapping());
+    }
+
+    // ── Health check type serialization helpers ─────────────────────
+
+    #[test]
+    fn health_check_type_roundtrip_icmp() {
+        let (type_str, config_json) =
+            serialize_health_check_type(&HealthCheckType::Icmp).expect("serialize");
+        let back = parse_health_check_type(&type_str, &config_json).expect("parse");
+        assert_eq!(back, HealthCheckType::Icmp);
+    }
+
+    #[test]
+    fn health_check_type_roundtrip_http() {
+        let hct = HealthCheckType::Http {
+            url: "http://example.com/health".to_string(),
+            expected_status: 204,
+        };
+        let (type_str, config_json) = serialize_health_check_type(&hct).expect("serialize");
+        let back = parse_health_check_type(&type_str, &config_json).expect("parse");
+        assert_eq!(back, hct);
+    }
+
+    #[test]
+    fn health_check_type_roundtrip_dns() {
+        let hct = HealthCheckType::Dns {
+            domain: "example.com".to_string(),
+            server: "1.1.1.1".to_string(),
+        };
+        let (type_str, config_json) = serialize_health_check_type(&hct).expect("serialize");
+        let back = parse_health_check_type(&type_str, &config_json).expect("parse");
+        assert_eq!(back, hct);
+    }
+
+    // ── WanHealthConfig serde tests ────────────────────────────────
+
+    #[test]
+    fn wan_health_config_serde_roundtrip() {
+        let cfg = WanHealthConfig {
+            interface: "eth0".to_string(),
+            health_check_type: HealthCheckType::Http {
+                url: "https://example.com/check".to_string(),
+                expected_status: 200,
+            },
+            flap_threshold: 10,
+            flap_window_secs: 120,
+            sticky_sessions: true,
+            zone_pin: Some("DMZ".to_string()),
+        };
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: WanHealthConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn wan_health_config_defaults() {
+        let json = r#"{"interface":"eth0"}"#;
+        let cfg: WanHealthConfig = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(cfg.health_check_type, HealthCheckType::Icmp);
+        assert_eq!(cfg.flap_threshold, 5);
+        assert_eq!(cfg.flap_window_secs, 60);
+        assert!(!cfg.sticky_sessions);
+        assert!(cfg.zone_pin.is_none());
+    }
+
+    // ── Database round-trip tests for health config ────────────────
+
+    #[tokio::test]
+    async fn db_health_config_set_and_get() {
+        let db = test_db().await;
+        // Must create a wan_config first (FK constraint)
+        set_wan_config(&db, &dhcp_config())
+            .await
+            .expect("set wan config");
+
+        let hc = WanHealthConfig {
+            interface: "eth0".to_string(),
+            health_check_type: HealthCheckType::Http {
+                url: "http://example.com/check".to_string(),
+                expected_status: 204,
+            },
+            flap_threshold: 10,
+            flap_window_secs: 120,
+            sticky_sessions: true,
+            zone_pin: Some("DMZ".to_string()),
+        };
+        set_health_config(&db, &hc)
+            .await
+            .expect("set health config");
+        let loaded = get_health_config(&db, "eth0")
+            .await
+            .expect("get health config")
+            .expect("should exist");
+
+        assert_eq!(loaded.interface, "eth0");
+        assert_eq!(
+            loaded.health_check_type,
+            HealthCheckType::Http {
+                url: "http://example.com/check".to_string(),
+                expected_status: 204,
+            }
+        );
+        assert_eq!(loaded.flap_threshold, 10);
+        assert_eq!(loaded.flap_window_secs, 120);
+        assert!(loaded.sticky_sessions);
+        assert_eq!(loaded.zone_pin, Some("DMZ".to_string()));
+    }
+
+    #[tokio::test]
+    async fn db_health_config_nonexistent() {
+        let db = test_db().await;
+        let result = get_health_config(&db, "eth99")
+            .await
+            .expect("get should not error");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn db_health_config_list() {
+        let db = test_db().await;
+        set_wan_config(&db, &dhcp_config()).await.expect("set wan");
+        set_wan_config(&db, &static_config())
+            .await
+            .expect("set wan");
+
+        let hc1 = WanHealthConfig {
+            interface: "eth0".to_string(),
+            health_check_type: HealthCheckType::Icmp,
+            flap_threshold: 5,
+            flap_window_secs: 60,
+            sticky_sessions: false,
+            zone_pin: None,
+        };
+        let hc2 = WanHealthConfig {
+            interface: "eth4".to_string(),
+            health_check_type: HealthCheckType::Dns {
+                domain: "google.com".to_string(),
+                server: "8.8.8.8".to_string(),
+            },
+            flap_threshold: 3,
+            flap_window_secs: 30,
+            sticky_sessions: true,
+            zone_pin: Some("LAN".to_string()),
+        };
+        set_health_config(&db, &hc1).await.expect("set hc1");
+        set_health_config(&db, &hc2).await.expect("set hc2");
+
+        let configs = list_health_configs(&db).await.expect("list");
+        assert_eq!(configs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn db_flap_log_roundtrip() {
+        let db = test_db().await;
+        log_flap_event(&db, "eth0", "down", false)
+            .await
+            .expect("log flap");
+        log_flap_event(&db, "eth0", "up", false)
+            .await
+            .expect("log flap");
+        log_flap_event(&db, "eth0", "down", true)
+            .await
+            .expect("log flap");
+
+        let events = get_flap_log(&db, Some("eth0"), 100)
+            .await
+            .expect("get flap log");
+        assert_eq!(events.len(), 3);
+        // Most recent first
+        assert_eq!(events[0].new_state, "down");
+        assert!(events[0].suppressed);
+    }
+
+    #[tokio::test]
+    async fn db_flap_log_all_interfaces() {
+        let db = test_db().await;
+        log_flap_event(&db, "eth0", "down", false)
+            .await
+            .expect("log");
+        log_flap_event(&db, "eth4", "down", false)
+            .await
+            .expect("log");
+
+        let events = get_flap_log(&db, None, 100).await.expect("get flap log");
+        assert_eq!(events.len(), 2);
     }
 }

@@ -7,6 +7,9 @@ import {
   type WanConnectionType,
   type WanStatus,
   type WanHealthEntry,
+  type WanHealthConfig,
+  type HealthCheckType,
+  type FlapEvent,
   type NetworkInterface,
 } from '../api'
 import { PageHeader, Card, Button, Badge, Modal, Input, Toggle, EmptyState, Spinner } from '../components/ui'
@@ -59,6 +62,19 @@ interface WanFormState {
   // Layer 4: DS-Lite overlay (optional)
   useDslite: boolean
   aftr: string
+  // Extended health check
+  healthCheckType: 'icmp' | 'http' | 'dns'
+  httpUrl: string
+  httpExpectedStatus: string
+  dnsDomain: string
+  dnsServer: string
+  // Flap detection
+  flapThreshold: number
+  flapWindowSecs: number
+  // Sticky sessions
+  stickySessions: boolean
+  // Zone pinning
+  zonePin: string
 }
 
 const emptyForm: WanFormState = {
@@ -69,6 +85,10 @@ const emptyForm: WanFormState = {
   address: '', gateway: '', addressV6: '', gatewayV6: '',
   username: '', password: '', pppoeMtu: '', serviceName: '',
   useDslite: false, aftr: '',
+  healthCheckType: 'icmp', httpUrl: '', httpExpectedStatus: '200',
+  dnsDomain: '', dnsServer: '8.8.8.8',
+  flapThreshold: 5, flapWindowSecs: 60,
+  stickySessions: false, zonePin: '',
 }
 
 /** Build the nested WanConnectionType from layered form */
@@ -339,6 +359,8 @@ export default function Wan() {
   const [form, setForm] = useState<WanFormState>({ ...emptyForm })
   const [showPresets, setShowPresets] = useState(false)
   const [healthLoading, setHealthLoading] = useState(false)
+  const [flapLog, setFlapLog] = useState<FlapEvent[]>([])
+  const [showFlapLog, setShowFlapLog] = useState(false)
   const toast = useToast()
 
   const load = useCallback(async () => {
@@ -357,7 +379,7 @@ export default function Wan() {
       for (const c of cfgs) {
         try {
           const r = await api.getWanStatus(c.interface)
-          statusMap[c.interface] = r?.wan_status ?? r as unknown as WanStatus
+          statusMap[c.interface] = r.wan_status
         } catch { /* interface down */ }
       }
       setStatuses(statusMap)
@@ -374,6 +396,13 @@ export default function Wan() {
       setHealthMap(map)
     } catch { /* ignore */ }
     finally { setHealthLoading(false) }
+  }, [])
+
+  const loadFlapLog = useCallback(async () => {
+    try {
+      const res = await api.getWanFlapLog(undefined, 50)
+      setFlapLog(res.flap_log ?? [])
+    } catch { /* ignore */ }
   }, [])
 
   const handleModeChange = async (mode: 'failover' | 'loadbalance') => {
@@ -396,8 +425,27 @@ export default function Wan() {
     setShowForm(true)
   }
 
-  const openEdit = (cfg: WanPortConfig) => {
-    setForm(configToForm(cfg))
+  const openEdit = async (cfg: WanPortConfig) => {
+    const baseForm = configToForm(cfg)
+    // Load health config
+    try {
+      const res = await api.getWanHealthConfig(cfg.interface)
+      const hc = res.health_config
+      const hct = hc.health_check_type
+      baseForm.healthCheckType = hct.type as 'icmp' | 'http' | 'dns'
+      if (hct.type === 'http') {
+        baseForm.httpUrl = hct.url
+        baseForm.httpExpectedStatus = String(hct.expected_status ?? 200)
+      } else if (hct.type === 'dns') {
+        baseForm.dnsDomain = hct.domain
+        baseForm.dnsServer = hct.server
+      }
+      baseForm.flapThreshold = hc.flap_threshold
+      baseForm.flapWindowSecs = hc.flap_window_secs
+      baseForm.stickySessions = hc.sticky_sessions
+      baseForm.zonePin = hc.zone_pin ?? ''
+    } catch { /* use defaults */ }
+    setForm(baseForm)
     setEditIface(cfg.interface)
     setShowPresets(false)
     setShowForm(true)
@@ -414,8 +462,29 @@ export default function Wan() {
     if (form.useVlan && (!form.vlanId || Number(form.vlanId) < 1 || Number(form.vlanId) > 4094)) {
       toast.error('VLAN ID must be 1-4094'); return
     }
+    if (form.healthCheckType === 'http' && !form.httpUrl) {
+      toast.error('HTTP health check requires a URL'); return
+    }
+    if (form.healthCheckType === 'dns' && (!form.dnsDomain || !form.dnsServer)) {
+      toast.error('DNS health check requires domain and server'); return
+    }
     try {
       await api.setWanConfig(form.iface, formToConfig(form))
+      // Save health config
+      const healthCheckType: HealthCheckType = form.healthCheckType === 'http'
+        ? { type: 'http', url: form.httpUrl, expected_status: Number(form.httpExpectedStatus) || 200 }
+        : form.healthCheckType === 'dns'
+          ? { type: 'dns', domain: form.dnsDomain, server: form.dnsServer }
+          : { type: 'icmp' }
+      const healthConfig: WanHealthConfig = {
+        interface: form.iface,
+        health_check_type: healthCheckType,
+        flap_threshold: form.flapThreshold,
+        flap_window_secs: form.flapWindowSecs,
+        sticky_sessions: form.stickySessions,
+        zone_pin: form.zonePin || null,
+      }
+      await api.setWanHealthConfig(form.iface, healthConfig)
       setShowForm(false)
       toast.success(editIface ? 'WAN port updated' : 'WAN port created')
       load()
@@ -711,6 +780,58 @@ export default function Wan() {
                 </div>
               </div>
 
+              {/* Health check type */}
+              <div className="border-t border-navy-800/30 pt-4">
+                <p className="text-[11px] text-navy-400 uppercase tracking-wider font-medium mb-3">Health Check Type</p>
+                <div className="grid grid-cols-3 gap-2 mb-4">
+                  {([
+                    { value: 'icmp' as const, label: 'ICMP Ping', desc: 'Default ping check' },
+                    { value: 'http' as const, label: 'HTTP Probe', desc: 'GET request check' },
+                    { value: 'dns' as const, label: 'DNS Resolve', desc: 'Domain resolution' },
+                  ]).map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => setForm({ ...form, healthCheckType: opt.value })}
+                      className={`p-3 rounded-lg border text-center transition-all ${
+                        form.healthCheckType === opt.value
+                          ? 'bg-emerald-500/10 border-emerald-500/30'
+                          : 'bg-navy-800/30 border-navy-700/30 hover:border-navy-600/50'
+                      }`}
+                    >
+                      <p className="text-sm font-medium text-gray-200">{opt.label}</p>
+                      <p className="text-[10px] text-navy-500 mt-0.5">{opt.desc}</p>
+                    </button>
+                  ))}
+                </div>
+
+                {form.healthCheckType === 'http' && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <Input label="URL" mono value={form.httpUrl} onChange={(e) => setForm({ ...form, httpUrl: e.target.value })} placeholder="http://connectivitycheck.gstatic.com/generate_204" />
+                    <Input label="Expected Status Code" type="number" mono value={form.httpExpectedStatus} onChange={(e) => setForm({ ...form, httpExpectedStatus: e.target.value })} placeholder="200" />
+                  </div>
+                )}
+                {form.healthCheckType === 'dns' && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <Input label="Domain to Resolve" mono value={form.dnsDomain} onChange={(e) => setForm({ ...form, dnsDomain: e.target.value })} placeholder="google.com" />
+                    <Input label="DNS Server" mono value={form.dnsServer} onChange={(e) => setForm({ ...form, dnsServer: e.target.value })} placeholder="8.8.8.8" />
+                  </div>
+                )}
+              </div>
+
+              {/* Flap detection & sticky sessions */}
+              <div className="border-t border-navy-800/30 pt-4">
+                <p className="text-[11px] text-navy-400 uppercase tracking-wider font-medium mb-3">Flap Detection & Sticky Sessions</p>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3">
+                  <Input label="Flap Threshold" type="number" mono value={form.flapThreshold} onChange={(e) => setForm({ ...form, flapThreshold: Number(e.target.value) })} />
+                  <Input label="Flap Window (s)" type="number" mono value={form.flapWindowSecs} onChange={(e) => setForm({ ...form, flapWindowSecs: Number(e.target.value) })} />
+                  <Input label="Zone Pin (optional)" mono value={form.zonePin} onChange={(e) => setForm({ ...form, zonePin: e.target.value })} placeholder="DMZ, LAN, GUEST" />
+                </div>
+                <div className="flex items-center gap-4">
+                  <Toggle checked={form.stickySessions} onChange={(v) => setForm({ ...form, stickySessions: v })} label="Sticky Sessions" />
+                  <p className="text-[10px] text-navy-600">Preserve existing connections during failover (conntrack-based)</p>
+                </div>
+              </div>
+
               {/* Enable toggle */}
               <div className="flex items-center gap-4 border-t border-navy-800/30 pt-4">
                 <Toggle checked={form.enabled} onChange={(v) => setForm({ ...form, enabled: v })} label="Enabled" />
@@ -783,6 +904,9 @@ export default function Wan() {
                     {health?.latency_ms != null && (
                       <span className="text-[10px] text-navy-500 font-mono">{health.latency_ms}ms</span>
                     )}
+                    {health?.check_type && health.check_type !== 'icmp' && (
+                      <Badge variant="neutral">{health.check_type.toUpperCase()}</Badge>
+                    )}
                     {!cfg.enabled && <Badge variant="neutral">Disabled</Badge>}
                     {configs.length > 1 && (
                       <span className="text-[10px] text-navy-500 font-mono">pri:{cfg.priority} w:{cfg.weight}</span>
@@ -832,6 +956,45 @@ export default function Wan() {
             )
           })}
         </div>
+      )}
+
+      {/* Flap log */}
+      {configs.length > 0 && (
+        <Card noPadding>
+          <div className="px-5 py-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-semibold text-gray-200">Flap Detection Log</p>
+                <p className="text-[10px] text-navy-600 mt-0.5">Recent interface state transitions and failover suppression events</p>
+              </div>
+              <Button variant="secondary" size="sm" onClick={() => { setShowFlapLog(!showFlapLog); if (!showFlapLog) loadFlapLog() }}>
+                {showFlapLog ? 'Hide' : 'Show Log'}
+              </Button>
+            </div>
+            {showFlapLog && (
+              <div className="mt-3 border-t border-navy-800/30 pt-3">
+                {flapLog.length === 0 ? (
+                  <p className="text-xs text-navy-500">No flap events recorded.</p>
+                ) : (
+                  <div className="space-y-1 max-h-48 overflow-y-auto">
+                    {flapLog.map((evt) => (
+                      <div key={evt.id} className="flex items-center gap-3 text-xs font-mono py-1">
+                        <span className="text-[10px] text-navy-500 w-36 shrink-0">{evt.timestamp}</span>
+                        <span className="text-gray-300 w-16 shrink-0">{evt.interface}</span>
+                        <span className={`w-12 shrink-0 ${evt.new_state === 'up' ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {evt.new_state}
+                        </span>
+                        {evt.suppressed && (
+                          <Badge variant="danger">SUPPRESSED</Badge>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </Card>
       )}
     </div>
   )

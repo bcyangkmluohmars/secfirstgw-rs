@@ -110,10 +110,12 @@ pub async fn check_wan_health(member: &WanMember) -> Result<bool> {
     Ok(output.status.success())
 }
 
-/// Background WAN health monitor loop.
+/// Background WAN health monitor loop (basic ICMP-only version).
 ///
-/// Periodically checks each WAN member's health and adjusts routing
-/// tables on failure or recovery. Spawned as a tokio task.
+/// For the enhanced health monitor with HTTP/DNS checks, flap detection,
+/// sticky sessions, and zone pinning, use `sfgw_net::wan::enhanced_wan_health_monitor`.
+///
+/// This basic version is kept for backwards compatibility. Spawned as a tokio task.
 pub async fn wan_health_monitor(db: sfgw_db::Db) -> Result<()> {
     use std::collections::HashMap;
 
