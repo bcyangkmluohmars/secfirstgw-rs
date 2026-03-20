@@ -230,6 +230,11 @@ async fn setup_interface_table(member: &WanMember, table_id: u32) -> Result<()> 
 }
 
 /// Apply failover routing: default route via highest-priority (lowest number) member.
+///
+/// WARNING: This sets a global default route. Zones without explicit `zone_pin`
+/// configuration will route through whatever WAN is currently primary. For
+/// restricted zones (GUEST, DMZ), configure zone_pin to ensure they always
+/// route through a specific WAN regardless of failover state.
 async fn apply_failover_route(members: &[&WanMember]) -> Result<()> {
     // Sort by priority (lowest = highest priority).
     let mut sorted: Vec<&&WanMember> = members.iter().collect();
