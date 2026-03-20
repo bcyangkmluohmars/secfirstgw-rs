@@ -207,6 +207,40 @@ export interface ZoneInfo {
   interfaces?: string[];  // only on zone_get, not zone_list
 }
 
+export interface AllowedService {
+  protocol: string;
+  port: number;
+  description?: string;
+}
+
+export interface CustomZone {
+  id: number;
+  name: string;
+  vlan_id: number;
+  policy_inbound: 'drop' | 'accept';
+  policy_outbound: 'drop' | 'accept';
+  policy_forward: 'drop' | 'accept';
+  allowed_services: AllowedService[];
+  description: string;
+}
+
+export interface CustomZoneRequest {
+  name: string;
+  vlan_id: number;
+  policy_inbound: 'drop' | 'accept';
+  policy_outbound: 'drop' | 'accept';
+  policy_forward: 'drop' | 'accept';
+  allowed_services: AllowedService[];
+  description: string;
+}
+
+export interface CustomZonePolicyUpdate {
+  policy_inbound: 'drop' | 'accept';
+  policy_outbound: 'drop' | 'accept';
+  policy_forward: 'drop' | 'accept';
+  allowed_services: AllowedService[];
+}
+
 export interface Device {
   mac: string;
   name: string | null;
@@ -247,6 +281,37 @@ export interface FirewallRule {
     rate_limit?: string;
   };
   enabled: boolean;
+}
+
+// QoS types
+export interface QosRule {
+  id: number;
+  name: string;
+  interface: string;
+  direction: 'egress' | 'ingress';
+  bandwidth_kbps: number;
+  priority: number;
+  match_protocol?: string | null;
+  match_port_min?: number | null;
+  match_port_max?: number | null;
+  match_ip?: string | null;
+  match_dscp?: number | null;
+  enabled: boolean;
+}
+
+export interface QosClassStats {
+  interface: string;
+  class_id: string;
+  class_name: string;
+  sent_bytes: number;
+  sent_packets: number;
+  dropped_packets: number;
+  rate_bps: number;
+}
+
+export interface QosInterfaceStats {
+  interface: string;
+  classes: QosClassStats[];
 }
 
 // VPN types
@@ -516,6 +581,30 @@ export interface WanHealthEntry {
   healthy: boolean
   enabled: boolean
   latency_ms: number | null
+  check_type?: string
+}
+
+// Health check configuration types
+export type HealthCheckType =
+  | { type: 'icmp' }
+  | { type: 'http'; url: string; expected_status?: number }
+  | { type: 'dns'; domain: string; server: string }
+
+export interface WanHealthConfig {
+  interface: string
+  health_check_type: HealthCheckType
+  flap_threshold: number
+  flap_window_secs: number
+  sticky_sessions: boolean
+  zone_pin: string | null
+}
+
+export interface FlapEvent {
+  id: number
+  interface: string
+  new_state: string
+  suppressed: boolean
+  timestamp: string
 }
 
 // User management types
@@ -576,6 +665,14 @@ export const api = {
   toggleFirewallRule: (id: number, enabled: boolean) => request<void>(`/api/v1/firewall/rules/${id}/toggle`, { method: 'POST', body: { enabled } }),
   applyFirewall: () => request<void>('/api/v1/firewall/apply', { method: 'POST' }),
 
+  // QoS
+  getQosRules: () => request<{ rules: QosRule[] }>('/api/v1/qos/rules'),
+  createQosRule: (rule: Omit<QosRule, 'id'>) => request<{ id: number }>('/api/v1/qos/rules', { method: 'POST', body: rule }),
+  updateQosRule: (id: number, rule: QosRule) => request<void>(`/api/v1/qos/rules/${id}`, { method: 'PUT', body: rule }),
+  deleteQosRule: (id: number) => request<void>(`/api/v1/qos/rules/${id}`, { method: 'DELETE' }),
+  applyQos: () => request<{ status: string }>('/api/v1/qos/apply', { method: 'POST' }),
+  getQosStats: () => request<{ stats: QosInterfaceStats[] }>('/api/v1/qos/stats'),
+
   // VPN
   getVpnTunnels: () => request<{ tunnels: VpnTunnel[] }>('/api/v1/vpn/tunnels'),
   createVpnTunnel: (body: { name: string; listen_port: number; address: string; dns?: string; mtu?: number }) => request<{ tunnel: VpnTunnel }>('/api/v1/vpn/tunnels', { method: 'POST', body }),
@@ -633,6 +730,18 @@ export const api = {
   getZone: (zone: string) =>
     request<ZoneInfo>(`/api/v1/zones/${encodeURIComponent(zone)}`),
 
+  // Custom Zones (IoT, VPN, user-defined)
+  getCustomZones: () =>
+    request<{ zones: CustomZone[] }>('/api/v1/zones/custom'),
+  createCustomZone: (zone: CustomZoneRequest) =>
+    request<{ id: number; name: string }>('/api/v1/zones/custom', { method: 'POST', body: zone }),
+  updateCustomZone: (id: number, zone: CustomZoneRequest) =>
+    request<{ ok: boolean }>(`/api/v1/zones/custom/${id}`, { method: 'PUT', body: zone }),
+  deleteCustomZone: (id: number) =>
+    request<{ ok: boolean }>(`/api/v1/zones/custom/${id}`, { method: 'DELETE' }),
+  updateCustomZonePolicy: (id: number, policy: CustomZonePolicyUpdate) =>
+    request<{ ok: boolean }>(`/api/v1/zones/custom/${id}/policy`, { method: 'PUT', body: policy }),
+
   // WAN
   getWanConfigs: () => request<{ configs: WanPortConfig[] }>('/api/v1/wan'),
   getWanConfig: (iface: string) => request<{ config: WanPortConfig }>(`/api/v1/wan/${encodeURIComponent(iface)}`),
@@ -643,6 +752,17 @@ export const api = {
   getWanFailover: () => request<WanFailoverConfig>('/api/v1/wan/failover'),
   setWanFailover: (mode: 'failover' | 'loadbalance') => request<void>('/api/v1/wan/failover', { method: 'PUT', body: { mode } }),
   getWanHealth: () => request<{ health: WanHealthEntry[] }>('/api/v1/wan/health'),
+  getWanHealthConfig: (iface: string) =>
+    request<{ health_config: WanHealthConfig }>(`/api/v1/wan/${encodeURIComponent(iface)}/health-config`),
+  setWanHealthConfig: (iface: string, config: WanHealthConfig) =>
+    request<{ status: string; health_config: WanHealthConfig }>(`/api/v1/wan/${encodeURIComponent(iface)}/health-config`, { method: 'PUT', body: config }),
+  getWanFlapLog: (iface?: string, limit?: number) => {
+    const params = new URLSearchParams()
+    if (iface) params.set('interface', iface)
+    if (limit) params.set('limit', String(limit))
+    const qs = params.toString()
+    return request<{ flap_log: FlapEvent[] }>(`/api/v1/wan/flap-log${qs ? `?${qs}` : ''}`)
+  },
 
   // Ubiquiti Inform
   getInformSettings: () => request<{ ubiquiti_inform_enabled: boolean }>('/api/v1/inform/settings'),

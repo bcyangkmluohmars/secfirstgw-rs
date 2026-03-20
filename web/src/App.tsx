@@ -14,6 +14,8 @@ import Inform from './pages/Inform'
 import Ids from './pages/Ids'
 import Wireless from './pages/Wireless'
 import Ddns from './pages/Ddns'
+import Qos from './pages/Qos'
+import Zones from './pages/Zones'
 import Settings from './pages/Settings'
 import Logs from './pages/Logs'
 import Login from './pages/Login'
@@ -114,6 +116,8 @@ export default function App() {
               <Route path="/network" element={<Network />} />
               <Route path="/wireless" element={<Wireless />} />
               <Route path="/firewall" element={<Firewall />} />
+              <Route path="/zones" element={<Zones />} />
+              <Route path="/qos" element={<Qos />} />
               <Route path="/vpn" element={<Vpn />} />
               <Route path="/ddns" element={<Ddns />} />
               <Route path="/devices" element={<Devices />} />
