@@ -205,7 +205,6 @@ fn default_drop() -> Action {
 
 /// Validate a custom zone name: lowercase alphanumeric + hyphens, 1-32 chars,
 /// must start with a letter, must not collide with built-in zone names.
-#[must_use]
 pub fn validate_zone_name(name: &str) -> Result<(), FwError> {
     if name.is_empty() || name.len() > 32 {
         return Err(FwError::Validation(
@@ -213,7 +212,11 @@ pub fn validate_zone_name(name: &str) -> Result<(), FwError> {
         ));
     }
 
-    if !name.chars().next().map_or(false, |c| c.is_ascii_lowercase()) {
+    if !name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase())
+    {
         return Err(FwError::Validation(
             "zone name must start with a lowercase letter".to_string(),
         ));
@@ -240,9 +243,8 @@ pub fn validate_zone_name(name: &str) -> Result<(), FwError> {
 }
 
 /// Validate a VLAN ID for custom zones: 2-4094 (VLAN 0 is WAN, VLAN 1 is void).
-#[must_use]
 pub fn validate_custom_vlan_id(vlan_id: u16) -> Result<(), FwError> {
-    if vlan_id < 2 || vlan_id > 4094 {
+    if !(2..=4094).contains(&vlan_id) {
         return Err(FwError::Validation(
             "VLAN ID must be between 2 and 4094".to_string(),
         ));
@@ -566,13 +568,7 @@ pub async fn apply_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
         // Fallback to legacy generation when no zones are configured.
         iptables::generate_ruleset(&rules, &policy)
     } else {
-        iptables::generate_zone_ruleset_with_custom(
-            &zones,
-            &rules,
-            &policy,
-            &[],
-            &custom_zones,
-        )
+        iptables::generate_zone_ruleset_with_custom(&zones, &rules, &policy, &[], &custom_zones)
     };
 
     iptables::apply_ruleset(&config).await?;
@@ -908,11 +904,16 @@ pub async fn insert_custom_zone(db: &sfgw_db::Db, req: &CustomZoneRequest) -> Re
             tracing::info!(id, name = %req.name, vlan_id = req.vlan_id, "inserted custom zone");
             Ok(id)
         }
-        Err(e) if e.to_string().contains("UNIQUE constraint failed: custom_zones.name") => {
+        Err(e)
+            if e.to_string()
+                .contains("UNIQUE constraint failed: custom_zones.name") =>
+        {
             Err(FwError::CustomZoneNameConflict(req.name.clone()))
         }
-        Err(e) if e.to_string().contains("UNIQUE constraint failed: custom_zones.vlan_id")
-            || e.to_string().contains("idx_custom_zones_vlan_id") =>
+        Err(e)
+            if e.to_string()
+                .contains("UNIQUE constraint failed: custom_zones.vlan_id")
+                || e.to_string().contains("idx_custom_zones_vlan_id") =>
         {
             Err(FwError::CustomZoneVlanConflict(req.vlan_id))
         }
@@ -971,11 +972,16 @@ pub async fn update_custom_zone(
             tracing::info!(id, name = %req.name, "updated custom zone");
             Ok(())
         }
-        Err(e) if e.to_string().contains("UNIQUE constraint failed: custom_zones.name") => {
+        Err(e)
+            if e.to_string()
+                .contains("UNIQUE constraint failed: custom_zones.name") =>
+        {
             Err(FwError::CustomZoneNameConflict(req.name.clone()))
         }
-        Err(e) if e.to_string().contains("UNIQUE constraint failed: custom_zones.vlan_id")
-            || e.to_string().contains("idx_custom_zones_vlan_id") =>
+        Err(e)
+            if e.to_string()
+                .contains("UNIQUE constraint failed: custom_zones.vlan_id")
+                || e.to_string().contains("idx_custom_zones_vlan_id") =>
         {
             Err(FwError::CustomZoneVlanConflict(req.vlan_id))
         }
@@ -1066,13 +1072,11 @@ pub fn vpn_zone_preset(vlan_id: u16) -> CustomZoneRequest {
         policy_inbound: Action::Drop,
         policy_outbound: Action::Accept,
         policy_forward: Action::Drop,
-        allowed_services: vec![
-            AllowedService {
-                protocol: "udp".to_string(),
-                port: 53,
-                description: Some("DNS".to_string()),
-            },
-        ],
+        allowed_services: vec![AllowedService {
+            protocol: "udp".to_string(),
+            port: 53,
+            description: Some("DNS".to_string()),
+        }],
         description: "VPN clients: access to LAN, blocked from MGMT/DMZ".to_string(),
     }
 }

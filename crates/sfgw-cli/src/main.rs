@@ -194,6 +194,12 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
     sfgw_fw::create_default_rules(&db).await?;
     sfgw_fw::apply_rules(&db).await?;
 
+    // Phase 6b: QoS / Traffic Shaping
+    tracing::info!("applying QoS traffic shaping");
+    if let Err(e) = sfgw_fw::qos::apply_qos(&db).await {
+        tracing::warn!("QoS setup failed (continuing): {e}");
+    }
+
     // Phase 7: DNS/DHCP
     tracing::info!("starting DNS/DHCP");
     let _dnsmasq = sfgw_dns::start(&db).await?;

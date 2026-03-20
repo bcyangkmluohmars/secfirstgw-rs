@@ -1668,20 +1668,14 @@ async fn qos_delete_rule(
     }
 }
 
-async fn qos_apply(
-    _auth: AuthUser,
-    Extension(db): Extension<sfgw_db::Db>,
-) -> impl IntoResponse {
+async fn qos_apply(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) -> impl IntoResponse {
     match sfgw_fw::qos::apply_qos(&db).await {
         Ok(()) => (StatusCode::OK, Json(json!({ "status": "applied" }))),
         Err(e) => internal_err(e),
     }
 }
 
-async fn qos_stats(
-    _auth: AuthUser,
-    Extension(db): Extension<sfgw_db::Db>,
-) -> impl IntoResponse {
+async fn qos_stats(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) -> impl IntoResponse {
     match sfgw_fw::qos::get_stats(&db).await {
         Ok(stats) => (StatusCode::OK, Json(json!({ "stats": stats }))),
         Err(e) => internal_err(e),
@@ -2469,6 +2463,16 @@ async fn wan_health(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) -> i
         Err(e) => return internal_err(e),
     };
 
+    // Load health configs to use the correct check type
+    let health_configs = sfgw_net::wan::list_health_configs(&db)
+        .await
+        .unwrap_or_default();
+    let health_config_map: std::collections::HashMap<String, sfgw_net::wan::WanHealthConfig> =
+        health_configs
+            .into_iter()
+            .map(|c| (c.interface.clone(), c))
+            .collect();
+
     let mut results = Vec::new();
 
     for cfg in &configs {
@@ -2478,39 +2482,103 @@ async fn wan_health(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) -> i
                 "healthy": false,
                 "enabled": false,
                 "latency_ms": null,
+                "check_type": "icmp",
             }));
             continue;
         }
 
-        // On-demand ping health check
-        let start = std::time::Instant::now();
-        let healthy = match tokio::process::Command::new("ping")
-            .args([
-                "-I",
-                &cfg.interface,
-                "-c",
-                "1",
-                "-W",
-                "2",
-                &cfg.health_check,
-            ])
-            .output()
-            .await
-        {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
+        // Use the configured health check type (default: ICMP)
+        let health_type = health_config_map
+            .get(&cfg.interface)
+            .map(|c| c.health_check_type.clone())
+            .unwrap_or(sfgw_net::wan::HealthCheckType::Icmp);
+
+        let (healthy, latency) =
+            sfgw_net::wan::perform_health_check(&cfg.interface, &cfg.health_check, &health_type)
+                .await;
+
+        let check_type_str = match &health_type {
+            sfgw_net::wan::HealthCheckType::Icmp => "icmp",
+            sfgw_net::wan::HealthCheckType::Http { .. } => "http",
+            sfgw_net::wan::HealthCheckType::Dns { .. } => "dns",
         };
-        let latency = start.elapsed().as_millis() as u64;
 
         results.push(json!({
             "interface": cfg.interface,
             "healthy": healthy,
             "enabled": true,
             "latency_ms": if healthy { Some(latency) } else { None::<u64> },
+            "check_type": check_type_str,
         }));
     }
 
     (StatusCode::OK, Json(json!({ "health": results })))
+}
+
+async fn wan_health_config_get(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(interface): Path<String>,
+) -> impl IntoResponse {
+    match sfgw_net::wan::get_health_config(&db, &interface).await {
+        Ok(Some(config)) => (StatusCode::OK, Json(json!({ "health_config": config }))),
+        Ok(None) => {
+            // Return defaults if no config exists
+            let default_config = sfgw_net::wan::WanHealthConfig {
+                interface,
+                health_check_type: sfgw_net::wan::HealthCheckType::Icmp,
+                flap_threshold: 5,
+                flap_window_secs: 60,
+                sticky_sessions: false,
+                zone_pin: None,
+            };
+            (
+                StatusCode::OK,
+                Json(json!({ "health_config": default_config })),
+            )
+        }
+        Err(e) => internal_err(e),
+    }
+}
+
+async fn wan_health_config_set(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(interface): Path<String>,
+    Json(mut config): Json<sfgw_net::wan::WanHealthConfig>,
+) -> impl IntoResponse {
+    // Ensure path matches body
+    config.interface = interface;
+
+    if let Err(e) = sfgw_net::wan::validate_health_config(&config) {
+        return err_response(StatusCode::UNPROCESSABLE_ENTITY, e);
+    }
+
+    match sfgw_net::wan::set_health_config(&db, &config).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "status": "saved", "health_config": config })),
+        ),
+        Err(e) => internal_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct FlapLogQuery {
+    interface: Option<String>,
+    limit: Option<u32>,
+}
+
+async fn wan_flap_log(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Query(query): Query<FlapLogQuery>,
+) -> impl IntoResponse {
+    let limit = query.limit.unwrap_or(100);
+    match sfgw_net::wan::get_flap_log(&db, query.interface.as_deref(), limit).await {
+        Ok(events) => (StatusCode::OK, Json(json!({ "flap_log": events }))),
+        Err(e) => internal_err(e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3617,6 +3685,28 @@ async fn build_backup(db: &sfgw_db::Db) -> Result<Value> {
         ],
     )?;
 
+    // QoS rules
+    let qos_rules = query_table_as_json(
+        &conn,
+        "SELECT id, name, interface, direction, bandwidth_kbps, priority, \
+         match_protocol, match_port_min, match_port_max, match_ip, match_dscp, enabled \
+         FROM qos_rules",
+        &[
+            "id",
+            "name",
+            "interface",
+            "direction",
+            "bandwidth_kbps",
+            "priority",
+            "match_protocol",
+            "match_port_min",
+            "match_port_max",
+            "match_ip",
+            "match_dscp",
+            "enabled",
+        ],
+    )?;
+
     let now = chrono::Utc::now().to_rfc3339();
 
     Ok(json!({
@@ -3631,6 +3721,7 @@ async fn build_backup(db: &sfgw_db::Db) -> Result<Value> {
         "wireless_networks": wireless_networks,
         "wan_configs": wan_configs,
         "interfaces": interfaces,
+        "qos_rules": qos_rules,
     }))
 }
 
@@ -3789,6 +3880,37 @@ fn apply_restore_inner(conn: &rusqlite::Connection, backup: &Value) -> Result<Va
             count += 1;
         }
         stats.insert("firewall_rules".to_string(), Value::from(count));
+    }
+
+    // Restore QoS rules
+    if let Some(rules) = backup.get("qos_rules").and_then(|v| v.as_array()) {
+        conn.execute("DELETE FROM qos_rules", [])
+            .context("clear qos_rules")?;
+        let mut count = 0i64;
+        for rule in rules {
+            conn.execute(
+                "INSERT INTO qos_rules (id, name, interface, direction, bandwidth_kbps, priority, \
+                 match_protocol, match_port_min, match_port_max, match_ip, match_dscp, enabled) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                rusqlite::params![
+                    json_to_i64(rule.get("id")),
+                    json_to_str(rule.get("name")),
+                    json_to_str(rule.get("interface")),
+                    json_to_str_or(rule.get("direction"), "egress"),
+                    json_to_i64_or(rule.get("bandwidth_kbps"), 10000),
+                    json_to_i64_or(rule.get("priority"), 4),
+                    json_to_opt_str(rule.get("match_protocol")),
+                    json_to_opt_i64(rule.get("match_port_min")),
+                    json_to_opt_i64(rule.get("match_port_max")),
+                    json_to_opt_str(rule.get("match_ip")),
+                    json_to_opt_i64(rule.get("match_dscp")),
+                    json_to_i64_or(rule.get("enabled"), 1),
+                ],
+            )
+            .context("insert qos_rule")?;
+            count += 1;
+        }
+        stats.insert("qos_rules".to_string(), Value::from(count));
     }
 
     // Restore VPN tunnels

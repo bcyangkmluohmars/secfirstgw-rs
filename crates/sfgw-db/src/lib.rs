@@ -154,10 +154,7 @@ fn run_migrations(conn: &Connection) -> Result<(), DbError> {
             include_str!("../migrations/008_wan_health_config.sql"),
         ),
         ("009", include_str!("../migrations/009_qos_rules.sql")),
-        (
-            "010",
-            include_str!("../migrations/010_custom_zones.sql"),
-        ),
+        ("010", include_str!("../migrations/010_custom_zones.sql")),
     ];
 
     for (version_str, sql) in migrations {
