@@ -12,10 +12,11 @@
 
 use axum::response::sse::{Event, Sse};
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 use tokio::sync::{Mutex, broadcast};
 use tracing_subscriber::Layer;
 
@@ -44,7 +45,17 @@ pub struct LogEvent {
 pub struct EventBus {
     tx: broadcast::Sender<LogEvent>,
     history: Mutex<VecDeque<LogEvent>>,
+    /// Short-lived SSE tokens: token → (user_id, created_at).
+    /// One-time use, 30-second TTL. Prevents real session tokens from
+    /// appearing in URLs (EventSource API doesn't support custom headers).
+    sse_tokens: Mutex<HashMap<String, (i64, Instant)>>,
 }
+
+/// Maximum age of an SSE token before it expires (30 seconds).
+const SSE_TOKEN_TTL_SECS: u64 = 30;
+
+/// Maximum number of pending SSE tokens (prevents memory exhaustion).
+const SSE_TOKEN_MAX: usize = 1000;
 
 /// Shared broadcast sender — cloned into the tracing layer and the SSE handler.
 pub type EventTx = Arc<EventBus>;
@@ -55,9 +66,52 @@ pub fn init() -> (EventTx, BroadcastLayer) {
     let bus = Arc::new(EventBus {
         tx,
         history: Mutex::new(VecDeque::with_capacity(HISTORY_SIZE)),
+        sse_tokens: Mutex::new(HashMap::new()),
     });
     let layer = BroadcastLayer { bus: bus.clone() };
     (bus, layer)
+}
+
+/// Create a short-lived, one-time-use SSE token for the given user.
+///
+/// The token is valid for 30 seconds and can only be used once.
+/// This prevents the real session token from appearing in SSE URLs.
+pub async fn create_sse_token(bus: &EventTx, user_id: i64) -> String {
+    let token = uuid::Uuid::new_v4().to_string();
+    let mut store = bus.sse_tokens.lock().await;
+
+    // Prune expired tokens.
+    let now = Instant::now();
+    store.retain(|_, (_, created)| {
+        now.duration_since(*created) < std::time::Duration::from_secs(SSE_TOKEN_TTL_SECS)
+    });
+
+    // Enforce capacity limit.
+    if store.len() >= SSE_TOKEN_MAX {
+        tracing::warn!("SSE token store full, rejecting new token");
+        return String::new();
+    }
+
+    store.insert(token.clone(), (user_id, now));
+    token
+}
+
+/// Validate and consume a short-lived SSE token.
+///
+/// Returns the user ID if the token is valid and not expired.
+/// The token is removed from the store on use (one-time only).
+async fn validate_sse_token(bus: &EventTx, token: &str) -> Option<i64> {
+    let mut store = bus.sse_tokens.lock().await;
+
+    if let Some((user_id, created)) = store.remove(token) {
+        let age = Instant::now().duration_since(created);
+        if age < std::time::Duration::from_secs(SSE_TOKEN_TTL_SECS) {
+            return Some(user_id);
+        }
+        // Expired — already removed, just return None.
+    }
+
+    None
 }
 
 // ── SSE handler ─────────────────────────────────────────────────────
@@ -114,20 +168,56 @@ impl futures_core::Stream for EventStream {
     }
 }
 
+/// Query parameters for the SSE stream endpoint.
+#[derive(serde::Deserialize)]
+pub struct SseQuery {
+    /// Short-lived SSE token (from POST /api/v1/events/sse-token).
+    pub token: Option<String>,
+}
+
 /// Axum handler: streams log events as SSE to the client.
 /// Sends buffered history first, then switches to live streaming.
+///
+/// Accepts a short-lived SSE token via query parameter (`?token=...`).
+/// The real session token should NOT be passed in the URL — use the
+/// `/api/v1/events/sse-token` endpoint to obtain a short-lived token.
 pub async fn event_stream_handler(
+    axum::extract::Query(query): axum::extract::Query<SseQuery>,
     axum::Extension(bus): axum::Extension<EventTx>,
-) -> impl axum::response::IntoResponse {
-    // Snapshot the history buffer and subscribe to live events
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    // Validate SSE token.
+    let token = match &query.token {
+        Some(t) if !t.is_empty() => t.as_str(),
+        _ => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({ "error": "SSE token required" })),
+            )
+                .into_response();
+        }
+    };
+
+    if validate_sse_token(&bus, token).await.is_none() {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({ "error": "invalid or expired SSE token" })),
+        )
+            .into_response();
+    }
+
+    // Token valid — snapshot history and subscribe to live events.
     let history = bus.history.lock().await.clone();
     let rx = bus.tx.subscribe();
 
-    Sse::new(EventStream { history, rx }).keep_alive(
-        axum::response::sse::KeepAlive::new()
-            .interval(std::time::Duration::from_secs(15))
-            .text("ping"),
-    )
+    Sse::new(EventStream { history, rx })
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("ping"),
+        )
+        .into_response()
 }
 
 // ── Tracing layer ───────────────────────────────────────────────────

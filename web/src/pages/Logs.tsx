@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { PageHeader, Card, Button, Badge, Toggle } from '../components/ui'
-import { api, getToken } from '../api'
+import { api } from '../api'
 import type { LogDaySummary, LogKeyStatus } from '../api'
 
 // ---------------------------------------------------------------------------
@@ -94,13 +94,23 @@ function LiveLogView() {
   const containerRef = useRef<HTMLDivElement>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
 
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
     if (eventSourceRef.current) {
       eventSourceRef.current.close()
     }
 
-    const token = getToken()
-    const url = `/api/v1/events/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`
+    // Obtain a short-lived SSE token instead of putting the real session
+    // token in the URL (prevents token leakage via browser history/logs).
+    let sseToken: string
+    try {
+      const res = await api.getSseToken()
+      sseToken = res.token
+    } catch {
+      setTimeout(connect, 3000)
+      return
+    }
+
+    const url = `/api/v1/events/stream?token=${encodeURIComponent(sseToken)}`
     const es = new EventSource(url)
     eventSourceRef.current = es
 

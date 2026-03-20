@@ -269,6 +269,8 @@ pub async fn serve(
                 .put(wireless_update)
                 .delete(wireless_delete),
         )
+        // SSE token (short-lived, one-time-use for EventSource URLs)
+        .route("/api/v1/events/sse-token", post(sse_token_handler))
         // IDS
         .route("/api/v1/ids/events", get(ids_list_events))
         .route("/api/v1/ids/events/stats", get(ids_event_stats))
@@ -338,7 +340,10 @@ pub async fn serve(
             ratelimit::rate_limit_middleware,
         ));
 
-    // SSE event stream — auth required but no E2EE (streaming, not request/response).
+    // SSE event stream — authenticated via short-lived SSE token (not session token).
+    // The SSE token is obtained from POST /api/v1/events/sse-token (requires auth),
+    // then passed as a query parameter. This prevents real session tokens from
+    // appearing in URLs, browser history, and server logs.
     let sse_routes = Router::new()
         .route("/api/v1/events/stream", get(events::event_stream_handler))
         .layer(axum::middleware::from_fn_with_state(
@@ -2275,6 +2280,26 @@ struct IdsEventsQuery {
     severity: Option<String>,
     detector: Option<String>,
     since: Option<String>,
+}
+
+/// Create a short-lived, one-time-use SSE token.
+///
+/// The frontend calls this before opening an EventSource connection,
+/// then passes the returned token as a query parameter. This prevents
+/// the real session token from appearing in URLs.
+async fn sse_token_handler(
+    auth: AuthUser,
+    Extension(event_tx): Extension<events::EventTx>,
+) -> impl IntoResponse {
+    let token = events::create_sse_token(&event_tx, auth.user.id).await;
+    if token.is_empty() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "too many pending SSE tokens" })),
+        )
+            .into_response();
+    }
+    Json(json!({ "token": token })).into_response()
 }
 
 async fn ids_list_events(

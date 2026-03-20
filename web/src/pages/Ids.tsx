@@ -195,44 +195,57 @@ export default function Ids() {
     return () => clearInterval(timer)
   }, [load])
 
-  // SSE connection for real-time events
+  // SSE connection for real-time events (uses short-lived SSE token)
   useEffect(() => {
-    const token = localStorage.getItem('token')
-    if (!token) return
+    let cancelled = false
 
-    // EventSource doesn't support custom headers, so we pass token as query param
-    // The SSE endpoint is at /api/v1/events/stream
-    const url = `${BASE_URL}/api/v1/events/stream`
-    const es = new EventSource(url)
-    eventSourceRef.current = es
-
-    es.onopen = () => setSseConnected(true)
-
-    es.onmessage = (msg) => {
-      if (!msg.data || msg.data === 'ping') return
-
+    const connectSse = async () => {
+      // Obtain a short-lived SSE token instead of putting the real session
+      // token in the URL (prevents token leakage via browser history/logs).
+      let sseToken: string
       try {
-        const logEvent: SseLogEvent = JSON.parse(msg.data)
-        const idsEvent = parseIdsFromSse(logEvent)
-        if (!idsEvent) return
-
-        // Apply client-side filters
-        if (severity && idsEvent.severity.toLowerCase() !== severity.toLowerCase()) return
-        if (detector && idsEvent.detector.toLowerCase() !== detector.toLowerCase()) return
-
-        liveEventsRef.current = [...liveEventsRef.current.slice(-200), idsEvent]
-        setEvents((prev) => [...prev, idsEvent])
+        const res = await api.getSseToken()
+        sseToken = res.token
       } catch {
-        // Skip non-JSON or malformed events
+        return
+      }
+      if (cancelled) return
+
+      const url = `${BASE_URL}/api/v1/events/stream?token=${encodeURIComponent(sseToken)}`
+      const es = new EventSource(url)
+      eventSourceRef.current = es
+
+      es.onopen = () => setSseConnected(true)
+
+      es.onmessage = (msg) => {
+        if (!msg.data || msg.data === 'ping') return
+
+        try {
+          const logEvent: SseLogEvent = JSON.parse(msg.data)
+          const idsEvent = parseIdsFromSse(logEvent)
+          if (!idsEvent) return
+
+          // Apply client-side filters
+          if (severity && idsEvent.severity.toLowerCase() !== severity.toLowerCase()) return
+          if (detector && idsEvent.detector.toLowerCase() !== detector.toLowerCase()) return
+
+          liveEventsRef.current = [...liveEventsRef.current.slice(-200), idsEvent]
+          setEvents((prev) => [...prev, idsEvent])
+        } catch {
+          // Skip non-JSON or malformed events
+        }
+      }
+
+      es.onerror = () => {
+        setSseConnected(false)
       }
     }
 
-    es.onerror = () => {
-      setSseConnected(false)
-    }
+    connectSse()
 
     return () => {
-      es.close()
+      cancelled = true
+      eventSourceRef.current?.close()
       eventSourceRef.current = null
       setSseConnected(false)
     }

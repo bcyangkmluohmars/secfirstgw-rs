@@ -906,6 +906,9 @@ export const api = {
   },
   getIdsStats: () => request<IdsEventStats>('/api/v1/ids/events/stats'),
 
+  // SSE (short-lived token for EventSource URLs — prevents real session token in URL)
+  getSseToken: () => request<{ token: string }>('/api/v1/events/sse-token', { method: 'POST' }),
+
   // Devices
   getDevices: () => request<{ devices: DeviceSummary[] }>('/api/v1/devices'),
   getPendingDevices: () => request<{ devices: DeviceSummary[] }>('/api/v1/devices/pending'),
