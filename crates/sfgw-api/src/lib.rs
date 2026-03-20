@@ -239,6 +239,10 @@ pub async fn serve(
             "/api/v1/honeypot/settings",
             get(honeypot_settings_get).put(honeypot_settings_set),
         )
+        // DDNS
+        .route("/api/v1/ddns", get(ddns_list).post(ddns_create))
+        .route("/api/v1/ddns/{id}", put(ddns_update).delete(ddns_delete))
+        .route("/api/v1/ddns/{id}/update", post(ddns_force_update))
         // Backup / Restore
         .route("/api/v1/settings/backup", get(backup_handler))
         .route("/api/v1/settings/restore", post(restore_handler))
@@ -3144,6 +3148,93 @@ async fn honeypot_settings_set(
                     "note": "restart required for changes to take effect",
                 })),
             )
+        }
+        Err(e) => internal_err(e),
+    }
+}
+
+// ===========================================================================
+// DDNS handlers
+// ===========================================================================
+
+/// GET /api/v1/ddns — list all DDNS configurations.
+async fn ddns_list(_auth: AuthUser, Extension(db): Extension<sfgw_db::Db>) -> impl IntoResponse {
+    match sfgw_net::ddns::list_ddns_configs(&db).await {
+        Ok(configs) => (StatusCode::OK, Json(json!({ "configs": configs }))),
+        Err(e) => internal_err(e),
+    }
+}
+
+/// POST /api/v1/ddns — create a new DDNS configuration.
+async fn ddns_create(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Json(config): Json<sfgw_net::ddns::DdnsConfig>,
+) -> impl IntoResponse {
+    if let Err(e) = sfgw_net::ddns::validate_ddns_config(&config) {
+        return err_response(StatusCode::UNPROCESSABLE_ENTITY, e);
+    }
+
+    match sfgw_net::ddns::create_ddns_config(&db, &config).await {
+        Ok(id) => (
+            StatusCode::CREATED,
+            Json(json!({ "id": id, "status": "created" })),
+        ),
+        Err(e) => internal_err(e),
+    }
+}
+
+/// PUT /api/v1/ddns/{id} — update a DDNS configuration.
+async fn ddns_update(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+    Json(config): Json<sfgw_net::ddns::DdnsConfig>,
+) -> impl IntoResponse {
+    if let Err(e) = sfgw_net::ddns::validate_ddns_config(&config) {
+        return err_response(StatusCode::UNPROCESSABLE_ENTITY, e);
+    }
+
+    match sfgw_net::ddns::update_ddns_config(&db, id, &config).await {
+        Ok(true) => (StatusCode::OK, Json(json!({ "status": "updated" }))),
+        Ok(false) => err_response(
+            StatusCode::NOT_FOUND,
+            anyhow::anyhow!("DDNS config {id} not found"),
+        ),
+        Err(e) => internal_err(e),
+    }
+}
+
+/// DELETE /api/v1/ddns/{id} — delete a DDNS configuration.
+async fn ddns_delete(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match sfgw_net::ddns::delete_ddns_config(&db, id).await {
+        Ok(true) => (StatusCode::OK, Json(json!({ "status": "deleted" }))),
+        Ok(false) => err_response(
+            StatusCode::NOT_FOUND,
+            anyhow::anyhow!("DDNS config {id} not found"),
+        ),
+        Err(e) => internal_err(e),
+    }
+}
+
+/// POST /api/v1/ddns/{id}/update — force an immediate DDNS update.
+async fn ddns_force_update(
+    _auth: AuthUser,
+    Extension(db): Extension<sfgw_db::Db>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match sfgw_net::ddns::force_update(&db, id).await {
+        Ok(result) => {
+            let status_code = if result.success {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            (status_code, Json(json!({ "result": result })))
         }
         Err(e) => internal_err(e),
     }

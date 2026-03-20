@@ -202,6 +202,13 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
     tracing::info!("starting VPN services");
     sfgw_vpn::start(&db).await?;
 
+    // Phase 8b: Dynamic DNS
+    tracing::info!("starting DDNS client");
+    let ddns_handle = sfgw_net::ddns::new_handle();
+    if let Err(e) = sfgw_net::ddns::start_background_tasks(&db, &ddns_handle).await {
+        tracing::warn!("DDNS background tasks failed to start: {e}");
+    }
+
     // Phase 9: NAS (if HDD/volume present)
     tracing::info!("starting NAS services");
     if let Err(e) = sfgw_nas::start(&db, &platform).await {

@@ -585,6 +585,8 @@ export const api = {
   getVpnTunnelStatus: async (id: number) => (await request<{ status: TunnelStatus }>(`/api/v1/vpn/tunnels/${id}/status`)).status,
   addVpnPeer: (tunnelId: number, peer: WgPeer) => request<void>(`/api/v1/vpn/tunnels/${tunnelId}/peers`, { method: 'POST', body: peer }),
   removeVpnPeer: (tunnelId: number, peerId: number) => request<void>(`/api/v1/vpn/tunnels/${tunnelId}/peers/${peerId}`, { method: 'DELETE' }),
+  getVpnPeerConfig: (tunnelId: number, peerId: number, endpoint: string) =>
+    request<{ config: string }>(`/api/v1/vpn/tunnels/${tunnelId}/peers/${peerId}/config?endpoint=${encodeURIComponent(endpoint)}`),
 
   // DNS
   getDnsConfig: () => request<{ config: DnsConfig }>('/api/v1/dns/config'),
@@ -685,6 +687,17 @@ export const api = {
   },
   restoreBackup: (backup: unknown) =>
     request<{ status: string; stats: Record<string, number> }>('/api/v1/settings/restore', { method: 'POST', body: backup }),
+
+  // DDNS
+  getDdnsConfigs: () => request<{ configs: DdnsConfig[] }>('/api/v1/ddns'),
+  createDdnsConfig: (config: DdnsConfigCreate) =>
+    request<{ id: number; status: string }>('/api/v1/ddns', { method: 'POST', body: config }),
+  updateDdnsConfig: (id: number, config: DdnsConfigCreate) =>
+    request<{ status: string }>(`/api/v1/ddns/${id}`, { method: 'PUT', body: config }),
+  deleteDdnsConfig: (id: number) =>
+    request<{ status: string }>(`/api/v1/ddns/${id}`, { method: 'DELETE' }),
+  forceDdnsUpdate: (id: number) =>
+    request<{ result: DdnsUpdateResult }>(`/api/v1/ddns/${id}/update`, { method: 'POST' }),
 };
 
 export interface WirelessNetwork {
@@ -709,6 +722,41 @@ export interface WirelessNetworkCreate {
   is_guest?: boolean;
   l2_isolation?: boolean;
   enabled?: boolean;
+}
+
+// DDNS types
+export type DdnsProvider = 'dyndns2' | 'duckdns' | 'cloudflare';
+
+export interface DdnsConfig {
+  id: number;
+  hostname: string;
+  provider: string;
+  server: string | null;
+  username: string | null;
+  password: string | null;
+  wan_interface: string;
+  update_interval_secs: number;
+  enabled: boolean;
+  last_ip: string | null;
+  last_update: string | null;
+  last_status: string | null;
+}
+
+export interface DdnsConfigCreate {
+  hostname: string;
+  provider: string;
+  server?: string | null;
+  username?: string | null;
+  password?: string | null;
+  wan_interface: string;
+  update_interval_secs: number;
+  enabled: boolean;
+}
+
+export interface DdnsUpdateResult {
+  success: boolean;
+  status: string;
+  ip: string;
 }
 
 export { BASE_URL };
