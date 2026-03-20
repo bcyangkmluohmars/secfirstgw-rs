@@ -1137,11 +1137,14 @@ fn ruleset_has_proper_iptables_restore_structure() {
     // Must have *nat table.
     assert!(config.contains("*nat"), "must have *nat table");
 
+    // Must have *mangle table (TTL normalization).
+    assert!(config.contains("*mangle"), "must have *mangle table");
+
     // Must have COMMIT for each table.
     let commit_count = config.matches("COMMIT").count();
     assert_eq!(
-        commit_count, 2,
-        "must have exactly 2 COMMIT statements (filter and nat)"
+        commit_count, 3,
+        "must have exactly 3 COMMIT statements (filter, nat, mangle)"
     );
 
     // Must have custom chain declarations.

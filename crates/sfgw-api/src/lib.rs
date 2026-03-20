@@ -764,10 +764,16 @@ async fn login_handler(
             );
         };
 
-    // Verify user
+    // Verify user.
+    // Constant-time: if user doesn't exist, verify against a dummy hash so the
+    // response time is indistinguishable from a wrong-password attempt. This
+    // prevents user enumeration via timing side-channels.
+    let dummy_hash = "$argon2id$v=19$m=19456,t=2,p=1$aaaaaaaaaaaaaaaaaaaaaa$bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbA";
     let (user, password_hash) = match auth::get_user_by_username(&db, &username).await {
         Ok(Some(pair)) => pair,
         Ok(None) => {
+            // Burn time on a dummy verify to match the timing of a real check.
+            let _ = auth::verify_password(&password, dummy_hash);
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "invalid credentials" })),

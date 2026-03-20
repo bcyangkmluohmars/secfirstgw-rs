@@ -45,8 +45,15 @@ fn build_server_config(
     cert_chain: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
 ) -> Result<ServerConfig> {
-    // Ensure ring CryptoProvider is installed (rustls 0.23+ requires explicit provider).
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // Build a custom CryptoProvider that only includes AES-256-GCM and CHACHA20-POLY1305.
+    // This explicitly excludes AES-128-GCM (TLS_AES_128_GCM_SHA256) which is included
+    // in the default ring provider but provides only 128-bit security.
+    let mut provider = rustls::crypto::ring::default_provider();
+    provider.cipher_suites = vec![
+        rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
+        rustls::crypto::ring::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+    ];
+    let _ = provider.install_default();
 
     let config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_no_client_auth()

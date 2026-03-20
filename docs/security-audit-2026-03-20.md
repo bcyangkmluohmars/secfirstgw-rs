@@ -27,14 +27,14 @@
 | **L4** | epmd auf Loopback | INFO | OPEN | |
 | **L5** | WAN Failover check_target | LOW | OPEN | |
 | **L6** | IDS Cleanup Race Condition | LOW | OPEN | |
-| **L7** | Argon2 Timing Attack | INFO | OPEN | |
-| **L8** | TTL=63 leakt Hop Count | INFO | OPEN | |
+| **L7** | Argon2 Timing Attack | INFO | **FIXED** | `sec: Argon2 timing normalization + TTL normalization + TLS cipher hardening` |
+| **L8** | TTL=63 leakt Hop Count | INFO | **FIXED** | `sec: Argon2 timing normalization + TTL normalization + TLS cipher hardening` |
 | **L9** | WAN Failover Zone-aware Routing | LOW | OPEN | |
-| **L10** | AES-128-GCM in TLS | INFO | OPEN | |
+| **L10** | AES-128-GCM in TLS | INFO | **FIXED** | `sec: Argon2 timing normalization + TTL normalization + TLS cipher hardening` |
 
 ## Summary
 
-- **12 FIXED** (H1, H2, L1, M3, M4, M5, M8, M10, M11, M12 + M6, M7, M9 already fixed)
+- **15 FIXED** (H1, H2, L1, L7, L8, L10, M3, M4, M5, M8, M10, M11, M12 + M6, M7, M9 already fixed)
 - **2 OPEN MEDIUM** (H3, M1+M2)
 - **5 OPEN LOW** (L2, L3, L5, L6, L9)
-- **4 OPEN INFO** (L4, L7, L8, L10)
+- **1 OPEN INFO** (L4)

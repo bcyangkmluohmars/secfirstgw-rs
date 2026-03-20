@@ -898,6 +898,11 @@ pub fn generate_zone_ruleset_with_custom(
         }
     });
 
+    // ── *mangle table ──────────────────────────────────────────────
+    // Normalize TTL on forwarded packets to 64 so that hop count from
+    // internal hosts is not leaked to external observers.
+    emit_mangle_table(&mut out, &wan_ifaces);
+
     out
 }
 
@@ -957,6 +962,34 @@ fn emit_nat_table(out: &mut String, body: impl FnOnce(&mut String)) {
     writeln!(out, "-A POSTROUTING -j SFGW-POSTROUTING").unwrap();
 
     body(out);
+
+    writeln!(out, "COMMIT").unwrap();
+}
+
+/// Emit a *mangle table that normalizes TTL on forwarded WAN-bound packets.
+///
+/// Without this, packets forwarded through the gateway have TTL decremented
+/// by 1, leaking to external observers that a NAT device is present and
+/// how many hops the internal host is from the gateway.
+fn emit_mangle_table(out: &mut String, wan_ifaces: &[&str]) {
+    if wan_ifaces.is_empty() {
+        return;
+    }
+    writeln!(out, "*mangle").unwrap();
+    writeln!(out, ":PREROUTING ACCEPT [0:0]").unwrap();
+    writeln!(out, ":INPUT ACCEPT [0:0]").unwrap();
+    writeln!(out, ":FORWARD ACCEPT [0:0]").unwrap();
+    writeln!(out, ":OUTPUT ACCEPT [0:0]").unwrap();
+    writeln!(out, ":POSTROUTING ACCEPT [0:0]").unwrap();
+
+    // Normalize TTL to 64 on packets leaving WAN interfaces.
+    for iface in wan_ifaces {
+        writeln!(
+            out,
+            "-A POSTROUTING -o {iface} -j TTL --ttl-set 64 -m comment --comment \"normalize TTL on WAN egress\""
+        )
+        .unwrap();
+    }
 
     writeln!(out, "COMMIT").unwrap();
 }
