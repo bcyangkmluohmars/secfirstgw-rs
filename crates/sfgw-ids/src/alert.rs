@@ -39,12 +39,19 @@ struct AlertKey {
     source: String, // MAC or IP
 }
 
+/// SAFETY INVARIANT: AlertEngine is NOT thread-safe. It uses an unsynchronized
+/// HashMap for rate limiting. This is safe because AlertEngine is always owned
+/// by a single tokio task (`run_alert_loop`) that processes events sequentially
+/// from a channel. DO NOT share across tasks or wrap in Arc without adding
+/// synchronization to `last_alert`.
 pub struct AlertEngine {
     /// Database handle for persisting events.
     db: sfgw_db::Db,
     /// Configured response actions per severity level.
     severity_actions: HashMap<SeverityLevel, Vec<AutoAction>>,
     /// Rate limiting: last alert time per (detector, source) key.
+    /// Not behind a Mutex — safe only because this struct is owned by a single task.
+    /// See SAFETY INVARIANT above.
     last_alert: HashMap<AlertKey, chrono::DateTime<Utc>>,
     /// Telegram config (optional).
     telegram_token: Option<String>,

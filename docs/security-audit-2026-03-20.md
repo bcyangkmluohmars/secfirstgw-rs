@@ -8,7 +8,7 @@
 |----|---------|----------|--------|--------|
 | **H2** | Rate Limiting: Mutations unlimitiert | HIGH | **FIXED** | `sec: tiered rate limiting — critical mutations 5/min` |
 | **H1** | SSH Lockout Validation nur IPv4 | HIGH | **FIXED** | `sec: SSH lockout validation — IPv6 + protocol number 6 alias` |
-| **H3** | SSH Credentials im Klartext in DB | MEDIUM-HIGH | OPEN | |
+| **H3** | SSH Credentials im Klartext in DB | MEDIUM-HIGH | **FIXED** | `sec: SSH credential encryption at application level` |
 | **M1** | TLS Session Binding fehlt | MEDIUM | OPEN | |
 | **M2** | E2EE Envelope Keys nicht TLS-gebunden | MEDIUM | OPEN | |
 | **M3** | DDNS URL-Parameter nicht encoded | MEDIUM | **FIXED** | `sec: DDNS URL encoding + SSRF validation` |
@@ -22,11 +22,11 @@
 | **M11** | WAN ICMP ohne Rate Limit | LOW-MEDIUM | **FIXED** | `sec: WAN ICMP rate limiting + oversized payload drop` |
 | **M12** | SSE Token in URL | MEDIUM | **FIXED** | `sec: short-lived SSE tokens — prevent session token in URL` |
 | **L1** | Kein HTTP→HTTPS Redirect | LOW | **FIXED** | `sec: HTTP→HTTPS 301 redirect on port 80` |
-| **L2** | Doppelte iptables-Regeln | LOW | OPEN | |
-| **L3** | LAN→Guest Forwarding | LOW | OPEN | |
+| **L2** | Doppelte iptables-Regeln | LOW | **FIXED** | `sec: WAN health check validation + IDS safety docs + rule dedup docs` |
+| **L3** | LAN→Guest Forwarding | LOW | **ALREADY FIXED** | Default FORWARD=DROP, kein explizites LAN→Guest ACCEPT |
 | **L4** | epmd auf Loopback | INFO | OPEN | |
-| **L5** | WAN Failover check_target | LOW | OPEN | |
-| **L6** | IDS Cleanup Race Condition | LOW | OPEN | |
+| **L5** | WAN Failover check_target | LOW | **FIXED** | `sec: WAN health check validation + IDS safety docs + rule dedup docs` |
+| **L6** | IDS Cleanup Race Condition | LOW | **FIXED** | `sec: WAN health check validation + IDS safety docs + rule dedup docs` |
 | **L7** | Argon2 Timing Attack | INFO | **FIXED** | `sec: Argon2 timing normalization + TTL normalization + TLS cipher hardening` |
 | **L8** | TTL=63 leakt Hop Count | INFO | **FIXED** | `sec: Argon2 timing normalization + TTL normalization + TLS cipher hardening` |
 | **L9** | WAN Failover Zone-aware Routing | LOW | OPEN | |
@@ -34,7 +34,7 @@
 
 ## Summary
 
-- **15 FIXED** (H1, H2, L1, L7, L8, L10, M3, M4, M5, M8, M10, M11, M12 + M6, M7, M9 already fixed)
-- **2 OPEN MEDIUM** (H3, M1+M2)
-- **5 OPEN LOW** (L2, L3, L5, L6, L9)
-- **1 OPEN INFO** (L4)
+- **21 FIXED** (H1, H2, H3, L1, L2, L5, L6, L7, L8, L10, M3, M4, M5, M8, M10, M11, M12 + L3, M6, M7, M9 already fixed)
+- **1 OPEN MEDIUM** (M1+M2 TLS Session Binding — deferred to P2)
+- **1 OPEN LOW** (L9 WAN Failover Zone-aware Routing)
+- **1 OPEN INFO** (L4 epmd auf Loopback)

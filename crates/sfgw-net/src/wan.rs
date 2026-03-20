@@ -179,7 +179,7 @@ pub enum WanValidationError {
     #[error("invalid PPPoE password_enc: must not be empty")]
     PppoePassword,
 
-    #[error("invalid health check target '{0}': must be a valid IP")]
+    #[error("invalid health check target '{0}': must be a valid public IP")]
     HealthCheck(String),
 
     #[error("invalid priority {0}: must be 0-65535")]
@@ -405,11 +405,21 @@ pub fn validate_wan_config(config: &WanPortConfig) -> std::result::Result<(), Wa
         return Err(WanValidationError::Weight(config.weight));
     }
 
-    // Health check must be a valid IP
-    config
+    // Health check must be a valid public IP (private/loopback/link-local IPs
+    // are never reachable from WAN and would cause false failover triggers).
+    let health_ip: IpAddr = config
         .health_check
-        .parse::<IpAddr>()
+        .parse()
         .map_err(|_| WanValidationError::HealthCheck(config.health_check.clone()))?;
+    match health_ip {
+        IpAddr::V4(ip) if ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() => {
+            return Err(WanValidationError::HealthCheck(config.health_check.clone()));
+        }
+        IpAddr::V6(ip) if ip.is_loopback() || ip.is_unspecified() => {
+            return Err(WanValidationError::HealthCheck(config.health_check.clone()));
+        }
+        _ => {}
+    }
 
     if config.health_interval_secs == 0 || config.health_interval_secs > 3600 {
         return Err(WanValidationError::HealthInterval(

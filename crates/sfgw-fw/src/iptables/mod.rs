@@ -1044,6 +1044,11 @@ fn emit_default_rules(out: &mut String) {
 }
 
 /// Hardened default ruleset when no user rules are configured.
+///
+/// NOTE: This function is used in non-zone mode ONLY (legacy/fallback).
+/// Zone mode uses `emit_mgmt_zone_rules()` etc. instead. If you change
+/// MGMT rules here, also update `emit_mgmt_zone_rules()` to keep them
+/// consistent. The two paths are mutually exclusive at runtime.
 fn emit_hardened_defaults(out: &mut String) {
     writeln!(out, "# ── Hardened defaults (no user rules in DB) ──").unwrap();
 
