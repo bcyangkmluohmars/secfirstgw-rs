@@ -28,7 +28,7 @@
 | **L5** | WAN Failover check_target | LOW | **FIXED** | `sec: WAN health check validation + IDS safety docs + rule dedup docs` |
 | **L6** | IDS Cleanup Race Condition | LOW | **FIXED** | `sec: WAN health check validation + IDS safety docs + rule dedup docs` |
 | **L7** | Argon2 Timing Attack | INFO | **FIXED** | `sec: Argon2 timing normalization + TTL normalization + TLS cipher hardening` |
-| **L8** | TTL=63 leakt Hop Count | INFO | **FIXED** | `sec: Argon2 timing normalization + TTL normalization + TLS cipher hardening` |
+| **L8** | TTL=63 leakt Hop Count | INFO | **DEFERRED** | xt_TTL/xt_length nicht im UDM Kernel 4.19 — benötigt Custom-Kernel |
 | **L9** | WAN Failover Zone-aware Routing | LOW | **MITIGATED** | zone_pin feature available, doc warning added |
 | **L10** | AES-128-GCM in TLS | INFO | **FIXED** | `sec: Argon2 timing normalization + TTL normalization + TLS cipher hardening` |
 

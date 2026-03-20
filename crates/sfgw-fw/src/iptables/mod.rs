@@ -898,10 +898,10 @@ pub fn generate_zone_ruleset_with_custom(
         }
     });
 
-    // ── *mangle table ──────────────────────────────────────────────
-    // Normalize TTL on forwarded packets to 64 so that hop count from
-    // internal hosts is not leaked to external observers.
-    emit_mangle_table(&mut out, &wan_ifaces);
+    // NOTE: TTL normalization (mangle table, --ttl-set 64) is desirable
+    // but xt_TTL is unavailable on UDM Pro kernel 4.19. The mangle table
+    // is omitted to avoid iptables-restore failures on stock hardware.
+    // Re-enable emit_mangle_table() when running a custom kernel.
 
     out
 }
@@ -1302,11 +1302,9 @@ fn emit_wan_zone_rules(out: &mut String, wan_ifaces: &[&str]) {
         // WAN ICMP rate limiting: 1/sec with burst of 3 (prevents ICMP flood
         // and host-discovery reconnaissance). Oversized payloads (>1500 bytes)
         // are dropped to prevent amplification attacks.
-        writeln!(
-            out,
-            "-A SFGW-INPUT -i {iface} -p icmp --icmp-type echo-request -m length --length 1500:65535 -j DROP -m comment --comment \"drop oversized ICMP on WAN\"",
-        )
-        .unwrap();
+        // Note: xt_length module is unavailable on UDM Pro (kernel 4.19),
+        // so we cannot use `-m length`. The rate limit below (1/sec) is
+        // sufficient to mitigate ICMP amplification without size filtering.
         writeln!(
             out,
             "-A SFGW-INPUT -i {iface} -p icmp --icmp-type echo-request -m limit --limit 1/sec --limit-burst 3 -j ACCEPT -m comment --comment \"WAN ICMP rate limit\"",

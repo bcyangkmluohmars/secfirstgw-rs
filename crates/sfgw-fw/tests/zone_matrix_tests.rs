@@ -931,14 +931,12 @@ fn wan_has_no_accept_input_rules_except_rate_limited_icmp() {
 #[test]
 fn wan_icmp_is_rate_limited() {
     let config = standard_ruleset();
-    // WAN ICMP must be rate-limited (1/sec burst 3) and oversized payloads dropped.
+    // WAN ICMP must be rate-limited (1/sec burst 3).
+    // Note: oversized ICMP drop via -m length removed because xt_length
+    // is unavailable on UDM Pro kernel 4.19.
     assert!(
         config.contains("icmp --icmp-type echo-request -m limit --limit 1/sec --limit-burst 3"),
         "WAN ICMP must be rate-limited at 1/sec with burst 3"
-    );
-    assert!(
-        config.contains("icmp --icmp-type echo-request -m length --length 1500:65535 -j DROP"),
-        "WAN must drop oversized ICMP packets"
     );
 }
 
@@ -1137,14 +1135,11 @@ fn ruleset_has_proper_iptables_restore_structure() {
     // Must have *nat table.
     assert!(config.contains("*nat"), "must have *nat table");
 
-    // Must have *mangle table (TTL normalization).
-    assert!(config.contains("*mangle"), "must have *mangle table");
-
     // Must have COMMIT for each table.
     let commit_count = config.matches("COMMIT").count();
     assert_eq!(
-        commit_count, 3,
-        "must have exactly 3 COMMIT statements (filter, nat, mangle)"
+        commit_count, 2,
+        "must have exactly 2 COMMIT statements (filter and nat)"
     );
 
     // Must have custom chain declarations.
