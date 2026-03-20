@@ -97,6 +97,14 @@ impl Drop for DbEncryptionKey {
 // DbEncryptionKey cannot be cloned -- move semantics only.
 // Not Debug to prevent accidental logging.
 
+/// Expose hardware fingerprint to the credential module (same crate).
+///
+/// Uses the same hardware identity sources but the caller applies
+/// different HKDF context to derive an independent key.
+pub(crate) fn collect_hardware_fingerprint_for_credential() -> Result<Vec<u8>, CryptoError> {
+    collect_hardware_fingerprint()
+}
+
 /// Collect hardware fingerprint material from the current platform.
 ///
 /// Returns a byte vector containing concatenated hardware identifiers.

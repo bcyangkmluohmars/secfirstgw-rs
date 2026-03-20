@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #![deny(unsafe_code)]
 
+pub mod credential;
 pub mod db_key;
 pub mod secure_mem;
 

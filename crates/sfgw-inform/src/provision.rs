@@ -32,6 +32,20 @@ use crate::state::{HardwareFingerprint, UbntDevice, UbntDeviceState};
 /// adopt at once) while preventing SSH socket/memory exhaustion.
 static SSH_PROVISION_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(3));
 
+/// Hardware-derived credential encryption key (derived once, cached).
+///
+/// Used to encrypt SSH passwords at the application level before storing
+/// in the DB. Provides defense-in-depth on top of SQLCipher encryption.
+static CREDENTIAL_KEY: LazyLock<sfgw_crypto::credential::CredentialKey> = LazyLock::new(|| {
+    sfgw_crypto::credential::derive_credential_key()
+        .expect("failed to derive credential encryption key from hardware identity")
+});
+
+/// Access the singleton credential encryption key.
+fn credential_key() -> &'static sfgw_crypto::credential::CredentialKey {
+    &CREDENTIAL_KEY
+}
+
 /// Factory default credentials on all UniFi devices.
 const FACTORY_USERNAME: &str = "ubnt";
 const FACTORY_PASSWORD: &str = "ubnt";
@@ -401,7 +415,11 @@ async fn update_device_adopted(
     device.state = UbntDeviceState::Adopted;
     device.authkey = Some(result.authkey.clone());
     device.ssh_username = Some(result.ssh_username.clone());
-    device.ssh_password = Some(result.ssh_password.clone());
+    // Encrypt SSH password at application level (defense-in-depth on top of SQLCipher).
+    let encrypted_password = credential_key()
+        .encrypt(&result.ssh_password)
+        .context("failed to encrypt SSH password")?;
+    device.ssh_password = Some(encrypted_password);
     device.ssh_password_hash = Some(result.ssh_password_hash.clone());
     device.config_applied = false;
     device.fingerprint = Some(result.fingerprint.clone());
@@ -548,10 +566,14 @@ pub async fn verify_config_applied(device: &UbntDevice, db: &sfgw_db::Db) -> Res
         .ssh_username
         .as_deref()
         .context("no SSH username for verification")?;
-    let password = device
+    // Decrypt SSH password (supports both encrypted and legacy plaintext).
+    let encrypted_pw = device
         .ssh_password
         .as_deref()
         .context("no SSH password for verification")?;
+    let password = credential_key()
+        .decrypt(encrypted_pw)
+        .context("failed to decrypt SSH password")?;
     let authkey = device
         .authkey
         .as_deref()
@@ -563,7 +585,7 @@ pub async fn verify_config_applied(device: &UbntDevice, db: &sfgw_db::Db) -> Res
 
     tracing::info!(mac = %device.mac, ip = %device.source_ip, "starting post-adoption SSH verification");
 
-    let mut session = ssh_connect_with_creds(addr, username, password)
+    let mut session = ssh_connect_with_creds(addr, username, &password)
         .await
         .context("SSH verification connect failed")?;
 
