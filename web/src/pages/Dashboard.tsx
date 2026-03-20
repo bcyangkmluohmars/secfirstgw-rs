@@ -620,7 +620,7 @@ function InterfaceTrafficTable({ interfaces }: { interfaces: { name: string; rx_
 
   // Sort by total traffic descending
   const sorted = [...interfaces].sort((a, b) => (b.rx_bytes + b.tx_bytes) - (a.rx_bytes + a.tx_bytes))
-  const maxTotal = Math.max(sorted[0]?.rx_bytes + sorted[0]?.tx_bytes ?? 1, 1)
+  const maxTotal = Math.max((sorted[0]?.rx_bytes ?? 0) + (sorted[0]?.tx_bytes ?? 0), 1)
 
   return (
     <div className="mt-4 pt-4 border-t border-navy-800/30">

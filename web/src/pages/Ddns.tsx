@@ -78,10 +78,10 @@ function providerLabel(provider: string): string {
   return PROVIDERS.find((p) => p.value === provider)?.label ?? provider
 }
 
-function statusBadge(status: string | null): { variant: 'success' | 'error' | 'neutral'; text: string } {
+function statusBadge(status: string | null): { variant: 'success' | 'danger' | 'neutral'; text: string } {
   if (!status) return { variant: 'neutral', text: 'Never updated' }
   if (status.startsWith('ok:')) return { variant: 'success', text: status.replace('ok: ', '') }
-  if (status.startsWith('error:')) return { variant: 'error', text: status.replace('error: ', '') }
+  if (status.startsWith('error:')) return { variant: 'danger', text: status.replace('error: ', '') }
   return { variant: 'neutral', text: status }
 }
 

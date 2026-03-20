@@ -56,13 +56,6 @@ export default function Devices() {
     catch (e: unknown) { toast.error((e as Error).message) }
   }
 
-  const handleViewConfig = async (mac: string) => {
-    try {
-      const config = await api.getDeviceConfig(mac)
-      setConfigModal({ mac, data: config })
-    } catch (e: unknown) { toast.error((e as Error).message) }
-  }
-
   if (loading) return <Spinner label="Loading devices..." />
 
   const currentList = tab === 'all' ? devices : pending

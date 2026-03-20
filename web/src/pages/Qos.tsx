@@ -283,7 +283,6 @@ export default function Qos() {
         <EmptyState
           title="No QoS rules"
           description="Create traffic shaping rules to prioritize network traffic by protocol, port, or IP."
-          action={{ label: 'Add Rule', onClick: openCreate }}
         />
       ) : (
         <Card title="QoS Rules">
@@ -355,6 +354,7 @@ export default function Qos() {
       {/* Add/Edit Modal */}
       {showModal && (
         <Modal
+          open={showModal}
           title={editingRule ? 'Edit QoS Rule' : 'Add QoS Rule'}
           onClose={() => setShowModal(false)}
         >

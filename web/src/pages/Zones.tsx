@@ -113,7 +113,7 @@ function ServiceEditor({
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <label className="text-xs font-medium text-navy-400">Allowed Services (to Gateway)</label>
-        <Button size="xs" variant="ghost" onClick={addService}>+ Add</Button>
+        <Button size="sm" variant="ghost" onClick={addService}>+ Add</Button>
       </div>
       {services.length === 0 && (
         <p className="text-xs text-navy-500">No services allowed to gateway</p>
@@ -124,10 +124,11 @@ function ServiceEditor({
             value={svc.protocol}
             onChange={(e) => updateService(idx, 'protocol', e.target.value)}
             className="w-20"
-          >
-            <option value="tcp">TCP</option>
-            <option value="udp">UDP</option>
-          </Select>
+            options={[
+              { value: 'tcp', label: 'TCP' },
+              { value: 'udp', label: 'UDP' },
+            ]}
+          />
           <Input
             type="number"
             min={1}
@@ -143,7 +144,7 @@ function ServiceEditor({
             placeholder="Description"
             className="flex-1"
           />
-          <Button size="xs" variant="danger" onClick={() => removeService(idx)}>
+          <Button size="sm" variant="danger" onClick={() => removeService(idx)}>
             Remove
           </Button>
         </div>
@@ -229,30 +230,33 @@ function ZoneFormModal({
             <Select
               value={form.policy_inbound}
               onChange={(e) => setForm({ ...form, policy_inbound: e.target.value as 'drop' | 'accept' })}
-            >
-              <option value="drop">DROP</option>
-              <option value="accept">ACCEPT</option>
-            </Select>
+              options={[
+                { value: 'drop', label: 'DROP' },
+                { value: 'accept', label: 'ACCEPT' },
+              ]}
+            />
           </div>
           <div>
             <label className="text-xs font-medium text-navy-400 block mb-1">Outbound</label>
             <Select
               value={form.policy_outbound}
               onChange={(e) => setForm({ ...form, policy_outbound: e.target.value as 'drop' | 'accept' })}
-            >
-              <option value="drop">DROP</option>
-              <option value="accept">ACCEPT</option>
-            </Select>
+              options={[
+                { value: 'drop', label: 'DROP' },
+                { value: 'accept', label: 'ACCEPT' },
+              ]}
+            />
           </div>
           <div>
             <label className="text-xs font-medium text-navy-400 block mb-1">Forward</label>
             <Select
               value={form.policy_forward}
               onChange={(e) => setForm({ ...form, policy_forward: e.target.value as 'drop' | 'accept' })}
-            >
-              <option value="drop">DROP</option>
-              <option value="accept">ACCEPT</option>
-            </Select>
+              options={[
+                { value: 'drop', label: 'DROP' },
+                { value: 'accept', label: 'ACCEPT' },
+              ]}
+            />
           </div>
         </div>
 
@@ -350,7 +354,7 @@ export default function Zones() {
     <div>
       <PageHeader
         title="Zones"
-        description="Network zone management with security policies"
+        subtitle="Network zone management with security policies"
       />
 
       {/* Built-in zones */}
@@ -399,7 +403,7 @@ export default function Zones() {
       {/* Custom zones */}
       <Card
         title="Custom Zones"
-        action={
+        actions={
           <div className="flex gap-2">
             <Button size="sm" variant="ghost" onClick={() => openCreate(iotPreset())}>
               + IoT
@@ -455,10 +459,10 @@ export default function Zones() {
                     </td>
                     <td className="px-3 py-2 text-right">
                       <div className="flex justify-end gap-1">
-                        <Button size="xs" variant="ghost" onClick={() => openEdit(cz)}>
+                        <Button size="sm" variant="ghost" onClick={() => openEdit(cz)}>
                           Edit
                         </Button>
-                        <Button size="xs" variant="danger" onClick={() => handleDelete(cz)}>
+                        <Button size="sm" variant="danger" onClick={() => handleDelete(cz)}>
                           Delete
                         </Button>
                       </div>

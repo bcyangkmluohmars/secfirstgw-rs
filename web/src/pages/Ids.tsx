@@ -18,15 +18,6 @@ const severityVariant = (s: string): BadgeVariant => {
   }
 }
 
-const severityWeight = (s: string): number => {
-  switch (s.toLowerCase()) {
-    case 'critical': return 3
-    case 'warning': return 2
-    case 'info': return 1
-    default: return 0
-  }
-}
-
 // -- Time range helpers --
 
 interface TimeRange {

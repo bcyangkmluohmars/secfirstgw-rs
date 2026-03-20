@@ -12,11 +12,9 @@ import {
   type IpsecAuthMethod,
   type CreateIpsecTunnelRequest,
   type SiteMesh,
-  type SitePeer,
   type MeshStatus,
   type SiteConnectionState,
   type MeshTopology,
-  type CreateMeshRequest,
   type CreateSiteRequest,
 } from '../api'
 import { PageHeader, Spinner, Button, Badge, Card, Modal, Input, Select, Tabs, EmptyState } from '../components/ui'
@@ -1019,19 +1017,19 @@ function CreateMeshModal({ open, onClose, onCreated }: { open: boolean; onClose:
   return (
     <Modal open={open} onClose={onClose} title="Create Site Mesh">
       <div className="space-y-4">
-        <Input label="Mesh Name" value={name} onChange={setName} placeholder="office-mesh" />
+        <Input label="Mesh Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="office-mesh" />
         <Select
           label="Topology"
           value={topology}
-          onChange={(v) => setTopology(v as MeshTopology)}
+          onChange={(e) => setTopology(e.target.value as MeshTopology)}
           options={[
             { value: 'full-mesh', label: 'Full Mesh' },
             { value: 'hub-and-spoke', label: 'Hub and Spoke' },
           ]}
         />
-        <Input label="Listen Port" value={listenPort} onChange={setListenPort} type="number" />
-        <Input label="Keepalive Interval (s)" value={keepalive} onChange={setKeepalive} type="number" />
-        <Input label="Failover Timeout (s)" value={failoverTimeout} onChange={setFailoverTimeout} type="number" />
+        <Input label="Listen Port" value={listenPort} onChange={(e) => setListenPort(e.target.value)} type="number" />
+        <Input label="Keepalive Interval (s)" value={keepalive} onChange={(e) => setKeepalive(e.target.value)} type="number" />
+        <Input label="Failover Timeout (s)" value={failoverTimeout} onChange={(e) => setFailoverTimeout(e.target.value)} type="number" />
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button onClick={handleCreate} disabled={saving}>
@@ -1085,18 +1083,18 @@ function AddSiteModal({ open, onClose, meshId, onAdded }: { open: boolean; onClo
   return (
     <Modal open={open} onClose={onClose} title="Add Site">
       <div className="space-y-4">
-        <Input label="Site Name" value={name} onChange={setName} placeholder="branch-office" />
-        <Input label="Endpoint (ip:port)" value={endpoint} onChange={setEndpoint} placeholder="203.0.113.1:51820" />
+        <Input label="Site Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="branch-office" />
+        <Input label="Endpoint (ip:port)" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="203.0.113.1:51820" />
         <label className="flex items-center gap-2 text-sm text-gray-300">
           <input type="checkbox" checked={isLocal} onChange={(e) => setIsLocal(e.target.checked)}
             className="rounded border-navy-600 bg-navy-800 text-emerald-500 focus:ring-emerald-500/30" />
           This is the local site (keypair auto-generated)
         </label>
         {!isLocal && (
-          <Input label="Public Key" value={publicKey} onChange={setPublicKey} placeholder="Base64-encoded WireGuard public key" />
+          <Input label="Public Key" value={publicKey} onChange={(e) => setPublicKey(e.target.value)} placeholder="Base64-encoded WireGuard public key" />
         )}
-        <Input label="Local Subnets (comma-separated)" value={localSubnets} onChange={setLocalSubnets} placeholder="10.0.1.0/24, 10.0.2.0/24" />
-        <Input label="Priority (0 = primary)" value={priority} onChange={setPriority} type="number" />
+        <Input label="Local Subnets (comma-separated)" value={localSubnets} onChange={(e) => setLocalSubnets(e.target.value)} placeholder="10.0.1.0/24, 10.0.2.0/24" />
+        <Input label="Priority (0 = primary)" value={priority} onChange={(e) => setPriority(e.target.value)} type="number" />
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button onClick={handleAdd} disabled={saving}>
@@ -1210,7 +1208,6 @@ function SitesTab() {
         <EmptyState
           title="No Site Meshes"
           description="Create a site-to-site WireGuard mesh to connect multiple locations with auto-failover."
-          action={<Button onClick={() => setShowCreate(true)}>Create Mesh</Button>}
         />
         <CreateMeshModal open={showCreate} onClose={() => setShowCreate(false)} onCreated={load} />
       </>
