@@ -138,12 +138,32 @@ fn collect_hardware_fingerprint() -> Result<Vec<u8>, CryptoError> {
 
 /// Collect fingerprint from Ubiquiti bare-metal hardware.
 ///
-/// Sources (in order of preference):
-/// 1. Board serial from devicetree (ARM) or DMI (x86)
+/// Primary source: EEPROM identity from SPI flash MTD (factory-burned,
+/// immutable, survives reflash). Contains base MAC, device ID, board ID.
+///
+/// Fallback sources (if EEPROM unavailable):
+/// 1. Board serial from devicetree or DMI
 /// 2. CPU identifier
 /// 3. eth0 MAC address
 fn collect_bare_metal_fingerprint(material: &mut Vec<u8>) -> Result<(), CryptoError> {
-    // Try devicetree serial first (UDM Pro/SE are ARM)
+    // Primary: EEPROM hardware identity (most reliable — factory-burned)
+    if let Some(hw) = sfgw_hal::identity::HwIdentity::read() {
+        material.extend_from_slice(b"eeprom:");
+        material.extend_from_slice(&hw.fingerprint());
+        material.push(b'|');
+
+        tracing::debug!(
+            material_len = material.len(),
+            board = %hw.board_id,
+            mac = %hw.mac,
+            device = %hw.device_id,
+            "collected bare-metal fingerprint from EEPROM"
+        );
+
+        return Ok(());
+    }
+
+    // Fallback: devicetree / DMI serial
     let serial = read_file_trimmed("/sys/firmware/devicetree/base/serial-number")
         .or_else(|| read_file_trimmed("/sys/class/dmi/id/product_serial"))
         .or_else(|| read_file_trimmed("/sys/class/dmi/id/board_serial"));
@@ -154,7 +174,7 @@ fn collect_bare_metal_fingerprint(material: &mut Vec<u8>) -> Result<(), CryptoEr
         material.push(b'|');
     }
 
-    // CPU ID from /proc/cpuinfo (look for "Serial" on ARM, "model name" on x86)
+    // CPU ID from /proc/cpuinfo
     if let Some(cpu_id) = read_cpu_identifier() {
         material.extend_from_slice(b"cpu:");
         material.extend_from_slice(cpu_id.as_bytes());
@@ -178,7 +198,7 @@ fn collect_bare_metal_fingerprint(material: &mut Vec<u8>) -> Result<(), CryptoEr
     tracing::debug!(
         material_len = material.len(),
         has_serial = serial.is_some(),
-        "collected bare-metal hardware fingerprint"
+        "collected bare-metal fingerprint (fallback, no EEPROM)"
     );
 
     Ok(())

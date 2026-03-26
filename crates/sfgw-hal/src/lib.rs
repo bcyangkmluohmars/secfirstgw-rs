@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #![deny(unsafe_code)]
 
+pub mod identity;
+
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -91,9 +93,10 @@ impl fmt::Display for Platform {
 ///
 /// Detection order:
 /// 1. Check for `/.dockerenv` -> Docker
-/// 2. Check for `/dev/ubnthal` (ubnthal.ko) -> BareMetal
-/// 3. Check DMI product name for VM signatures -> Vm
-/// 4. Fall back to Vm
+/// 2. Check for `/dev/ubnthal` (ubnthal.ko, stock firmware) -> BareMetal
+/// 3. Check DeviceTree compatible for Ubiquiti/Alpine V2 hardware -> BareMetal
+/// 4. Check DMI product name for VM signatures -> Vm
+/// 5. Fall back to Vm
 ///
 /// ```
 /// let platform = sfgw_hal::init().expect("platform detection failed");
@@ -109,10 +112,21 @@ pub fn init() -> Result<Platform, HalError> {
         return Ok(Platform::Docker);
     }
 
-    // Bare metal: ubnthal kernel module (device node or sysfs module entry)
+    // Bare metal: ubnthal kernel module (stock Ubiquiti firmware)
     if std::path::Path::new("/dev/ubnthal").exists()
         || std::path::Path::new("/sys/module/ubnthal").exists()
     {
+        return Ok(Platform::BareMetal);
+    }
+
+    // Bare metal: EEPROM identity readable from SPI flash MTD
+    if identity::HwIdentity::read().is_some() {
+        return Ok(Platform::BareMetal);
+    }
+
+    // Bare metal: DeviceTree compatible string (custom kernel without ubnthal)
+    // Our DTS sets compatible = "ubnt,udm-pro", "al,alpine-v2" etc.
+    if is_devicetree_bare_metal() {
         return Ok(Platform::BareMetal);
     }
 
@@ -131,6 +145,32 @@ pub fn init() -> Result<Platform, HalError> {
 
     // Default to VM for unknown environments
     Ok(Platform::Vm)
+}
+
+/// Check if the DeviceTree identifies this as Ubiquiti / Alpine V2 hardware.
+///
+/// The compatible string is a null-separated list (e.g. "ubnt,udm-pro\0al,alpine-v2\0").
+fn is_devicetree_bare_metal() -> bool {
+    // Check compatible string for known hardware identifiers
+    if let Ok(compat) = std::fs::read("/sys/firmware/devicetree/base/compatible") {
+        let compat = String::from_utf8_lossy(&compat).to_lowercase();
+        if compat.contains("ubnt,")
+            || compat.contains("al,alpine")
+            || compat.contains("annapurna-labs")
+        {
+            return true;
+        }
+    }
+
+    // Fallback: check model string
+    if let Ok(model) = std::fs::read_to_string("/sys/firmware/devicetree/base/model") {
+        let model = model.trim_end_matches('\0').to_lowercase();
+        if model.contains("ubiquiti") || model.contains("unifi") {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Known Ubiquiti board identifiers and their corresponding device models.
@@ -401,18 +441,18 @@ static USG_PRO4_PORTS: &[PortDef] = &[
     },
 ];
 
-/// Detect the Ubiquiti board model by reading `/proc/ubnthal/board` and
-/// `/proc/ubnthal/system.info`.
+/// Detect the Ubiquiti board model.
+///
+/// Sources (in order):
+/// 1. `/proc/ubnthal/board` (stock firmware with ubnthal.ko)
+/// 2. DeviceTree compatible string + `/proc/cmdline` boardid= (custom kernel)
 ///
 /// Returns `None` if not running on Ubiquiti hardware or board ID is unknown.
 #[must_use]
 pub fn detect_board() -> Option<BoardInfo> {
-    // /proc/ubnthal/board is key=value format, e.g. "boardid=ea15"
-    let board_content = std::fs::read_to_string("/proc/ubnthal/board").ok()?;
-    let board_id = board_content
-        .lines()
-        .find_map(|line| line.strip_prefix("boardid="))
-        .map(|v| v.trim().to_string())?;
+    // Try stock ubnthal first
+    let board_id = detect_board_id_ubnthal()
+        .or_else(detect_board_id_devicetree)?;
 
     let (model, short_name, port_count, ports, switch) = match board_id.as_str() {
         "ea15" => (
@@ -455,6 +495,58 @@ pub fn detect_board() -> Option<BoardInfo> {
         ports,
         switch,
     })
+}
+
+/// Read board ID from stock Ubiquiti ubnthal procfs.
+fn detect_board_id_ubnthal() -> Option<String> {
+    let content = std::fs::read_to_string("/proc/ubnthal/board").ok()?;
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("boardid="))
+        .map(|v| v.trim().to_string())
+}
+
+/// Read board ID from EEPROM, DeviceTree, or kernel cmdline.
+///
+/// Priority:
+/// 1. EEPROM MTD (direct SPI flash read — most reliable)
+/// 2. `/proc/cmdline` boardid= (set in DTS chosen.bootargs)
+/// 3. DeviceTree compatible string (inferred)
+fn detect_board_id_devicetree() -> Option<String> {
+    // Try EEPROM first — this is the ground truth
+    if let Some(hw) = identity::HwIdentity::read() {
+        return Some(hw.board_id);
+    }
+
+    // Try boardid from /proc/cmdline (set in DTS chosen.bootargs)
+    if let Some(id) = read_cmdline_boardid() {
+        return Some(id);
+    }
+
+    // Fallback: infer from DeviceTree compatible string
+    if let Ok(compat) = std::fs::read("/sys/firmware/devicetree/base/compatible") {
+        let compat = String::from_utf8_lossy(&compat).to_lowercase();
+        if compat.contains("ubnt,udm-pro") {
+            return Some("ea15".to_string());
+        }
+        if compat.contains("ubnt,udm-se") {
+            return Some("ea22".to_string());
+        }
+        if compat.contains("ubnt,udm") {
+            return Some("ea21".to_string());
+        }
+    }
+
+    None
+}
+
+/// Parse `boardid=XXXX` from `/proc/cmdline`.
+fn read_cmdline_boardid() -> Option<String> {
+    let cmdline = std::fs::read_to_string("/proc/cmdline").ok()?;
+    cmdline
+        .split_whitespace()
+        .find_map(|arg| arg.strip_prefix("boardid="))
+        .map(|v| v.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -642,14 +734,24 @@ mod tests {
     #[test]
     fn test_docker_detection() {
         // If /.dockerenv exists, init() must return Docker.
-        // If it doesn't exist, init() must NOT return Docker (unless
-        // /dev/ubnthal also doesn't exist, in which case it's Vm).
         let platform = init().expect("init() should return Ok");
         if std::path::Path::new("/.dockerenv").exists() {
             assert_eq!(platform, Platform::Docker);
         } else {
             assert_ne!(platform, Platform::Docker);
         }
+    }
+
+    #[test]
+    fn test_devicetree_detection_does_not_panic() {
+        // is_devicetree_bare_metal must not panic regardless of environment
+        let _ = is_devicetree_bare_metal();
+    }
+
+    #[test]
+    fn test_read_cmdline_boardid_does_not_panic() {
+        // read_cmdline_boardid must not panic regardless of environment
+        let _ = read_cmdline_boardid();
     }
 
     #[test]
