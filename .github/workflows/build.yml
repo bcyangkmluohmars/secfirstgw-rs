@@ -153,5 +153,8 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: Install & typecheck & build
+      - name: Install & typecheck & build (Gateway)
         run: cd web && npm ci && npx tsc -b && npm run build
+
+      - name: Install & typecheck & build (NAS)
+        run: cd web-nas && npm ci && npx tsc -b && npm run build

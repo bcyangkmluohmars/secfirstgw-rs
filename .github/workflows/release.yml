@@ -12,8 +12,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  frontend:
-    name: Frontend
+  frontend-gw:
+    name: Frontend (Gateway)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -28,18 +28,32 @@ jobs:
           name: web-dist
           path: web/dist/
 
+  frontend-nas:
+    name: Frontend (NAS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web-nas/package-lock.json
+      - run: cd web-nas && npm ci && npm run build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-nas-dist
+          path: web-nas/dist/
+
   build:
     name: Build ${{ matrix.target }}
-    needs: [frontend]
+    needs: [frontend-gw, frontend-nas]
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            artifact: secfirstgw-x86_64-linux
             use_cross: false
           - target: aarch64-unknown-linux-musl
-            artifact: secfirstgw-aarch64-linux
             use_cross: true
 
     steps:
@@ -70,26 +84,49 @@ jobs:
           name: web-dist
           path: web/dist/
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-nas-dist
+          path: web-nas/dist/
+
       - name: Build release (native)
         if: matrix.use_cross == false
-        run: cargo build --release --bin sfgw --target ${{ matrix.target }}
+        run: |
+          cargo build --release --bin sfgw --target ${{ matrix.target }}
+          cargo build --release --bin sfnas --target ${{ matrix.target }}
 
       - name: Build release (cross)
         if: matrix.use_cross == true
-        run: cross build --release --bin sfgw --target ${{ matrix.target }}
-
-      - name: Package
         run: |
-          mkdir -p staging
-          cp target/${{ matrix.target }}/release/sfgw staging/
-          cp -r web/dist staging/
-          cp scripts/clean-and-install.sh staging/
-          tar -czf ${{ matrix.artifact }}.tar.gz -C staging .
+          cross build --release --bin sfgw --target ${{ matrix.target }}
+          cross build --release --bin sfnas --target ${{ matrix.target }}
+
+      - name: Package Gateway
+        run: |
+          mkdir -p staging-gw
+          cp target/${{ matrix.target }}/release/sfgw staging-gw/
+          cp -r web/dist staging-gw/
+          cp scripts/clean-and-install.sh staging-gw/
+          tar -czf secfirstgw-${{ matrix.target }}.tar.gz -C staging-gw .
+
+      - name: Package NAS
+        run: |
+          mkdir -p staging-nas
+          cp target/${{ matrix.target }}/release/sfnas staging-nas/
+          cp -r web-nas/dist staging-nas/
+          cp scripts/secfirstnas.initd staging-nas/
+          cp scripts/nas-firewall.nft staging-nas/
+          tar -czf secfirstnas-${{ matrix.target }}.tar.gz -C staging-nas .
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.tar.gz
+          name: secfirstgw-${{ matrix.target }}
+          path: secfirstgw-${{ matrix.target }}.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: secfirstnas-${{ matrix.target }}
+          path: secfirstnas-${{ matrix.target }}.tar.gz
 
   release:
     name: Create Release
