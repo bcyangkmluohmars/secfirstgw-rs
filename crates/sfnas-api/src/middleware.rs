@@ -167,11 +167,16 @@ pub async fn require_auth(
     let db = match req.extensions().get::<sfgw_db::Db>().cloned() {
         Some(db) => db,
         None => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({ "error": "internal server error" }))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({ "error": "internal server error" })),
+            )
+                .into_response();
         }
     };
 
-    let token = req.headers()
+    let token = req
+        .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
@@ -181,7 +186,8 @@ pub async fn require_auth(
                 .get(header::COOKIE)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|cookies| {
-                    cookies.split(';')
+                    cookies
+                        .split(';')
                         .find_map(|c| c.trim().strip_prefix("sfnas_session="))
                         .map(|v| v.trim().to_string())
                 })
@@ -190,16 +196,22 @@ pub async fn require_auth(
     let token = match token {
         Some(t) if !t.is_empty() => t,
         _ => {
-            return (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": "unauthorized" }))).into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(json!({ "error": "unauthorized" })),
+            )
+                .into_response();
         }
     };
 
-    let client_ip = req.extensions()
+    let client_ip = req
+        .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|ci| ci.0.ip().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let fingerprint = req.headers()
+    let fingerprint = req
+        .headers()
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown")
@@ -211,9 +223,11 @@ pub async fn require_auth(
             req.extensions_mut().insert(AuthToken(token));
             next.run(req).await
         }
-        _ => {
-            (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": "unauthorized" }))).into_response()
-        }
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response(),
     }
 }
 

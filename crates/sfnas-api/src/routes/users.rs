@@ -10,7 +10,7 @@ use axum::extract::Path;
 use axum::routing::{delete, get, put};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::process::Command;
 use tracing::{info, warn};
 
@@ -56,9 +56,9 @@ fn validate_username(name: &str) -> Result<(), ApiError> {
 
     // Reject reserved/system usernames
     const RESERVED: &[&str] = &[
-        "root", "daemon", "bin", "sys", "sync", "games", "man", "lp",
-        "mail", "news", "uucp", "proxy", "www-data", "backup", "list",
-        "irc", "gnats", "nobody", "sshd", "samba", "nfs", "admin",
+        "root", "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail", "news", "uucp",
+        "proxy", "www-data", "backup", "list", "irc", "gnats", "nobody", "sshd", "samba", "nfs",
+        "admin",
     ];
     if RESERVED.iter().any(|r| name.eq_ignore_ascii_case(r)) {
         return Err(ApiError::Validation(format!(
@@ -124,9 +124,7 @@ async fn list_users() -> Result<Json<Value>, ApiError> {
 /// `POST /api/v1/users` — create a new NAS user.
 ///
 /// Creates a system user (via `adduser`) and sets a Samba password.
-async fn create_user(
-    Json(body): Json<CreateUserRequest>,
-) -> Result<Json<Value>, ApiError> {
+async fn create_user(Json(body): Json<CreateUserRequest>) -> Result<Json<Value>, ApiError> {
     validate_username(&body.username)?;
     validate_password(&body.password)?;
 
@@ -150,7 +148,9 @@ async fn create_user(
                 body.username
             )));
         }
-        return Err(ApiError::Internal("failed to create system user".to_string()));
+        return Err(ApiError::Internal(
+            "failed to create system user".to_string(),
+        ));
     }
 
     // Create home directory
@@ -188,7 +188,10 @@ async fn delete_user(Path(name): Path<String>) -> Result<Json<Value>, ApiError> 
         .map_err(|e| ApiError::Internal(format!("failed to remove samba user: {e}")))?;
 
     if !smb_output.status.success() {
-        warn!(username = name, "smbpasswd -x failed (user may not exist in samba)");
+        warn!(
+            username = name,
+            "smbpasswd -x failed (user may not exist in samba)"
+        );
     }
 
     // Remove system user (keep home directory for data safety)

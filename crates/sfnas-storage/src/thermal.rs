@@ -50,8 +50,7 @@ const WARNING_OFFSET_C: u32 = 5;
 /// Each profile defines a target temperature for HDD and CPU sensors, plus a
 /// minimum PWM value that fans never drop below. The thermal manager uses these
 /// targets with a PID-like control loop and hysteresis band.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum FanProfile {
     /// Prioritize noise reduction. HDDs may run warmer.
     /// HDD target 50 C, CPU target 70 C, min PWM 20%.
@@ -75,7 +74,6 @@ pub enum FanProfile {
         min_pwm: u8,
     },
 }
-
 
 impl FanProfile {
     /// HDD target temperature in degrees Celsius for this profile.
@@ -106,9 +104,9 @@ impl FanProfile {
     #[must_use]
     pub const fn min_pwm(&self) -> u8 {
         match self {
-            Self::Silence => 51,       // ~20%
-            Self::Balanced => 79,      // ~31%
-            Self::Performance => 128,  // ~50%
+            Self::Silence => 51,      // ~20%
+            Self::Balanced => 79,     // ~31%
+            Self::Performance => 128, // ~50%
             Self::Max => PWM_MAX,
             Self::Custom { min_pwm, .. } => *min_pwm,
         }
@@ -266,17 +264,9 @@ impl ThermalManager {
         }
 
         // Gather all relevant temperatures.
-        let max_hdd_temp = status
-            .hdd_temps_c
-            .iter()
-            .map(|(_, t)| *t)
-            .max();
+        let max_hdd_temp = status.hdd_temps_c.iter().map(|(_, t)| *t).max();
 
-        let max_hwmon_temp = status
-            .hwmon_temps_c
-            .iter()
-            .filter_map(|t| *t)
-            .max();
+        let max_hwmon_temp = status.hwmon_temps_c.iter().filter_map(|t| *t).max();
 
         let max_cpu_temp = [status.cpu_temp_c, max_hwmon_temp]
             .iter()
@@ -509,8 +499,7 @@ mod tests {
 
         // Fan RPM files
         for i in 1..=3 {
-            fs::write(base.join(format!("fan{i}_input")), "4500\n")
-                .expect("write fan rpm");
+            fs::write(base.join(format!("fan{i}_input")), "4500\n").expect("write fan rpm");
         }
 
         // Temperature sensor files (millidegrees)

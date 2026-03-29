@@ -625,7 +625,8 @@ impl RaidArray {
                             // Parse speed: "speed=141258K/sec"
                             if let Some(sp) = next_line.find("speed=") {
                                 let after = &next_line[sp + 6..];
-                                let num: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+                                let num: String =
+                                    after.chars().take_while(|c| c.is_ascii_digit()).collect();
                                 if let Ok(s) = num.parse::<u64>() {
                                     speed_kbps = Some(s);
                                 }
@@ -633,7 +634,10 @@ impl RaidArray {
                             // Parse finish: "finish=343.7min"
                             if let Some(fp) = next_line.find("finish=") {
                                 let after = &next_line[fp + 7..];
-                                let num: String = after.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+                                let num: String = after
+                                    .chars()
+                                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                                    .collect();
                                 if let Ok(f) = num.parse::<f32>() {
                                     finish_minutes = Some(f);
                                 }

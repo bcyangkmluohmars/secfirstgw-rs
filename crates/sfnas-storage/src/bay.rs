@@ -83,8 +83,6 @@ pub(crate) const LED_WHITE_PIN: [u8; 4] = [22, 20, 16, 18]; // Slot 1,2,3,4
 /// PCA9575 pin for red fault LED, indexed by slot (0-3).
 pub(crate) const LED_RED_PIN: [u8; 4] = [12, 13, 14, 15]; // Slot 1,2,3,4
 
-
-
 /// Represents a physical HDD bay on the UNVR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bay {
@@ -119,8 +117,6 @@ impl Bay {
             .collect()
     }
 
-
-
     /// Map this bay slot to its corresponding `/dev/sdX` device path.
     pub fn map_to_disk(&self) -> Result<PathBuf, StorageError> {
         let idx = (self.slot - 1) as usize;
@@ -145,8 +141,6 @@ impl Bay {
             .map(|s| !s.trim().contains("unknown"))
             .unwrap_or(false)
     }
-
-
 
     /// Find the `/dev/sdX` block device for a given SATA host and port.
     fn find_disk_by_host_port(host: u8, port: u8) -> Result<PathBuf, StorageError> {
@@ -175,13 +169,13 @@ impl Bay {
                 Err(_) => continue,
             };
 
-            let scsi_addr = link_target
-                .file_name()
-                .and_then(|f| f.to_str());
+            let scsi_addr = link_target.file_name().and_then(|f| f.to_str());
             let (scsi_host, scsi_target) = match scsi_addr {
                 Some(s) => {
                     let parts: Vec<&str> = s.split(':').collect();
-                    if parts.len() != 4 { continue; }
+                    if parts.len() != 4 {
+                        continue;
+                    }
                     match (parts[0].parse::<u8>(), parts[2].parse::<u8>()) {
                         (Ok(h), Ok(t)) => (h, t),
                         _ => continue,

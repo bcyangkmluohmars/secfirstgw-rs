@@ -107,27 +107,28 @@ async fn session_handler(
         if let Ok(Some(user_id)) =
             auth::validate_session(&db, token, &client_ip, &fingerprint).await
             && let Ok(Some(user)) = auth::get_user_by_id(&db, user_id).await
-            && let Ok(env_key) = e2ee::generate_envelope_key() {
-                {
-                    let mut store = envelope_key_store.lock().await;
-                    store.insert(token.to_string(), env_key.to_vec());
-                }
-
-                if let Ok(neg_key) = e2ee::take_negotiate_key(&negotiate_store, &negotiate_id).await
-                    && let Ok(sealed) = e2ee::Envelope::seal(&neg_key, &env_key)
-                {
-                    response["authenticated"] = json!(true);
-                    response["user"] = json!({
-                        "id": user.id,
-                        "username": user.username,
-                        "role": user.role,
-                    });
-                    response["envelope"] = json!({
-                        "iv": sealed.iv,
-                        "data": sealed.data,
-                    });
-                }
+            && let Ok(env_key) = e2ee::generate_envelope_key()
+        {
+            {
+                let mut store = envelope_key_store.lock().await;
+                store.insert(token.to_string(), env_key.to_vec());
             }
+
+            if let Ok(neg_key) = e2ee::take_negotiate_key(&negotiate_store, &negotiate_id).await
+                && let Ok(sealed) = e2ee::Envelope::seal(&neg_key, &env_key)
+            {
+                response["authenticated"] = json!(true);
+                response["user"] = json!({
+                    "id": user.id,
+                    "username": user.username,
+                    "role": user.role,
+                });
+                response["envelope"] = json!({
+                    "iv": sealed.iv,
+                    "data": sealed.data,
+                });
+            }
+        }
     }
 
     (StatusCode::OK, Json(response))

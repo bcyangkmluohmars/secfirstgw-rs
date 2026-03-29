@@ -46,12 +46,18 @@ impl DiskCache {
         let cache = self.clone();
         match std::thread::Builder::new()
             .name("storage-cache".into())
-            .spawn(move || loop {
-                std::thread::sleep(REFRESH_INTERVAL);
-                cache.refresh();
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(REFRESH_INTERVAL);
+                    cache.refresh();
+                }
             }) {
-            Ok(_) => info!("storage cache background refresh started (interval: {REFRESH_INTERVAL:?})"),
-            Err(e) => warn!(error = %e, "failed to spawn storage cache thread — running without background refresh"),
+            Ok(_) => {
+                info!("storage cache background refresh started (interval: {REFRESH_INTERVAL:?})")
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to spawn storage cache thread — running without background refresh")
+            }
         }
     }
 
@@ -142,10 +148,8 @@ impl DiskCache {
             "storage cache refreshed"
         );
 
-        *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = Some(StorageSnapshot {
-            disks,
-            arrays,
-        });
+        *self.inner.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(StorageSnapshot { disks, arrays });
     }
 }
 

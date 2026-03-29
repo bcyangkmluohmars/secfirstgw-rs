@@ -113,13 +113,15 @@ impl Disk {
         let mut serial = serial.trim().to_string();
         if let Some(ref out) = smart_stdout {
             if (serial == "Unknown" || serial.is_empty())
-                && let Some(s) = Self::extract_smart_info(out, "Serial Number") {
-                    serial = s;
-                }
+                && let Some(s) = Self::extract_smart_info(out, "Serial Number")
+            {
+                serial = s;
+            }
             if (model == "Unknown" || model.is_empty())
-                && let Some(m) = Self::extract_smart_info(out, "Device Model") {
-                    model = m;
-                }
+                && let Some(m) = Self::extract_smart_info(out, "Device Model")
+            {
+                model = m;
+            }
         }
 
         Ok(Self {

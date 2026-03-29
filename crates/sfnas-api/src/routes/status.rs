@@ -10,7 +10,7 @@ use axum::Extension;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 use tracing::debug;
 
@@ -64,19 +64,17 @@ struct FanInfo {
 }
 
 /// `GET /api/v1/status`
-async fn get_status(Extension(disk_cache): Extension<sfnas_storage::DiskCache>) -> Result<Json<Value>, ApiError> {
+async fn get_status(
+    Extension(disk_cache): Extension<sfnas_storage::DiskCache>,
+) -> Result<Json<Value>, ApiError> {
     debug!("fetching system status");
 
-    let hostname = read_file_trimmed("/etc/hostname")
-        .unwrap_or_else(|| "secfirstnas".to_string());
+    let hostname = read_file_trimmed("/etc/hostname").unwrap_or_else(|| "secfirstnas".to_string());
 
     let kernel = read_file_trimmed("/proc/version")
         .map(|v| {
             // Extract just the version string (first three fields)
-            v.split_whitespace()
-                .take(3)
-                .collect::<Vec<_>>()
-                .join(" ")
+            v.split_whitespace().take(3).collect::<Vec<_>>().join(" ")
         })
         .unwrap_or_else(|| "unknown".to_string());
 
@@ -142,7 +140,12 @@ fn read_fans() -> Vec<FanInfo> {
                 .ok()
                 .and_then(|s| s.trim().parse::<u8>().ok());
             let pwm_percent = pwm.map(|p| ((p as u16) * 100 / 255) as u8);
-            FanInfo { id: i, rpm, pwm, pwm_percent }
+            FanInfo {
+                id: i,
+                rpm,
+                pwm,
+                pwm_percent,
+            }
         })
         .filter(|f| f.rpm.is_some_and(|r| r > 0) || f.pwm.is_some())
         .collect()
@@ -175,11 +178,7 @@ fn read_loadavg() -> Option<LoadAverage> {
     let one = parts.next()?.parse::<f64>().ok()?;
     let five = parts.next()?.parse::<f64>().ok()?;
     let fifteen = parts.next()?.parse::<f64>().ok()?;
-    Some(LoadAverage {
-        one,
-        five,
-        fifteen,
-    })
+    Some(LoadAverage { one, five, fifteen })
 }
 
 fn read_meminfo() -> Option<MemoryInfo> {
@@ -258,16 +257,17 @@ fn read_thermal_zones(disk_cache: &sfnas_storage::DiskCache) -> Vec<ThermalZone>
             for i in 1..=5 {
                 let temp_path = hwmon_path.join(format!("temp{i}_input"));
                 if let Ok(raw) = std::fs::read_to_string(&temp_path)
-                    && let Ok(millideg) = raw.trim().parse::<f64>() {
-                        let label = std::fs::read_to_string(hwmon_path.join(format!("temp{i}_label")))
-                            .ok()
-                            .map(|s| s.trim().to_string())
-                            .unwrap_or_else(|| format!("{chip_name} temp{i}"));
-                        zones.push(ThermalZone {
-                            name: label,
-                            temp_celsius: millideg / 1000.0,
-                        });
-                    }
+                    && let Ok(millideg) = raw.trim().parse::<f64>()
+                {
+                    let label = std::fs::read_to_string(hwmon_path.join(format!("temp{i}_label")))
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_else(|| format!("{chip_name} temp{i}"));
+                    zones.push(ThermalZone {
+                        name: label,
+                        temp_celsius: millideg / 1000.0,
+                    });
+                }
             }
         }
     }
@@ -275,7 +275,9 @@ fn read_thermal_zones(disk_cache: &sfnas_storage::DiskCache) -> Vec<ThermalZone>
     // HDD temps from SMART cache (instant, no smartctl call)
     for disk in disk_cache.get() {
         if let Some(temp) = disk.health.temperature_celsius {
-            let name = disk.path.file_name()
+            let name = disk
+                .path
+                .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "disk".to_string());
             zones.push(ThermalZone {
@@ -298,9 +300,7 @@ fn count_smb_shares() -> usize {
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            trimmed.starts_with('[')
-                && trimmed.ends_with(']')
-                && trimmed != "[global]"
+            trimmed.starts_with('[') && trimmed.ends_with(']') && trimmed != "[global]"
         })
         .count()
 }

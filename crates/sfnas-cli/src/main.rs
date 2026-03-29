@@ -7,8 +7,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use sfnas_storage::{
-    Bay, BayState, Disk, FanProfile, RaidArray, RaidLevel, SmartStatus,
-    ThermalManager, ThermalStatus,
+    Bay, BayState, Disk, FanProfile, RaidArray, RaidLevel, SmartStatus, ThermalManager,
+    ThermalStatus,
 };
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -286,7 +286,10 @@ async fn main() -> Result<()> {
     // Ensure panics in ANY thread (LED service, storage cache, etc.)
     // produce visible output instead of a silent exit 255.
     std::panic::set_hook(Box::new(|info| {
-        error!("PANIC in thread {:?}: {info}", std::thread::current().name());
+        error!(
+            "PANIC in thread {:?}: {info}",
+            std::thread::current().name()
+        );
     }));
 
     let cli = Cli::parse();
@@ -330,7 +333,12 @@ async fn main() -> Result<()> {
         Commands::Backup { action } => cmd_backup(action).await,
         Commands::Fan { action } => cmd_fan(action).await,
         Commands::Service { action } => cmd_service(action).await,
-        Commands::Start => cmd_service(ServiceAction::Start { bind: API_BIND_ADDR.to_string() }).await,
+        Commands::Start => {
+            cmd_service(ServiceAction::Start {
+                bind: API_BIND_ADDR.to_string(),
+            })
+            .await
+        }
         Commands::Stop => cmd_service(ServiceAction::Stop).await,
     };
 
@@ -443,11 +451,20 @@ async fn cmd_status() -> Result<()> {
     info!("");
     info!("Hardware Engines:");
     let sgpo_ok = Path::new(SGPO_DRIVER_PATH).exists();
-    info!("  SGPO (bay LEDs):     {}", if sgpo_ok { "loaded" } else { "NOT FOUND" });
+    info!(
+        "  SGPO (bay LEDs):     {}",
+        if sgpo_ok { "loaded" } else { "NOT FOUND" }
+    );
     let ssm_ok = Path::new(AL_SSM_PATH).exists();
-    info!("  al_ssm (HW crypto):  {}", if ssm_ok { "loaded" } else { "NOT FOUND" });
+    info!(
+        "  al_ssm (HW crypto):  {}",
+        if ssm_ok { "loaded" } else { "NOT FOUND" }
+    );
     let dma_ok = Path::new(AL_DMA_PATH).exists();
-    info!("  al_dma (HW parity):  {}", if dma_ok { "loaded" } else { "NOT FOUND" });
+    info!(
+        "  al_dma (HW parity):  {}",
+        if dma_ok { "loaded" } else { "NOT FOUND" }
+    );
 
     // -- Shares ---------------------------------------------------------
     info!("");
@@ -785,9 +802,13 @@ async fn cmd_health() -> Result<()> {
         info!("  CPU: {cpu_temp}C");
         any_temp = true;
         if cpu_temp > cpu_target + 20 {
-            issues.push(format!("CRITICAL: CPU temperature is {cpu_temp}C (target: {cpu_target}C)"));
+            issues.push(format!(
+                "CRITICAL: CPU temperature is {cpu_temp}C (target: {cpu_target}C)"
+            ));
         } else if cpu_temp > cpu_target + 10 {
-            issues.push(format!("WARNING: CPU temperature is {cpu_temp}C (target: {cpu_target}C)"));
+            issues.push(format!(
+                "WARNING: CPU temperature is {cpu_temp}C (target: {cpu_target}C)"
+            ));
         }
     }
     if !any_temp {
@@ -846,19 +867,32 @@ async fn cmd_health() -> Result<()> {
     info!("");
     info!("[HW] Hardware Engine Health");
     let sgpo_ok = Path::new(SGPO_DRIVER_PATH).exists();
-    info!("  SGPO (bay LEDs):     {}", if sgpo_ok { "OK" } else { "NOT FOUND" });
+    info!(
+        "  SGPO (bay LEDs):     {}",
+        if sgpo_ok { "OK" } else { "NOT FOUND" }
+    );
     if !sgpo_ok {
         issues.push("WARNING: SGPO driver not loaded -- bay LEDs will not work".to_string());
     }
     let ssm_ok = Path::new(AL_SSM_PATH).exists();
-    info!("  al_ssm (HW crypto):  {}", if ssm_ok { "OK" } else { "NOT FOUND" });
+    info!(
+        "  al_ssm (HW crypto):  {}",
+        if ssm_ok { "OK" } else { "NOT FOUND" }
+    );
     if !ssm_ok {
-        issues.push("WARNING: al_ssm (HW crypto engine) not loaded -- dm-crypt will use CPU".to_string());
+        issues.push(
+            "WARNING: al_ssm (HW crypto engine) not loaded -- dm-crypt will use CPU".to_string(),
+        );
     }
     let dma_ok = Path::new(AL_DMA_PATH).exists();
-    info!("  al_dma (HW parity):  {}", if dma_ok { "OK" } else { "NOT FOUND" });
+    info!(
+        "  al_dma (HW parity):  {}",
+        if dma_ok { "OK" } else { "NOT FOUND" }
+    );
     if !dma_ok {
-        issues.push("WARNING: al_dma (HW RAID parity engine) not loaded -- RAID5 will use CPU".to_string());
+        issues.push(
+            "WARNING: al_dma (HW RAID parity engine) not loaded -- RAID5 will use CPU".to_string(),
+        );
     }
 
     // -- Network --------------------------------------------------------
@@ -1361,31 +1395,52 @@ async fn cmd_fan(action: FanAction) -> Result<()> {
 
         FanAction::Silence => {
             let profile = FanProfile::Silence;
-            info!("Setting fan profile: {} (min PWM {})...", profile.name(), profile.min_pwm());
+            info!(
+                "Setting fan profile: {} (min PWM {})...",
+                profile.name(),
+                profile.min_pwm()
+            );
             thermal.set_profile(profile.clone());
             apply_profile_fans(&mut thermal)?;
-            info!("Done. HDD target: {}C, CPU target: {}C",
-                profile.hdd_target_c(), profile.cpu_target_c());
+            info!(
+                "Done. HDD target: {}C, CPU target: {}C",
+                profile.hdd_target_c(),
+                profile.cpu_target_c()
+            );
             Ok(())
         }
 
         FanAction::Balanced => {
             let profile = FanProfile::Balanced;
-            info!("Setting fan profile: {} (min PWM {})...", profile.name(), profile.min_pwm());
+            info!(
+                "Setting fan profile: {} (min PWM {})...",
+                profile.name(),
+                profile.min_pwm()
+            );
             thermal.set_profile(profile.clone());
             apply_profile_fans(&mut thermal)?;
-            info!("Done. HDD target: {}C, CPU target: {}C",
-                profile.hdd_target_c(), profile.cpu_target_c());
+            info!(
+                "Done. HDD target: {}C, CPU target: {}C",
+                profile.hdd_target_c(),
+                profile.cpu_target_c()
+            );
             Ok(())
         }
 
         FanAction::Performance => {
             let profile = FanProfile::Performance;
-            info!("Setting fan profile: {} (min PWM {})...", profile.name(), profile.min_pwm());
+            info!(
+                "Setting fan profile: {} (min PWM {})...",
+                profile.name(),
+                profile.min_pwm()
+            );
             thermal.set_profile(profile.clone());
             apply_profile_fans(&mut thermal)?;
-            info!("Done. HDD target: {}C, CPU target: {}C",
-                profile.hdd_target_c(), profile.cpu_target_c());
+            info!(
+                "Done. HDD target: {}C, CPU target: {}C",
+                profile.hdd_target_c(),
+                profile.cpu_target_c()
+            );
             Ok(())
         }
 
@@ -1502,7 +1557,11 @@ async fn cmd_service(action: ServiceAction) -> Result<()> {
             info!(
                 "  {:<12} {}",
                 "api",
-                if api_listening { "running (port 8080)" } else { "stopped" }
+                if api_listening {
+                    "running (port 8080)"
+                } else {
+                    "stopped"
+                }
             );
 
             Ok(())
@@ -1571,7 +1630,8 @@ fn check_port_listening(port: u16) -> bool {
                     && let Some(p) = local.split(':').nth(1)
                     && p == hex_port
                     && let Some(state) = line.split_whitespace().nth(3)
-                    && state == "0A" // 0A = LISTEN
+                    && state == "0A"
+                // 0A = LISTEN
                 {
                     return true;
                 }

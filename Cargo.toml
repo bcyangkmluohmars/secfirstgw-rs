@@ -18,6 +18,10 @@ members = [
     "crates/sfgw-ids",
     "crates/sfgw-personality",
     "crates/sfgw-cli",
+    "crates/sfnas-storage",
+    "crates/sfnas-share",
+    "crates/sfnas-api",
+    "crates/sfnas-cli",
 ]
 exclude = ["tools/ssh-diag"]
 
@@ -90,6 +94,10 @@ rcgen = "0.13"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 rustls-pki-types = "1"
 rustls-pemfile = "2"
+# JWT auth (NAS API)
+jsonwebtoken = "9"
+# LDAP/Active Directory (NAS user auth)
+ldap3 = "0.11"
 # SSH client (for Ubiquiti device provisioning)
 russh = "0.49"
 russh-keys = "0.49"

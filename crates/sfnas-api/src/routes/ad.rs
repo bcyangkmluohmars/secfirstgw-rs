@@ -19,7 +19,7 @@ use crate::error::ApiError;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::process::Command;
 use tracing::{info, warn};
 
@@ -146,7 +146,12 @@ fn validate_base_dn(dn: &str) -> Result<(), ApiError> {
         ));
     }
     // Reject shell metacharacters in DN
-    if dn.chars().any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '\'' | '"' | '\\' | '\n' | '\r')) {
+    if dn.chars().any(|c| {
+        matches!(
+            c,
+            ';' | '|' | '&' | '$' | '`' | '\'' | '"' | '\\' | '\n' | '\r'
+        )
+    }) {
         return Err(ApiError::Validation(
             "base_dn contains invalid characters".into(),
         ));
@@ -164,7 +169,10 @@ fn validate_bind_user(user: &str) -> Result<(), ApiError> {
             "bind_user must be 1024 characters or fewer".into(),
         ));
     }
-    if user.chars().any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '\n' | '\r')) {
+    if user
+        .chars()
+        .any(|c| matches!(c, ';' | '|' | '&' | '$' | '`' | '\n' | '\r'))
+    {
         return Err(ApiError::Validation(
             "bind_user contains invalid characters".into(),
         ));
@@ -186,7 +194,10 @@ fn validate_ldap_filter(filter: &str) -> Result<(), ApiError> {
         ));
     }
     // Reject shell metacharacters
-    if filter.chars().any(|c| matches!(c, ';' | '|' | '`' | '$' | '\n' | '\r')) {
+    if filter
+        .chars()
+        .any(|c| matches!(c, ';' | '|' | '`' | '$' | '\n' | '\r'))
+    {
         return Err(ApiError::Validation(
             "LDAP filter contains invalid characters".into(),
         ));
@@ -259,11 +270,12 @@ async fn save_config(
         validate_ldap_filter(filter)?;
     }
     if let Some(interval) = body.sync_interval
-        && (interval == 0 || interval > 1440) {
-            return Err(ApiError::Validation(
-                "sync_interval must be between 1 and 1440 minutes".into(),
-            ));
-        }
+        && (interval == 0 || interval > 1440)
+    {
+        return Err(ApiError::Validation(
+            "sync_interval must be between 1 and 1440 minutes".into(),
+        ));
+    }
 
     info!(server = %body.server, domain = %body.domain, "saving AD configuration");
 
@@ -275,9 +287,10 @@ async fn save_config(
 
     // Only update password if provided and non-empty
     if let Some(ref pw) = body.bind_password
-        && !pw.is_empty() {
-            meta_set(&db, "ad_bind_password", pw).await?;
-        }
+        && !pw.is_empty()
+    {
+        meta_set(&db, "ad_bind_password", pw).await?;
+    }
 
     if let Some(ref filter) = body.user_filter {
         meta_set(&db, "ad_user_filter", filter).await?;
@@ -299,21 +312,11 @@ async fn save_config(
 // POST /auth/ad/test — test LDAP connection
 // ---------------------------------------------------------------------------
 
-async fn test_connection(
-    Extension(db): Extension<sfgw_db::Db>,
-) -> Result<Json<Value>, ApiError> {
-    let server = meta_get(&db, "ad_server")
-        .await?
-        .unwrap_or_default();
-    let _base_dn = meta_get(&db, "ad_base_dn")
-        .await?
-        .unwrap_or_default();
-    let bind_user = meta_get(&db, "ad_bind_user")
-        .await?
-        .unwrap_or_default();
-    let bind_password = meta_get(&db, "ad_bind_password")
-        .await?
-        .unwrap_or_default();
+async fn test_connection(Extension(db): Extension<sfgw_db::Db>) -> Result<Json<Value>, ApiError> {
+    let server = meta_get(&db, "ad_server").await?.unwrap_or_default();
+    let _base_dn = meta_get(&db, "ad_base_dn").await?.unwrap_or_default();
+    let bind_user = meta_get(&db, "ad_bind_user").await?.unwrap_or_default();
+    let bind_password = meta_get(&db, "ad_bind_password").await?.unwrap_or_default();
 
     if server.is_empty() || bind_user.is_empty() {
         return Err(ApiError::Validation(
@@ -388,21 +391,11 @@ async fn test_connection(
 // POST /auth/ad/join — join AD domain
 // ---------------------------------------------------------------------------
 
-async fn join_domain(
-    Extension(db): Extension<sfgw_db::Db>,
-) -> Result<Json<Value>, ApiError> {
-    let server = meta_get(&db, "ad_server")
-        .await?
-        .unwrap_or_default();
-    let domain = meta_get(&db, "ad_domain")
-        .await?
-        .unwrap_or_default();
-    let bind_user = meta_get(&db, "ad_bind_user")
-        .await?
-        .unwrap_or_default();
-    let bind_password = meta_get(&db, "ad_bind_password")
-        .await?
-        .unwrap_or_default();
+async fn join_domain(Extension(db): Extension<sfgw_db::Db>) -> Result<Json<Value>, ApiError> {
+    let server = meta_get(&db, "ad_server").await?.unwrap_or_default();
+    let domain = meta_get(&db, "ad_domain").await?.unwrap_or_default();
+    let bind_user = meta_get(&db, "ad_bind_user").await?.unwrap_or_default();
+    let bind_password = meta_get(&db, "ad_bind_password").await?.unwrap_or_default();
 
     if server.is_empty() || domain.is_empty() || bind_user.is_empty() {
         return Err(ApiError::Validation(
@@ -417,11 +410,7 @@ async fn join_domain(
     info!(domain = %domain, server = %server, "joining AD domain");
 
     // Extract workgroup (short name) from domain: "corp.local" -> "CORP"
-    let workgroup = domain
-        .split('.')
-        .next()
-        .unwrap_or(&domain)
-        .to_uppercase();
+    let workgroup = domain.split('.').next().unwrap_or(&domain).to_uppercase();
     let realm = domain.to_uppercase();
 
     // Step 1: Write AD-aware smb.conf
@@ -452,9 +441,8 @@ async fn join_domain(
          log level = 1\n"
     );
 
-    std::fs::write("/etc/samba/smb.conf", &smb_conf).map_err(|e| {
-        ApiError::Internal(format!("failed to write smb.conf: {e}"))
-    })?;
+    std::fs::write("/etc/samba/smb.conf", &smb_conf)
+        .map_err(|e| ApiError::Internal(format!("failed to write smb.conf: {e}")))?;
 
     // Step 2: Join the domain via `net ads join`
     // Extract a simple username from the bind DN for net ads join
@@ -470,7 +458,11 @@ async fn join_domain(
             .to_string()
     } else if bind_user.contains('@') {
         // UPN format: extract before @
-        bind_user.split('@').next().unwrap_or(&bind_user).to_string()
+        bind_user
+            .split('@')
+            .next()
+            .unwrap_or(&bind_user)
+            .to_string()
     } else {
         bind_user.clone()
     };
@@ -509,18 +501,10 @@ async fn join_domain(
 // POST /auth/ad/leave — leave AD domain
 // ---------------------------------------------------------------------------
 
-async fn leave_domain(
-    Extension(db): Extension<sfgw_db::Db>,
-) -> Result<Json<Value>, ApiError> {
-    let bind_user = meta_get(&db, "ad_bind_user")
-        .await?
-        .unwrap_or_default();
-    let bind_password = meta_get(&db, "ad_bind_password")
-        .await?
-        .unwrap_or_default();
-    let domain = meta_get(&db, "ad_domain")
-        .await?
-        .unwrap_or_default();
+async fn leave_domain(Extension(db): Extension<sfgw_db::Db>) -> Result<Json<Value>, ApiError> {
+    let bind_user = meta_get(&db, "ad_bind_user").await?.unwrap_or_default();
+    let bind_password = meta_get(&db, "ad_bind_password").await?.unwrap_or_default();
+    let domain = meta_get(&db, "ad_domain").await?.unwrap_or_default();
 
     info!(domain = %domain, "leaving AD domain");
 
@@ -533,7 +517,11 @@ async fn leave_domain(
             .unwrap_or(&bind_user)
             .to_string()
     } else if bind_user.contains('@') {
-        bind_user.split('@').next().unwrap_or(&bind_user).to_string()
+        bind_user
+            .split('@')
+            .next()
+            .unwrap_or(&bind_user)
+            .to_string()
     } else {
         bind_user.clone()
     };
@@ -561,9 +549,8 @@ async fn leave_domain(
          max log size = 1000\n\
          log level = 1\n";
 
-    std::fs::write("/etc/samba/smb.conf", smb_conf).map_err(|e| {
-        ApiError::Internal(format!("failed to write smb.conf: {e}"))
-    })?;
+    std::fs::write("/etc/samba/smb.conf", smb_conf)
+        .map_err(|e| ApiError::Internal(format!("failed to write smb.conf: {e}")))?;
 
     // Disable AD in meta
     meta_set(&db, "ad_enabled", "false").await?;
@@ -583,9 +570,7 @@ async fn leave_domain(
 // POST /auth/ad/sync — trigger manual user/group sync
 // ---------------------------------------------------------------------------
 
-async fn sync_users(
-    Extension(db): Extension<sfgw_db::Db>,
-) -> Result<Json<Value>, ApiError> {
+async fn sync_users(Extension(db): Extension<sfgw_db::Db>) -> Result<Json<Value>, ApiError> {
     info!("triggering AD user/group sync");
 
     // Get domain users via wbinfo
@@ -618,9 +603,7 @@ async fn sync_users(
 // GET /auth/ad/status — domain join status
 // ---------------------------------------------------------------------------
 
-async fn get_status(
-    Extension(db): Extension<sfgw_db::Db>,
-) -> Result<Json<Value>, ApiError> {
+async fn get_status(Extension(db): Extension<sfgw_db::Db>) -> Result<Json<Value>, ApiError> {
     // Check if joined via `net ads testjoin`
     let joined = Command::new("net")
         .args(["ads", "testjoin"])
@@ -630,10 +613,7 @@ async fn get_status(
 
     let last_sync = meta_get(&db, "ad_last_sync").await?.unwrap_or_default();
     let domain = meta_get(&db, "ad_domain").await?.unwrap_or_default();
-    let enabled = meta_get(&db, "ad_enabled")
-        .await?
-        .unwrap_or_default()
-        == "true";
+    let enabled = meta_get(&db, "ad_enabled").await?.unwrap_or_default() == "true";
 
     // Get user/group counts (best-effort)
     let user_count = run_wbinfo_list("-u").len();
@@ -704,9 +684,7 @@ fn restart_samba_services() {
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 warn!(service = svc, error = %stderr, "restart failed, trying systemctl");
                 // Fallback to systemctl
-                let _ = Command::new("systemctl")
-                    .args(["restart", svc])
-                    .output();
+                let _ = Command::new("systemctl").args(["restart", svc]).output();
             }
             Err(e) => {
                 warn!(service = svc, error = %e, "failed to restart");

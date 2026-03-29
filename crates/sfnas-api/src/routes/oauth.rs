@@ -182,7 +182,10 @@ pub fn public_router() -> Router {
 /// Build the protected OAuth router (requires auth).
 pub fn protected_router() -> Router {
     Router::new()
-        .route("/auth/oauth/config", get(get_config_handler).put(save_config_handler))
+        .route(
+            "/auth/oauth/config",
+            get(get_config_handler).put(save_config_handler),
+        )
         .route("/auth/oauth/test", post(test_discovery_handler))
 }
 
@@ -190,9 +193,7 @@ pub fn protected_router() -> Router {
 // GET /auth/oauth/status — public, used by login page
 // ---------------------------------------------------------------------------
 
-async fn oauth_status_handler(
-    Extension(db): Extension<sfgw_db::Db>,
-) -> impl IntoResponse {
+async fn oauth_status_handler(Extension(db): Extension<sfgw_db::Db>) -> impl IntoResponse {
     let enabled = meta_get(&db, META_OIDC_ENABLED)
         .await
         .map(|v| v == "true")
@@ -275,18 +276,22 @@ async fn oauth_providers_handler() -> impl IntoResponse {
 // GET /auth/oauth/config — protected, read config
 // ---------------------------------------------------------------------------
 
-async fn get_config_handler(
-    Extension(db): Extension<sfgw_db::Db>,
-) -> impl IntoResponse {
+async fn get_config_handler(Extension(db): Extension<sfgw_db::Db>) -> impl IntoResponse {
     let enabled = meta_get(&db, META_OIDC_ENABLED)
         .await
         .map(|v| v == "true")
         .unwrap_or(false);
-    let provider_name = meta_get(&db, META_OIDC_PROVIDER_NAME).await.unwrap_or_default();
-    let issuer_url = meta_get(&db, META_OIDC_ISSUER_URL).await.unwrap_or_default();
+    let provider_name = meta_get(&db, META_OIDC_PROVIDER_NAME)
+        .await
+        .unwrap_or_default();
+    let issuer_url = meta_get(&db, META_OIDC_ISSUER_URL)
+        .await
+        .unwrap_or_default();
     let client_id = meta_get(&db, META_OIDC_CLIENT_ID).await.unwrap_or_default();
     let has_secret = meta_get(&db, META_OIDC_CLIENT_SECRET).await.is_some();
-    let redirect_uri = meta_get(&db, META_OIDC_REDIRECT_URI).await.unwrap_or_default();
+    let redirect_uri = meta_get(&db, META_OIDC_REDIRECT_URI)
+        .await
+        .unwrap_or_default();
     let scopes = meta_get(&db, META_OIDC_SCOPES)
         .await
         .unwrap_or_else(|| "openid profile email".to_string());
@@ -306,7 +311,10 @@ async fn get_config_handler(
         has_client_secret: has_secret,
     };
 
-    (StatusCode::OK, Json(json!({ "success": true, "data": config })))
+    (
+        StatusCode::OK,
+        Json(json!({ "success": true, "data": config })),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -380,9 +388,7 @@ async fn save_config_handler(
 // POST /auth/oauth/test — protected, test OIDC discovery
 // ---------------------------------------------------------------------------
 
-async fn test_discovery_handler(
-    Extension(db): Extension<sfgw_db::Db>,
-) -> impl IntoResponse {
+async fn test_discovery_handler(Extension(db): Extension<sfgw_db::Db>) -> impl IntoResponse {
     let issuer_url = match meta_get(&db, META_OIDC_ISSUER_URL).await {
         Some(url) if !url.is_empty() => url,
         _ => {
@@ -624,8 +630,12 @@ async fn oauth_callback_handler(
         }
     };
     let client_id = meta_get(&db, META_OIDC_CLIENT_ID).await.unwrap_or_default();
-    let client_secret = meta_get(&db, META_OIDC_CLIENT_SECRET).await.unwrap_or_default();
-    let redirect_uri = meta_get(&db, META_OIDC_REDIRECT_URI).await.unwrap_or_default();
+    let client_secret = meta_get(&db, META_OIDC_CLIENT_SECRET)
+        .await
+        .unwrap_or_default();
+    let redirect_uri = meta_get(&db, META_OIDC_REDIRECT_URI)
+        .await
+        .unwrap_or_default();
     let auto_provision = meta_get(&db, META_OIDC_AUTO_PROVISION)
         .await
         .map(|v| v == "true")
@@ -734,13 +744,14 @@ async fn oauth_callback_handler(
     let client_ip = addr.ip().to_string();
     let fingerprint = crate::middleware::fingerprint_from_headers(&headers);
 
-    let (token, _expires_at) = match auth::create_session(&db, user.id, &client_ip, &fingerprint, "").await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("OAuth session creation failed: {e}");
-            return Redirect::temporary("/login?error=oauth_failed").into_response();
-        }
-    };
+    let (token, _expires_at) =
+        match auth::create_session(&db, user.id, &client_ip, &fingerprint, "").await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("OAuth session creation failed: {e}");
+                return Redirect::temporary("/login?error=oauth_failed").into_response();
+            }
+        };
 
     tracing::info!(
         username = user.username,
@@ -749,9 +760,8 @@ async fn oauth_callback_handler(
     );
 
     // Set session cookie and redirect to frontend
-    let cookie = format!(
-        "sfnas_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=86400"
-    );
+    let cookie =
+        format!("sfnas_session={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=86400");
 
     let mut response = Redirect::temporary("/").into_response();
     response.headers_mut().insert(

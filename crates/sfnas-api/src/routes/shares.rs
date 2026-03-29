@@ -10,7 +10,7 @@ use axum::extract::Path;
 use axum::routing::{delete, get, put};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use tracing::info;
 
@@ -107,8 +107,7 @@ fn validate_share_path(path: &str) -> Result<PathBuf, ApiError> {
 
 /// `GET /api/v1/shares` — list all SMB shares.
 async fn list_shares() -> Result<Json<Value>, ApiError> {
-    let content = std::fs::read_to_string("/etc/samba/smb.conf")
-        .unwrap_or_default();
+    let content = std::fs::read_to_string("/etc/samba/smb.conf").unwrap_or_default();
 
     let mut shares: Vec<Value> = Vec::new();
     let mut current_name: Option<String> = None;
@@ -190,9 +189,7 @@ fn share_from_template(
 }
 
 /// `POST /api/v1/shares` — create a new share.
-async fn create_share(
-    Json(body): Json<ShareRequest>,
-) -> Result<Json<Value>, ApiError> {
+async fn create_share(Json(body): Json<ShareRequest>) -> Result<Json<Value>, ApiError> {
     validate_share_name(&body.name)?;
     let share_path = validate_share_path(&body.path)?;
 
@@ -217,9 +214,8 @@ async fn create_share(
     }
 
     // Ensure the share directory exists
-    std::fs::create_dir_all(&share_path).map_err(|e| {
-        ApiError::Internal(format!("failed to create share directory: {e}"))
-    })?;
+    std::fs::create_dir_all(&share_path)
+        .map_err(|e| ApiError::Internal(format!("failed to create share directory: {e}")))?;
 
     let mut config = sfnas_share::SambaConfig::new("WORKGROUP");
     config.add_share(share)?;
@@ -388,8 +384,7 @@ async fn list_rsync_modules() -> Result<Json<Value>, ApiError> {
                     current_read_only = matches!(v.to_lowercase().as_str(), "yes" | "true" | "1");
                 }
                 "hosts allow" | "hosts_allow" => {
-                    current_hosts_allow =
-                        v.split_whitespace().map(String::from).collect();
+                    current_hosts_allow = v.split_whitespace().map(String::from).collect();
                 }
                 _ => {}
             }

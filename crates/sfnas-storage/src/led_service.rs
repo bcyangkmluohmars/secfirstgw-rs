@@ -18,8 +18,8 @@ use crate::{Bay, BayLedMode, BayState, DiskCache, SmartStatus};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::io::AsRawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -35,29 +35,29 @@ const GPIO_V2_LINE_FLAG_OUTPUT: u64 = 0x08;
 // Exact kernel struct layout — total sizeof(gpio_v2_line_request) = 592
 #[repr(C)]
 struct GpioV2LineRequest {
-    offsets: [u32; 64],          // 256
-    consumer: [u8; 32],          // 32
-    config: GpioV2LineConfig,    // 272
-    num_lines: u32,              // 4
-    event_buffer_size: u32,      // 4
-    _padding: [u32; 5],          // 20
-    fd: i32,                     // 4
-}                                // = 592
+    offsets: [u32; 64],       // 256
+    consumer: [u8; 32],       // 32
+    config: GpioV2LineConfig, // 272
+    num_lines: u32,           // 4
+    event_buffer_size: u32,   // 4
+    _padding: [u32; 5],       // 20
+    fd: i32,                  // 4
+} // = 592
 
 #[repr(C)]
 struct GpioV2LineConfig {
-    flags: u64,                  // 8
-    num_attrs: u32,              // 4
-    _padding: [u32; 5],          // 20
+    flags: u64,                        // 8
+    num_attrs: u32,                    // 4
+    _padding: [u32; 5],                // 20
     attrs: [GpioV2LineConfigAttr; 10], // 240
-}                                // = 272
+} // = 272
 
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct GpioV2LineConfigAttr {
-    attr: [u8; 16],              // gpio_v2_line_attribute
-    mask: u64,                   // 8
-}                                // = 24
+    attr: [u8; 16], // gpio_v2_line_attribute
+    mask: u64,      // 8
+} // = 24
 
 #[repr(C)]
 struct GpioV2LineValues {
@@ -86,7 +86,10 @@ impl GpioLines {
                 flags: GPIO_V2_LINE_FLAG_OUTPUT,
                 num_attrs: 0,
                 _padding: [0; 5],
-                attrs: [GpioV2LineConfigAttr { attr: [0; 16], mask: 0 }; 10],
+                attrs: [GpioV2LineConfigAttr {
+                    attr: [0; 16],
+                    mask: 0,
+                }; 10],
             },
             num_lines: pins.len() as u32,
             event_buffer_size: 0,
@@ -105,9 +108,7 @@ impl GpioLines {
 
         // SAFETY: Valid fd from /dev/gpiochipN, req is correctly sized GpioV2LineRequest.
         // Kernel writes the granted line fd into req.fd.
-        let ret = unsafe {
-            libc::ioctl(chip.as_raw_fd(), GPIO_V2_GET_LINE_IOCTL as _, &mut req)
-        };
+        let ret = unsafe { libc::ioctl(chip.as_raw_fd(), GPIO_V2_GET_LINE_IOCTL as _, &mut req) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -139,9 +140,7 @@ impl GpioLines {
 
         let vals = GpioV2LineValues { bits, mask };
         // SAFETY: self.fd is the valid line request fd, vals is correctly sized.
-        let _ = unsafe {
-            libc::ioctl(self.fd, GPIO_V2_LINE_SET_VALUES_IOCTL as _, &vals)
-        };
+        let _ = unsafe { libc::ioctl(self.fd, GPIO_V2_LINE_SET_VALUES_IOCTL as _, &vals) };
     }
 }
 
@@ -227,12 +226,16 @@ fn run(cache: DiskCache, stop: Arc<AtomicBool>) {
             let mode = if bay.state != BayState::Present {
                 BayLedMode::Off
             } else {
-                let disk = bay.map_to_disk().ok().and_then(|path| {
-                    disks.iter().find(|d| d.path == path)
-                });
+                let disk = bay
+                    .map_to_disk()
+                    .ok()
+                    .and_then(|path| disks.iter().find(|d| d.path == path));
 
                 match disk {
-                    Some(d) if d.is_failing() || matches!(d.health.smart_status, SmartStatus::Failed(_)) => {
+                    Some(d)
+                        if d.is_failing()
+                            || matches!(d.health.smart_status, SmartStatus::Failed(_)) =>
+                    {
                         BayLedMode::SmartWarning
                     }
                     _ if raid_degraded => BayLedMode::Degraded,

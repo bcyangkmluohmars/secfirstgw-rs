@@ -150,7 +150,11 @@ pub fn build_app(db: &sfgw_db::Db, static_dir: Option<&Path>) -> Router {
 /// Start the API server over TLS 1.3.
 ///
 /// Also spawns an HTTP :80 → HTTPS redirect listener.
-pub async fn serve(db: &sfgw_db::Db, bind_addr: SocketAddr, static_dir: Option<&Path>) -> Result<(), ApiError> {
+pub async fn serve(
+    db: &sfgw_db::Db,
+    bind_addr: SocketAddr,
+    static_dir: Option<&Path>,
+) -> Result<(), ApiError> {
     let app = build_app(db, static_dir);
 
     // HTTP → HTTPS redirect

@@ -10,7 +10,7 @@ use axum::extract::Path;
 use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use tracing::{error, info};
 
@@ -21,10 +21,7 @@ fn validate_array_name(name: &str) -> Result<(), ApiError> {
             "array name must be 1-32 characters".to_string(),
         ));
     }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err(ApiError::Validation(
             "array name must contain only alphanumeric characters and hyphens".to_string(),
         ));
@@ -36,7 +33,9 @@ fn validate_array_name(name: &str) -> Result<(), ApiError> {
 fn validate_disk_path(disk: &str) -> Result<(), ApiError> {
     let p = std::path::Path::new(disk);
     if !p.is_absolute() || !disk.starts_with("/dev/") {
-        return Err(ApiError::Validation("invalid disk path: must be an absolute /dev/ path".to_string()));
+        return Err(ApiError::Validation(
+            "invalid disk path: must be an absolute /dev/ path".to_string(),
+        ));
     }
     if disk.contains("..") {
         return Err(ApiError::Validation(
@@ -147,7 +146,7 @@ async fn initialize_storage(
         _ => {
             return Err(ApiError::Validation(
                 "invalid RAID level: use 0, 1, 5, or 10".to_string(),
-            ))
+            ));
         }
     };
 
@@ -212,10 +211,11 @@ async fn initialize_storage(
 
     // ── Step 2: Create RAID array ────────────────────────────────────
     let part_refs: Vec<&std::path::Path> = partition_paths.iter().map(|p| p.as_path()).collect();
-    let array = sfnas_storage::RaidArray::create(&body.name, raid_level, &part_refs).map_err(|e| {
-        error!(name = body.name, error = %e, "RAID creation failed during initialization");
-        e
-    })?;
+    let array =
+        sfnas_storage::RaidArray::create(&body.name, raid_level, &part_refs).map_err(|e| {
+            error!(name = body.name, error = %e, "RAID creation failed during initialization");
+            e
+        })?;
 
     info!(
         name = array.name,
@@ -336,7 +336,9 @@ async fn initialize_storage(
 }
 
 /// `GET /api/v1/storage/disks` — list all disks with SMART health (from cache).
-async fn list_disks(Extension(disk_cache): Extension<sfnas_storage::DiskCache>) -> Result<Json<Value>, ApiError> {
+async fn list_disks(
+    Extension(disk_cache): Extension<sfnas_storage::DiskCache>,
+) -> Result<Json<Value>, ApiError> {
     let disks = disk_cache.get();
 
     Ok(Json(json!({
@@ -346,7 +348,9 @@ async fn list_disks(Extension(disk_cache): Extension<sfnas_storage::DiskCache>) 
 }
 
 /// `GET /api/v1/storage/arrays` — list all RAID arrays (from cache).
-async fn list_arrays(Extension(disk_cache): Extension<sfnas_storage::DiskCache>) -> Result<Json<Value>, ApiError> {
+async fn list_arrays(
+    Extension(disk_cache): Extension<sfnas_storage::DiskCache>,
+) -> Result<Json<Value>, ApiError> {
     let arrays = disk_cache.get_arrays();
 
     Ok(Json(json!({
@@ -356,9 +360,7 @@ async fn list_arrays(Extension(disk_cache): Extension<sfnas_storage::DiskCache>)
 }
 
 /// `POST /api/v1/storage/arrays` — create a new RAID array.
-async fn create_array(
-    Json(body): Json<CreateArrayRequest>,
-) -> Result<Json<Value>, ApiError> {
+async fn create_array(Json(body): Json<CreateArrayRequest>) -> Result<Json<Value>, ApiError> {
     // Validate array name: alphanumeric + hyphens only, 1-32 chars
     if body.name.is_empty() || body.name.len() > 32 {
         return Err(ApiError::Validation(
@@ -383,12 +385,14 @@ async fn create_array(
         _ => {
             return Err(ApiError::Validation(
                 "invalid RAID level: use 0, 1, 5, or 10".to_string(),
-            ))
+            ));
         }
     };
 
     if body.disks.is_empty() {
-        return Err(ApiError::Validation("at least one disk required".to_string()));
+        return Err(ApiError::Validation(
+            "at least one disk required".to_string(),
+        ));
     }
 
     // Validate disk paths: must be absolute and start with /dev/
@@ -426,13 +430,8 @@ async fn create_array(
 /// `DELETE /api/v1/storage/arrays/:name` — stop (deactivate) an array.
 async fn delete_array(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
     // Validate the name
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
-        return Err(ApiError::Validation(
-            "invalid array name".to_string(),
-        ));
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(ApiError::Validation("invalid array name".to_string()));
     }
 
     let device = resolve_array_device(&name)?;
@@ -469,9 +468,8 @@ async fn array_status(Path(name): Path<String>) -> Result<Json<Value>, ApiError>
         .ok()
         .and_then(|target| target.file_name().map(|n| n.to_string_lossy().to_string()));
 
-    let md_device_name = resolved_device.or_else(|| {
-        device.file_name().map(|n| n.to_string_lossy().to_string())
-    });
+    let md_device_name =
+        resolved_device.or_else(|| device.file_name().map(|n| n.to_string_lossy().to_string()));
 
     let mdstat_entry = md_device_name
         .as_ref()
@@ -480,11 +478,9 @@ async fn array_status(Path(name): Path<String>) -> Result<Json<Value>, ApiError>
     // Determine display status string and optional progress values
     let (status_str, rebuild_progress, check_progress) = if let Some(entry) = mdstat_entry {
         match entry.recovery_action.as_deref() {
-            Some("recovery") | Some("reshape") | Some("resync") => (
-                "Rebuilding".to_string(),
-                entry.recovery_progress,
-                None,
-            ),
+            Some("recovery") | Some("reshape") | Some("resync") => {
+                ("Rebuilding".to_string(), entry.recovery_progress, None)
+            }
             Some("check") => ("Checking".to_string(), None, entry.recovery_progress),
             _ => (status_label(&detail.status).to_string(), None, None),
         }
@@ -652,19 +648,20 @@ async fn list_bays(
 
             // Try to map this bay to a /dev/sdX and find the matching cached disk
             if let Ok(dev_path) = bay.map_to_disk()
-                && let Some(disk) = disks.iter().find(|d| d.path == dev_path) {
-                    entry["disk_model"] = json!(disk.model.trim());
-                    entry["disk_serial"] = json!(disk.serial.trim());
-                    entry["size_bytes"] = json!(disk.size_bytes);
-                    entry["rotational"] = json!(disk.rotational);
-                    entry["temperature_celsius"] = json!(disk.health.temperature_celsius);
-                    entry["smart_status"] = json!(match &disk.health.smart_status {
-                        sfnas_storage::SmartStatus::Passed => "healthy",
-                        sfnas_storage::SmartStatus::Failed(_) => "failing",
-                        sfnas_storage::SmartStatus::Unknown => "unknown",
-                    });
-                    entry["device"] = json!(dev_path);
-                }
+                && let Some(disk) = disks.iter().find(|d| d.path == dev_path)
+            {
+                entry["disk_model"] = json!(disk.model.trim());
+                entry["disk_serial"] = json!(disk.serial.trim());
+                entry["size_bytes"] = json!(disk.size_bytes);
+                entry["rotational"] = json!(disk.rotational);
+                entry["temperature_celsius"] = json!(disk.health.temperature_celsius);
+                entry["smart_status"] = json!(match &disk.health.smart_status {
+                    sfnas_storage::SmartStatus::Passed => "healthy",
+                    sfnas_storage::SmartStatus::Failed(_) => "failing",
+                    sfnas_storage::SmartStatus::Unknown => "unknown",
+                });
+                entry["device"] = json!(dev_path);
+            }
 
             entry
         })
@@ -733,9 +730,8 @@ fn validate_btrfs_name(name: &str) -> Result<(), ApiError> {
 
 /// Require a Btrfs mount point or return a descriptive 422 error.
 fn require_btrfs_mount() -> Result<PathBuf, ApiError> {
-    find_btrfs_mount().ok_or_else(|| {
-        ApiError::Validation("no Btrfs filesystem is currently mounted".to_string())
-    })
+    find_btrfs_mount()
+        .ok_or_else(|| ApiError::Validation("no Btrfs filesystem is currently mounted".to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -824,9 +820,7 @@ async fn delete_subvolume(Path(name): Path<String>) -> Result<Json<Value>, ApiEr
 }
 
 /// `POST /api/v1/storage/btrfs/snapshots` — create a read-only snapshot.
-async fn create_snapshot(
-    Json(body): Json<CreateSnapshotRequest>,
-) -> Result<Json<Value>, ApiError> {
+async fn create_snapshot(Json(body): Json<CreateSnapshotRequest>) -> Result<Json<Value>, ApiError> {
     validate_btrfs_name(&body.subvolume)?;
 
     // Generate a timestamp name if none provided.
@@ -953,28 +947,16 @@ pub fn critical_router() -> Router {
     Router::new()
         .route("/storage/arrays", post(create_array))
         .route("/storage/arrays/{name}", delete(delete_array))
-        .route(
-            "/storage/arrays/{name}/add-disk",
-            post(add_disk_to_array),
-        )
+        .route("/storage/arrays/{name}/add-disk", post(add_disk_to_array))
         .route(
             "/storage/arrays/{name}/remove-disk",
             post(remove_disk_from_array),
         )
-        .route(
-            "/storage/arrays/{name}/scrub",
-            post(start_array_scrub),
-        )
+        .route("/storage/arrays/{name}/scrub", post(start_array_scrub))
         .route("/storage/initialize", post(initialize_storage))
         .route("/storage/btrfs/subvolumes", post(create_subvolume))
-        .route(
-            "/storage/btrfs/subvolumes/{name}",
-            delete(delete_subvolume),
-        )
+        .route("/storage/btrfs/subvolumes/{name}", delete(delete_subvolume))
         .route("/storage/btrfs/snapshots", post(create_snapshot))
-        .route(
-            "/storage/btrfs/snapshots/{name}",
-            delete(delete_snapshot),
-        )
+        .route("/storage/btrfs/snapshots/{name}", delete(delete_snapshot))
         .route("/storage/btrfs/scrub", post(btrfs_scrub_start))
 }

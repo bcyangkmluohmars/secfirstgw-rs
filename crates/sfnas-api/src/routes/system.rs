@@ -8,7 +8,7 @@ use crate::error::ApiError;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::process::Command;
 use tracing::{info, warn};
 
@@ -86,17 +86,14 @@ async fn get_network() -> Result<Json<Value>, ApiError> {
 
         let iface_dir = entry.path();
 
-        let operstate = read_sysfs_file(&iface_dir.join("operstate"))
-            .unwrap_or_else(|| "unknown".to_string());
+        let operstate =
+            read_sysfs_file(&iface_dir.join("operstate")).unwrap_or_else(|| "unknown".to_string());
 
-        let mac = read_sysfs_file(&iface_dir.join("address"))
-            .unwrap_or_default();
+        let mac = read_sysfs_file(&iface_dir.join("address")).unwrap_or_default();
 
-        let speed = read_sysfs_file(&iface_dir.join("speed"))
-            .and_then(|s| s.parse::<u32>().ok());
+        let speed = read_sysfs_file(&iface_dir.join("speed")).and_then(|s| s.parse::<u32>().ok());
 
-        let mtu = read_sysfs_file(&iface_dir.join("mtu"))
-            .and_then(|s| s.parse::<u32>().ok());
+        let mtu = read_sysfs_file(&iface_dir.join("mtu")).and_then(|s| s.parse::<u32>().ok());
 
         // Get IP addresses from `ip addr show <iface>`
         let ip_addrs = get_ip_addresses(&name_str);
@@ -126,8 +123,7 @@ pub fn router() -> Router {
 
 /// Critical system operations (destructive — strict rate limit).
 pub fn critical_router() -> Router {
-    Router::new()
-        .route("/system/reboot", post(reboot))
+    Router::new().route("/system/reboot", post(reboot))
 }
 
 // ---------------------------------------------------------------------------
@@ -161,10 +157,7 @@ fn read_syslog(lines: u32) -> Option<Vec<String>> {
 }
 
 fn read_dmesg(lines: u32) -> Option<Vec<String>> {
-    let output = Command::new("dmesg")
-        .arg("--human")
-        .output()
-        .ok()?;
+    let output = Command::new("dmesg").arg("--human").output().ok()?;
 
     if !output.status.success() {
         return None;

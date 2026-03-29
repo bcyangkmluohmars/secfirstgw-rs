@@ -93,13 +93,13 @@ jobs:
         if: matrix.use_cross == false
         run: |
           cargo build --release --bin sfgw --target ${{ matrix.target }}
-          cargo build --release --bin sfnas --target ${{ matrix.target }}
+          cargo build --release --bin secfirstnas --target ${{ matrix.target }}
 
       - name: Build release (cross)
         if: matrix.use_cross == true
         run: |
           cross build --release --bin sfgw --target ${{ matrix.target }}
-          cross build --release --bin sfnas --target ${{ matrix.target }}
+          cross build --release --bin secfirstnas --target ${{ matrix.target }}
 
       - name: Package Gateway
         run: |
@@ -112,7 +112,7 @@ jobs:
       - name: Package NAS
         run: |
           mkdir -p staging-nas
-          cp target/${{ matrix.target }}/release/sfnas staging-nas/
+          cp target/${{ matrix.target }}/release/secfirstnas staging-nas/
           cp -r web-nas/dist staging-nas/
           cp scripts/secfirstnas.initd staging-nas/
           cp scripts/nas-firewall.nft staging-nas/
