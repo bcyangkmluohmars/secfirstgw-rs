@@ -491,15 +491,15 @@ async fn kill_port53_holders() {
 
         // Extract PID from "pid=NNNN" in the line
         for segment in line.split(',') {
-            if let Some(pid_str) = segment.strip_prefix("pid=") {
-                if let Ok(pid) = pid_str.trim_end_matches(')').parse::<u32>() {
-                    // Don't kill our own managed instance
-                    if Some(pid) == our_pid {
-                        continue;
-                    }
-                    tracing::warn!(pid, "killing foreign process on port 53 to reclaim DNS");
-                    let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+            if let Some(pid_str) = segment.strip_prefix("pid=")
+                && let Ok(pid) = pid_str.trim_end_matches(')').parse::<u32>()
+            {
+                // Don't kill our own managed instance
+                if Some(pid) == our_pid {
+                    continue;
                 }
+                tracing::warn!(pid, "killing foreign process on port 53 to reclaim DNS");
+                let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
             }
         }
     }

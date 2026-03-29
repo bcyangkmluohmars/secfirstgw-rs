@@ -395,10 +395,10 @@ fn build_switch_config(
     // Build PVID map: each port → MC index of its PVID VLAN
     let mut pvids: Vec<(u8, u8)> = Vec::new();
     for port_cfg in port_configs {
-        if let Some(switch_port) = iface_to_switch_port(&port_cfg.name, sw) {
-            if let Some(&mc_idx) = vid_to_mc.get(&port_cfg.pvid) {
-                pvids.push((switch_port, mc_idx));
-            }
+        if let Some(switch_port) = iface_to_switch_port(&port_cfg.name, sw)
+            && let Some(&mc_idx) = vid_to_mc.get(&port_cfg.pvid)
+        {
+            pvids.push((switch_port, mc_idx));
         }
     }
     // CPU port → MC index for VLAN 1 (catch-all)

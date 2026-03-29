@@ -124,10 +124,10 @@ fn find_eeprom_mtd() -> Option<String> {
     let default = "/dev/mtd4ro";
     if Path::new(default).exists() {
         // Verify it's actually named "eeprom"
-        if let Some(name) = mtd_partition_name("mtd4") {
-            if name == "eeprom" {
-                return Some(default.to_string());
-            }
+        if let Some(name) = mtd_partition_name("mtd4")
+            && name == "eeprom"
+        {
+            return Some(default.to_string());
         }
         // Even if we can't verify the name, try it (might work on minimal systems)
     }

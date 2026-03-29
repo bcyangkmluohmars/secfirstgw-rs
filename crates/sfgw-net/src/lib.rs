@@ -271,13 +271,13 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
     tokio::spawn(async move {
         let wan_configs = wan::list_wan_configs(&db_wan).await.unwrap_or_default();
         for wc in &wan_configs {
-            if wc.enabled {
-                if let Err(e) = wan::apply_wan_config(wc).await {
-                    tracing::warn!(
-                        interface = %wc.interface,
-                        "failed to apply WAN config at boot: {e}"
-                    );
-                }
+            if wc.enabled
+                && let Err(e) = wan::apply_wan_config(wc).await
+            {
+                tracing::warn!(
+                    interface = %wc.interface,
+                    "failed to apply WAN config at boot: {e}"
+                );
             }
         }
     });
@@ -389,9 +389,8 @@ fn detect_interfaces_for_platform(
                         let port_name = port_def.iface;
                         let n: Option<u8> =
                             port_name.strip_prefix("eth").and_then(|s| s.parse().ok());
-                        let is_switch_port = n.map_or(false, |p| {
-                            sw.lan_ports.contains(&p) || sw.mgmt_port == Some(p)
-                        });
+                        let is_switch_port =
+                            n.is_some_and(|p| sw.lan_ports.contains(&p) || sw.mgmt_port == Some(p));
                         if !is_switch_port {
                             continue;
                         }

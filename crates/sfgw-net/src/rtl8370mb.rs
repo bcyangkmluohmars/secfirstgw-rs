@@ -51,7 +51,7 @@ const TABLE_READ_DATA_BASE: u16 = 0x0520; // 0x0520-0x0522 (3 regs)
 // Table access command: (op << 3) | target
 // op: 0=read, 1=write. target: 3=CVLAN
 const TABLE_CMD_WRITE_CVLAN: u16 = (1 << 3) | 3; // 0x000B
-const TABLE_CMD_READ_CVLAN: u16 = (0 << 3) | 3; // 0x0003
+const TABLE_CMD_READ_CVLAN: u16 = 3; // 0x0003
 
 // Switch Global Control Register — VLAN enable bits
 const SGCR: u16 = 0x0000;
@@ -338,7 +338,7 @@ impl Rtl8370mb {
         self.smi.with_unlock(|smi| {
             let reg = VLAN_PVID_CTRL_BASE + u16::from(port / 2);
             let val = smi.smi_read(reg)?;
-            if port % 2 == 0 {
+            if port.is_multiple_of(2) {
                 Ok((val & 0x1F) as u8)
             } else {
                 Ok(((val >> 8) & 0x1F) as u8)
@@ -408,15 +408,17 @@ impl Rtl8370mb {
                 // Verify by reading back
                 let rb = self.read_vlan_4k(smi, entry.vid)?;
                 if rb.member != entry.member || rb.untag != entry.untag || rb.fid != entry.fid {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!(
-                            "4K VLAN verify failed vid={}: wrote mbr=0x{:03X} untag=0x{:03X} fid={}, \
-                             read mbr=0x{:03X} untag=0x{:03X} fid={}",
-                            entry.vid, entry.member, entry.untag, entry.fid,
-                            rb.member, rb.untag, rb.fid,
-                        ),
-                    ));
+                    return Err(std::io::Error::other(format!(
+                        "4K VLAN verify failed vid={}: wrote mbr=0x{:03X} untag=0x{:03X} fid={}, \
+                         read mbr=0x{:03X} untag=0x{:03X} fid={}",
+                        entry.vid,
+                        entry.member,
+                        entry.untag,
+                        entry.fid,
+                        rb.member,
+                        rb.untag,
+                        rb.fid,
+                    )));
                 }
             }
 
@@ -447,12 +449,12 @@ impl Rtl8370mb {
 
             // 0x1311: set individual bits via read-modify-write
             let mut reg = smi.smi_read(0x1311)?;
-            reg = (reg & !0x0003) | 0x0002;  // bits[1:0] speed = 2 (1G)
-            reg = set_bit(reg, 2, true);      // duplex = full
-            reg = set_bit(reg, 4, true);      // link = up
-            reg = set_bit(reg, 5, false);     // rxpause = 0
-            reg = set_bit(reg, 6, false);     // txpause = 0
-            reg = set_bit(reg, 12, true);     // forcemode = on
+            reg = (reg & !0x0003) | 0x0002; // bits[1:0] speed = 2 (1G)
+            reg = set_bit(reg, 2, true); // duplex = full
+            reg = set_bit(reg, 4, true); // link = up
+            reg = set_bit(reg, 5, false); // rxpause = 0
+            reg = set_bit(reg, 6, false); // txpause = 0
+            reg = set_bit(reg, 12, true); // forcemode = on
             smi.smi_write(0x1311, reg)?;
 
             // Link toggle: clear bit 4, then set bit 4 (forces MAC re-link)
@@ -461,15 +463,18 @@ impl Rtl8370mb {
 
             // Mirror to SDS_MISC (0x1D11) — SGMII SerDes side
             let mut sds = smi.smi_read(0x1D11)?;
-            sds = set_bit(sds, 10, true);               // CFG_SGMII_FDUP = 1
-            sds = (sds & !0x0180) | (0x0002 << 7);      // CFG_SGMII_SPD = 2 (1G)
-            sds = set_bit(sds, 9, true);                 // CFG_SGMII_LINK = 1
-            sds = set_bit(sds, 13, false);               // CFG_SGMII_TXFC = 0
-            sds = set_bit(sds, 14, false);               // CFG_SGMII_RXFC = 0
+            sds = set_bit(sds, 10, true); // CFG_SGMII_FDUP = 1
+            sds = (sds & !0x0180) | (0x0002 << 7); // CFG_SGMII_SPD = 2 (1G)
+            sds = set_bit(sds, 9, true); // CFG_SGMII_LINK = 1
+            sds = set_bit(sds, 13, false); // CFG_SGMII_TXFC = 0
+            sds = set_bit(sds, 14, false); // CFG_SGMII_RXFC = 0
             smi.smi_write(0x1D11, sds)?;
 
             let ext1_verify = smi.smi_read(0x1311)?;
-            tracing::info!(ext1 = format!("0x{ext1_verify:04X}"), "EXT1 force after config");
+            tracing::info!(
+                ext1 = format!("0x{ext1_verify:04X}"),
+                "EXT1 force after config"
+            );
 
             // Set VLAN egress tag mode to ORIGINAL (0) for all ports.
             // PORT_MISC_CFG bits[5:4] = egress mode. Default on RTL8370B is
