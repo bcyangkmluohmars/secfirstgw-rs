@@ -96,11 +96,11 @@ jobs:
           fi
           echo "No hardcoded secrets detected"
 
-      # No println! in library code
-      - name: Check for println! in library code
+      # No println! in any crate
+      - name: Check for println! in crate code
         run: |
           failed=0
-          for f in $(find crates/ -name '*.rs' -not -path '*/sfgw-cli/*' -not -path '*/sfnas-cli/*'); do
+          for f in $(find crates/ -name '*.rs'); do
             # Skip test modules
             if grep -n 'println!' "$f" | grep -v '#\[cfg(test)\]' | grep -v 'mod tests' | grep -v '//'; then
               # Check if the println is inside a test block
@@ -127,7 +127,6 @@ jobs:
           # Find unwrap()/expect() outside of test modules and comments
           # This is a best-effort grep — some false positives from test code are OK
           hits=$(grep -rn '\.unwrap()' crates/ --include='*.rs' \
-            | grep -v 'sfgw-cli/' \
             | grep -v '#\[test\]' \
             | grep -v 'mod tests' \
             | grep -v '// INVARIANT:' \

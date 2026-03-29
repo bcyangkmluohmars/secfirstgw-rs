@@ -271,10 +271,10 @@ fn print_version_info() {
         .map(format_duration)
         .unwrap_or_else(|| "unknown".to_string());
 
-    println!("secfirstNAS v{VERSION}");
-    println!("Hardware: {model}");
-    println!("Kernel:   {kernel}");
-    println!("Uptime:   {uptime}");
+    info!("secfirstNAS v{VERSION}");
+    info!("Hardware: {model}");
+    info!("Kernel:   {kernel}");
+    info!("Uptime:   {uptime}");
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +286,7 @@ async fn main() -> Result<()> {
     // Ensure panics in ANY thread (LED service, storage cache, etc.)
     // produce visible output instead of a silent exit 255.
     std::panic::set_hook(Box::new(|info| {
-        eprintln!("PANIC in thread {:?}: {info}", std::thread::current().name());
+        error!("PANIC in thread {:?}: {info}", std::thread::current().name());
     }));
 
     let cli = Cli::parse();
@@ -302,7 +302,7 @@ async fn main() -> Result<()> {
             // No subcommand given -- show help
             use clap::CommandFactory;
             Cli::command().print_help()?;
-            println!();
+            info!("");
             return Ok(());
         }
     };
@@ -336,9 +336,9 @@ async fn main() -> Result<()> {
 
     if let Err(ref e) = result {
         // Print a human-readable error chain, not raw Debug output
-        eprintln!("error: {e}");
+        error!("{e}");
         for cause in e.chain().skip(1) {
-            eprintln!("  caused by: {cause}");
+            error!("  caused by: {cause}");
         }
         std::process::exit(1);
     }
@@ -359,12 +359,12 @@ async fn cmd_status() -> Result<()> {
         .unwrap_or_else(|| "unknown".to_string());
     let load = read_load_average().unwrap_or_else(|| "unknown".to_string());
 
-    println!("secfirstNAS v{VERSION} -- {model}");
-    println!("Kernel: {kernel} | Uptime: {uptime} | Load: {load}");
+    info!("secfirstNAS v{VERSION} -- {model}");
+    info!("Kernel: {kernel} | Uptime: {uptime} | Load: {load}");
 
     // -- Bays -----------------------------------------------------------
-    println!();
-    println!("Bays:");
+    info!("");
+    info!("Bays:");
 
     let bays = Bay::read_all();
     let disks = Disk::list_all().unwrap_or_default();
@@ -393,29 +393,29 @@ async fn cmd_status() -> Result<()> {
                     let health_str = format_smart_status(&disk.health.smart_status);
                     let size = format_bytes(disk.size_bytes);
                     let kind = if disk.rotational { "HDD" } else { "SSD" };
-                    println!(
+                    info!(
                         "  [{slot_num}] * {kind} Present -- {disk_model} ({size}) [{health_str}{temp}]",
                         disk_model = disk.model.trim(),
                     );
                 } else {
-                    println!("  [{slot_num}] * HDD Present -- (no details available)");
+                    info!("  [{slot_num}] * HDD Present -- (no details available)");
                 }
             }
             BayState::Empty => {
-                println!("  [{slot_num}] o Empty");
+                info!("  [{slot_num}] o Empty");
             }
             BayState::Fault => {
-                println!("  [{slot_num}] ! FAULT");
+                info!("  [{slot_num}] ! FAULT");
             }
         }
     }
 
     // -- Fans & Temperatures --------------------------------------------
-    println!();
-    println!("Fans & Temperatures:");
+    info!("");
+    info!("Fans & Temperatures:");
     let thermal = ThermalManager::new();
     let thermal_status = thermal.read_status();
-    println!("  Profile: {}", thermal_status.active_profile.name());
+    info!("  Profile: {}", thermal_status.active_profile.name());
     for i in 0..FAN_COUNT {
         let rpm = thermal_status.fan_rpm[i]
             .map(|r| format!("{r} RPM"))
@@ -423,53 +423,53 @@ async fn cmd_status() -> Result<()> {
         let pwm = thermal_status.pwm_values[i]
             .map(|p| format!("PWM {p}"))
             .unwrap_or_else(|| "N/A".to_string());
-        println!("  Fan {}: {rpm} ({pwm})", i + 1);
+        info!("  Fan {}: {rpm} ({pwm})", i + 1);
     }
     print_thermal_temps(&thermal_status);
 
     // -- Arrays ---------------------------------------------------------
-    println!();
-    println!("Arrays:");
+    info!("");
+    info!("Arrays:");
     let arrays = RaidArray::scan().unwrap_or_default();
     if arrays.is_empty() {
-        println!("  (none)");
+        info!("  (none)");
     } else {
         for line in &arrays {
-            println!("  {line}");
+            info!("  {line}");
         }
     }
 
     // -- HW Engines -----------------------------------------------------
-    println!();
-    println!("Hardware Engines:");
+    info!("");
+    info!("Hardware Engines:");
     let sgpo_ok = Path::new(SGPO_DRIVER_PATH).exists();
-    println!("  SGPO (bay LEDs):     {}", if sgpo_ok { "loaded" } else { "NOT FOUND" });
+    info!("  SGPO (bay LEDs):     {}", if sgpo_ok { "loaded" } else { "NOT FOUND" });
     let ssm_ok = Path::new(AL_SSM_PATH).exists();
-    println!("  al_ssm (HW crypto):  {}", if ssm_ok { "loaded" } else { "NOT FOUND" });
+    info!("  al_ssm (HW crypto):  {}", if ssm_ok { "loaded" } else { "NOT FOUND" });
     let dma_ok = Path::new(AL_DMA_PATH).exists();
-    println!("  al_dma (HW parity):  {}", if dma_ok { "loaded" } else { "NOT FOUND" });
+    info!("  al_dma (HW parity):  {}", if dma_ok { "loaded" } else { "NOT FOUND" });
 
     // -- Shares ---------------------------------------------------------
-    println!();
-    println!("Shares:");
+    info!("");
+    info!("Shares:");
     let shares = parse_smb_shares();
     if shares.is_empty() {
-        println!("  (none)");
+        info!("  (none)");
     } else {
         for (name, path) in &shares {
-            println!("  {name:<16} {path}");
+            info!("  {name:<16} {path}");
         }
     }
 
     // -- Network --------------------------------------------------------
-    println!();
-    println!("Network:");
+    info!("");
+    info!("Network:");
     let ifaces = list_network_interfaces();
     if ifaces.is_empty() {
-        println!("  (no interfaces detected)");
+        info!("  (no interfaces detected)");
     } else {
         for line in &ifaces {
-            println!("  {line}");
+            info!("  {line}");
         }
     }
 
@@ -478,24 +478,24 @@ async fn cmd_status() -> Result<()> {
 
 /// `secfirstnas init` -- first-time setup wizard (non-interactive).
 async fn cmd_init() -> Result<()> {
-    println!("=== secfirstNAS First-Time Setup ===");
-    println!();
+    info!("=== secfirstNAS First-Time Setup ===");
+    info!("");
 
     // 1. Detect hardware
-    println!("[1/4] Detecting hardware...");
+    info!("[1/4] Detecting hardware...");
     let model = detect_hardware_model().unwrap_or_else(|| "Unknown hardware".to_string());
-    println!("  Model: {model}");
+    info!("  Model: {model}");
 
     let kernel = read_kernel_version().unwrap_or_else(|| "unknown".to_string());
-    println!("  Kernel: {kernel}");
+    info!("  Kernel: {kernel}");
 
     // 2. Scan bays
-    println!();
-    println!("[2/4] Scanning disk bays...");
+    info!("");
+    info!("[2/4] Scanning disk bays...");
     let bays = Bay::read_all();
     let present_count = bays.iter().filter(|b| b.state == BayState::Present).count();
     let total_bays = bays.len();
-    println!("  {present_count}/{total_bays} bays populated");
+    info!("  {present_count}/{total_bays} bays populated");
 
     let disks = Disk::list_all().unwrap_or_default();
     let mut disk_infos: Vec<Disk> = Vec::new();
@@ -503,23 +503,23 @@ async fn cmd_init() -> Result<()> {
         match Disk::from_path(disk_path) {
             Ok(d) => {
                 let size = format_bytes(d.size_bytes);
-                println!("  {} -- {} ({size})", d.path.display(), d.model.trim());
+                info!("  {} -- {} ({size})", d.path.display(), d.model.trim());
                 disk_infos.push(d);
             }
             Err(e) => {
                 warn!(path = %disk_path.display(), error = %e, "cannot read disk");
-                println!("  {} -- read error: {e}", disk_path.display());
+                info!("  {} -- read error: {e}", disk_path.display());
             }
         }
     }
 
     // 3. Suggest RAID level
-    println!();
-    println!("[3/4] RAID recommendation...");
+    info!("");
+    info!("[3/4] RAID recommendation...");
     let disk_count = disk_infos.len();
     let (suggested_level, suggestion) = suggest_raid_level(disk_count);
-    println!("  Disks available: {disk_count}");
-    println!("  Recommendation:  {suggestion}");
+    info!("  Disks available: {disk_count}");
+    info!("  Recommendation:  {suggestion}");
 
     if let Some(level) = suggested_level
         && !disk_infos.is_empty()
@@ -527,7 +527,7 @@ async fn cmd_init() -> Result<()> {
         let ratio = level.capacity_ratio(disk_count);
         let total_raw: u64 = disk_infos.iter().map(|d| d.size_bytes).sum();
         let usable = (total_raw as f64 * ratio) as u64;
-        println!(
+        info!(
             "  Usable capacity: ~{} (from {} raw)",
             format_bytes(usable),
             format_bytes(total_raw)
@@ -535,15 +535,15 @@ async fn cmd_init() -> Result<()> {
     }
 
     // 4. Summary
-    println!();
-    println!("[4/4] Setup summary");
-    println!("  Hardware:   {model}");
-    println!("  Disks:      {disk_count} detected");
+    info!("");
+    info!("[4/4] Setup summary");
+    info!("  Hardware:   {model}");
+    info!("  Disks:      {disk_count} detected");
     if suggested_level.is_some() {
-        println!("  RAID:       {suggestion}");
+        info!("  RAID:       {suggestion}");
     }
-    println!();
-    println!("To create the array, run:");
+    info!("");
+    info!("To create the array, run:");
     if disk_count >= 2 {
         let disk_args: Vec<String> = disk_infos
             .iter()
@@ -556,12 +556,12 @@ async fn cmd_init() -> Result<()> {
             Some(RaidLevel::Raid10) => "10",
             None => "1",
         };
-        println!(
+        info!(
             "  secfirstnas storage create -n data -l {level_str} --encrypt --mount /data/storage {}",
             disk_args.join(" ")
         );
     } else {
-        println!("  (not enough disks for RAID -- insert at least 2 disks)");
+        info!("  (not enough disks for RAID -- insert at least 2 disks)");
     }
 
     Ok(())
@@ -569,16 +569,16 @@ async fn cmd_init() -> Result<()> {
 
 /// `secfirstnas health` -- comprehensive health check.
 async fn cmd_health() -> Result<()> {
-    println!("=== secfirstNAS Health Check ===");
-    println!();
+    info!("=== secfirstNAS Health Check ===");
+    info!("");
 
     let mut issues: Vec<String> = Vec::new();
 
     // -- SMART ----------------------------------------------------------
-    println!("[SMART] Disk Health");
+    info!("[SMART] Disk Health");
     let disks = Disk::list_all().unwrap_or_default();
     if disks.is_empty() {
-        println!("  No data disks found.");
+        info!("  No data disks found.");
     }
     for disk_path in &disks {
         match Disk::from_path(disk_path) {
@@ -597,9 +597,9 @@ async fn cmd_health() -> Result<()> {
                 let realloc = disk.health.reallocated_sectors.unwrap_or(0);
                 let pending = disk.health.pending_sectors.unwrap_or(0);
 
-                println!("  {} ({}):", disk.path.display(), disk.model.trim());
-                println!("    SMART: {status_str}  |  Temp: {temp}  |  Power-on: {hours}");
-                println!("    Reallocated sectors: {realloc}  |  Pending sectors: {pending}");
+                info!("  {} ({}):", disk.path.display(), disk.model.trim());
+                info!("    SMART: {status_str}  |  Temp: {temp}  |  Power-on: {hours}");
+                info!("    Reallocated sectors: {realloc}  |  Pending sectors: {pending}");
 
                 // Flag problems
                 if matches!(disk.health.smart_status, SmartStatus::Failed(_)) {
@@ -630,29 +630,29 @@ async fn cmd_health() -> Result<()> {
                 }
             }
             Err(e) => {
-                println!("  {} -- error: {e}", disk_path.display());
+                error!("  {} -- error: {e}", disk_path.display());
                 issues.push(format!("ERROR: cannot read {}", disk_path.display()));
             }
         }
     }
 
     // -- RAID -----------------------------------------------------------
-    println!();
-    println!("[RAID] Array Integrity");
+    info!("");
+    info!("[RAID] Array Integrity");
     let arrays = RaidArray::scan().unwrap_or_default();
     if arrays.is_empty() {
-        println!("  No RAID arrays found.");
+        info!("  No RAID arrays found.");
     } else {
         // Parse mdstat for more detail
         let mdstat = std::fs::read_to_string("/proc/mdstat").unwrap_or_default();
         if mdstat.is_empty() {
             for line in &arrays {
-                println!("  {line}");
+                info!("  {line}");
             }
         } else {
             for line in mdstat.lines() {
                 if !line.is_empty() {
-                    println!("  {line}");
+                    info!("  {line}");
                 }
             }
         }
@@ -664,27 +664,27 @@ async fn cmd_health() -> Result<()> {
                 let dev_path = Path::new(dev);
                 match RaidArray::status(dev_path) {
                     Ok(sfnas_storage::RaidStatus::Active) => {
-                        println!("  {dev}: OK (active/clean)");
+                        info!("  {dev}: OK (active/clean)");
                     }
                     Ok(sfnas_storage::RaidStatus::Degraded { missing }) => {
                         let msg = format!("WARNING: {dev} is DEGRADED ({missing} disk(s) missing)");
-                        println!("  {msg}");
+                        warn!("  {msg}");
                         issues.push(msg);
                     }
                     Ok(sfnas_storage::RaidStatus::Rebuilding { progress }) => {
-                        println!("  {dev}: REBUILDING ({progress:.1}%)");
+                        info!("  {dev}: REBUILDING ({progress:.1}%)");
                     }
                     Ok(sfnas_storage::RaidStatus::Checking { progress }) => {
-                        println!("  {dev}: CHECKING ({progress:.1}%)");
+                        info!("  {dev}: CHECKING ({progress:.1}%)");
                     }
                     Ok(sfnas_storage::RaidStatus::Inactive) => {
                         let msg = format!("WARNING: {dev} is INACTIVE");
-                        println!("  {msg}");
+                        warn!("  {msg}");
                         issues.push(msg);
                     }
                     Err(e) => {
                         debug!(error = %e, "cannot query array status");
-                        println!("  {dev}: status unknown ({e})");
+                        info!("  {dev}: status unknown ({e})");
                     }
                 }
             }
@@ -692,12 +692,12 @@ async fn cmd_health() -> Result<()> {
     }
 
     // -- Filesystem usage -----------------------------------------------
-    println!();
-    println!("[FS] Filesystem Usage");
+    info!("");
+    info!("[FS] Filesystem Usage");
     match run_command("df", &["-h", "--type=btrfs", "--type=ext4", "--type=xfs"]) {
         Ok(output) => {
             for line in output.lines() {
-                println!("  {line}");
+                info!("  {line}");
             }
             // Check for >90% usage
             for line in output.lines().skip(1) {
@@ -710,12 +710,12 @@ async fn cmd_health() -> Result<()> {
                 }
             }
         }
-        Err(_) => println!("  (could not read filesystem usage)"),
+        Err(_) => info!("  (could not read filesystem usage)"),
     }
 
     // -- Temperature ----------------------------------------------------
-    println!();
-    println!("[TEMP] Temperature Readings");
+    info!("");
+    info!("[TEMP] Temperature Readings");
     let disk_list = Disk::list_all().unwrap_or_default();
     let mut any_temp = false;
 
@@ -740,7 +740,7 @@ async fn cmd_health() -> Result<()> {
             } else {
                 "CRITICAL"
             };
-            println!(
+            info!(
                 "  {} ({}): {temp}C [{status}]",
                 disk.path.display(),
                 disk.model.trim()
@@ -771,7 +771,7 @@ async fn cmd_health() -> Result<()> {
             } else {
                 "HOT"
             };
-            println!("  {label}: {temp}C [{status}]");
+            info!("  {label}: {temp}C [{status}]");
             any_temp = true;
             if *temp > cpu_target + 10 {
                 issues.push(format!(
@@ -782,7 +782,7 @@ async fn cmd_health() -> Result<()> {
     }
     // CPU temperature from ThermalManager
     if let Some(cpu_temp) = thermal_status.cpu_temp_c {
-        println!("  CPU: {cpu_temp}C");
+        info!("  CPU: {cpu_temp}C");
         any_temp = true;
         if cpu_temp > cpu_target + 20 {
             issues.push(format!("CRITICAL: CPU temperature is {cpu_temp}C (target: {cpu_target}C)"));
@@ -791,12 +791,12 @@ async fn cmd_health() -> Result<()> {
         }
     }
     if !any_temp {
-        println!("  (no temperature readings available)");
+        info!("  (no temperature readings available)");
     }
 
     // -- Fan Health -----------------------------------------------------
-    println!();
-    println!("[FAN] Fan Health");
+    info!("");
+    info!("[FAN] Fan Health");
     let (rpm_min, rpm_max) = match profile {
         FanProfile::Silence => RPM_RANGE_SILENCE,
         FanProfile::Balanced => RPM_RANGE_BALANCED,
@@ -804,7 +804,7 @@ async fn cmd_health() -> Result<()> {
         FanProfile::Max => RPM_RANGE_MAX,
         _ => RPM_RANGE_BALANCED,
     };
-    println!("  Active profile: {profile_name} (expected RPM range: {rpm_min}-{rpm_max})");
+    info!("  Active profile: {profile_name} (expected RPM range: {rpm_min}-{rpm_max})");
 
     let mut any_fan = false;
     for (i, rpm_opt) in thermal_status.fan_rpm.iter().enumerate() {
@@ -823,7 +823,7 @@ async fn cmd_health() -> Result<()> {
             let pwm = thermal_status.pwm_values[i]
                 .map(|p| format!(", PWM {p}"))
                 .unwrap_or_default();
-            println!("  Fan {fan_num}: {rpm} RPM [{status}]{pwm}");
+            info!("  Fan {fan_num}: {rpm} RPM [{status}]{pwm}");
 
             if *rpm == 0 {
                 issues.push(format!("CRITICAL: Fan {fan_num} is STOPPED (0 RPM)"));
@@ -839,48 +839,48 @@ async fn cmd_health() -> Result<()> {
         }
     }
     if !any_fan {
-        println!("  (no fan readings available)");
+        info!("  (no fan readings available)");
     }
 
     // -- HW Engine Health -----------------------------------------------
-    println!();
-    println!("[HW] Hardware Engine Health");
+    info!("");
+    info!("[HW] Hardware Engine Health");
     let sgpo_ok = Path::new(SGPO_DRIVER_PATH).exists();
-    println!("  SGPO (bay LEDs):     {}", if sgpo_ok { "OK" } else { "NOT FOUND" });
+    info!("  SGPO (bay LEDs):     {}", if sgpo_ok { "OK" } else { "NOT FOUND" });
     if !sgpo_ok {
         issues.push("WARNING: SGPO driver not loaded -- bay LEDs will not work".to_string());
     }
     let ssm_ok = Path::new(AL_SSM_PATH).exists();
-    println!("  al_ssm (HW crypto):  {}", if ssm_ok { "OK" } else { "NOT FOUND" });
+    info!("  al_ssm (HW crypto):  {}", if ssm_ok { "OK" } else { "NOT FOUND" });
     if !ssm_ok {
         issues.push("WARNING: al_ssm (HW crypto engine) not loaded -- dm-crypt will use CPU".to_string());
     }
     let dma_ok = Path::new(AL_DMA_PATH).exists();
-    println!("  al_dma (HW parity):  {}", if dma_ok { "OK" } else { "NOT FOUND" });
+    info!("  al_dma (HW parity):  {}", if dma_ok { "OK" } else { "NOT FOUND" });
     if !dma_ok {
         issues.push("WARNING: al_dma (HW RAID parity engine) not loaded -- RAID5 will use CPU".to_string());
     }
 
     // -- Network --------------------------------------------------------
-    println!();
-    println!("[NET] Network Link Status");
+    info!("");
+    info!("[NET] Network Link Status");
     let ifaces = list_network_interfaces();
     if ifaces.is_empty() {
-        println!("  (no interfaces detected)");
+        info!("  (no interfaces detected)");
     } else {
         for line in &ifaces {
-            println!("  {line}");
+            info!("  {line}");
         }
     }
 
     // -- Summary --------------------------------------------------------
-    println!();
+    info!("");
     if issues.is_empty() {
-        println!("Health: ALL OK");
+        info!("Health: ALL OK");
     } else {
-        println!("Health: {} issue(s) found:", issues.len());
+        warn!("Health: {} issue(s) found:", issues.len());
         for issue in &issues {
-            println!("  - {issue}");
+            warn!("  - {issue}");
         }
     }
 
@@ -894,7 +894,7 @@ async fn cmd_storage(action: StorageAction) -> Result<()> {
             let bays = Bay::read_all();
             let disks = Disk::list_all()?;
 
-            println!("Bays:");
+            info!("Bays:");
             for bay in &bays {
                 let slot = bay.slot;
                 let state = match bay.state {
@@ -902,13 +902,13 @@ async fn cmd_storage(action: StorageAction) -> Result<()> {
                     BayState::Empty => "Empty",
                     BayState::Fault => "FAULT",
                 };
-                println!("  [{slot}] {state}");
+                info!("  [{slot}] {state}");
             }
 
-            println!();
-            println!("Disks:");
+            info!("");
+            info!("Disks:");
             if disks.is_empty() {
-                println!("  No data disks found (eMMC excluded).");
+                info!("  No data disks found (eMMC excluded).");
             }
             for disk_path in &disks {
                 match Disk::from_path(disk_path) {
@@ -921,14 +921,14 @@ async fn cmd_storage(action: StorageAction) -> Result<()> {
                             .map(|t| format!(", {t}C"))
                             .unwrap_or_default();
                         let kind = if disk.rotational { "HDD" } else { "SSD" };
-                        println!(
+                        info!(
                             "  {}: {} {kind} ({size}) -- {health}{temp}",
                             disk.path.display(),
                             disk.model.trim(),
                         );
                     }
                     Err(e) => {
-                        eprintln!("  {}: error: {e}", disk_path.display());
+                        error!("  {}: error: {e}", disk_path.display());
                     }
                 }
             }
@@ -939,20 +939,20 @@ async fn cmd_storage(action: StorageAction) -> Result<()> {
         StorageAction::Arrays => {
             let arrays = RaidArray::scan()?;
             if arrays.is_empty() {
-                println!("No RAID arrays found.");
+                info!("No RAID arrays found.");
                 return Ok(());
             }
-            println!("RAID Arrays:");
+            info!("RAID Arrays:");
             for line in &arrays {
-                println!("  {line}");
+                info!("  {line}");
             }
 
             // Also show /proc/mdstat for detail
             if let Ok(mdstat) = std::fs::read_to_string("/proc/mdstat") {
-                println!();
-                println!("/proc/mdstat:");
+                info!("");
+                info!("/proc/mdstat:");
                 for line in mdstat.lines() {
-                    println!("  {line}");
+                    info!("  {line}");
                 }
             }
 
@@ -1006,7 +1006,7 @@ async fn cmd_storage_create(
     let disk_refs: Vec<&Path> = disk_paths.iter().map(|p| p.as_path()).collect();
 
     // Step 1: Create RAID array
-    println!(
+    info!(
         "[1/{}] Creating RAID{level} array '{name}' with {} disks...",
         if encrypt {
             if mount_point.is_some() { 4 } else { 2 }
@@ -1020,7 +1020,7 @@ async fn cmd_storage_create(
 
     let array =
         RaidArray::create(name, raid_level, &disk_refs).context("Failed to create RAID array")?;
-    println!("  Created: {}", array.device.display());
+    info!("  Created: {}", array.device.display());
     info!(name, device = %array.device.display(), "RAID array created");
 
     // The device to format (may become dm-crypt device)
@@ -1030,7 +1030,7 @@ async fn cmd_storage_create(
     if encrypt {
         let step = 2;
         let crypt_name = format!("crypt-{name}");
-        println!(
+        info!(
             "[{step}/{}] Setting up LUKS encryption...",
             if mount_point.is_some() { 4 } else { 2 }
         );
@@ -1064,7 +1064,7 @@ async fn cmd_storage_create(
             let stderr = String::from_utf8_lossy(&luks_output.stderr);
             anyhow::bail!("cryptsetup luksFormat failed: {stderr}");
         }
-        println!("  LUKS2 formatted on {}", array.device.display());
+        info!("  LUKS2 formatted on {}", array.device.display());
 
         // Open LUKS
         let open_output = Command::new("cryptsetup")
@@ -1081,7 +1081,7 @@ async fn cmd_storage_create(
         }
 
         format_device = PathBuf::from(format!("/dev/mapper/{crypt_name}"));
-        println!("  Opened as: {}", format_device.display());
+        info!("  Opened as: {}", format_device.display());
         info!(crypt_name, "LUKS volume opened");
     }
 
@@ -1091,7 +1091,7 @@ async fn cmd_storage_create(
         let total = if encrypt { 4 } else { 3 };
 
         // Create Btrfs
-        println!("[{step}/{total}] Creating Btrfs filesystem...");
+        info!("[{step}/{total}] Creating Btrfs filesystem...");
 
         // TODO: sfnas_storage does not yet expose a btrfs API.
         // When available, use sfnas_storage::BtrfsVolume::format().
@@ -1105,11 +1105,11 @@ async fn cmd_storage_create(
             let stderr = String::from_utf8_lossy(&mkfs_output.stderr);
             anyhow::bail!("mkfs.btrfs failed: {stderr}");
         }
-        println!("  Btrfs created on {}", format_device.display());
+        info!("  Btrfs created on {}", format_device.display());
 
         // Mount
         let mount_step = step + 1;
-        println!("[{mount_step}/{total}] Mounting at {mp}...");
+        info!("[{mount_step}/{total}] Mounting at {mp}...");
         std::fs::create_dir_all(mp)
             .with_context(|| format!("Failed to create mount point: {mp}"))?;
 
@@ -1129,22 +1129,22 @@ async fn cmd_storage_create(
             let stderr = String::from_utf8_lossy(&mount_output.stderr);
             anyhow::bail!("mount failed: {stderr}");
         }
-        println!("  Mounted at {mp}");
+        info!("  Mounted at {mp}");
         info!(mount_point = mp, "filesystem mounted");
     }
 
-    println!();
-    println!("Storage stack created successfully:");
-    println!(
+    info!("");
+    info!("Storage stack created successfully:");
+    info!(
         "  RAID:   /dev/md/{name} (RAID{level}, {} disks)",
         disks.len()
     );
     if encrypt {
-        println!("  Crypt:  /dev/mapper/crypt-{name} (LUKS2, AES-XTS-512)");
+        info!("  Crypt:  /dev/mapper/crypt-{name} (LUKS2, AES-XTS-512)");
     }
     if let Some(mp) = mount_point {
-        println!("  FS:     Btrfs (zstd compression)");
-        println!("  Mount:  {mp}");
+        info!("  FS:     Btrfs (zstd compression)");
+        info!("  Mount:  {mp}");
     }
 
     Ok(())
@@ -1156,23 +1156,23 @@ async fn cmd_share(action: ShareAction) -> Result<()> {
         ShareAction::List => {
             let shares = parse_smb_shares();
             if shares.is_empty() {
-                println!("No SMB shares configured.");
+                info!("No SMB shares configured.");
                 if !Path::new(SAMBA_CONF_PATH).exists() {
-                    println!("  ({SAMBA_CONF_PATH} not found)");
+                    info!("  ({SAMBA_CONF_PATH} not found)");
                 }
             } else {
-                println!("SMB Shares:");
-                println!("  {:<20} PATH", "NAME");
-                println!("  {:<20} ----", "----");
+                info!("SMB Shares:");
+                info!("  {:<20} PATH", "NAME");
+                info!("  {:<20} ----", "----");
                 for (name, path) in &shares {
-                    println!("  {name:<20} {path}");
+                    info!("  {name:<20} {path}");
                 }
             }
             Ok(())
         }
 
         ShareAction::Create { name, path } => {
-            println!("Creating share '{name}' at {path}...");
+            info!("Creating share '{name}' at {path}...");
 
             let share = sfnas_share::Share::new(&name, PathBuf::from(&path));
 
@@ -1199,13 +1199,13 @@ async fn cmd_share(action: ShareAction) -> Result<()> {
                 .apply()
                 .context("Failed to apply Samba configuration")?;
 
-            println!("Share '{name}' created at {path}.");
+            info!("Share '{name}' created at {path}.");
             info!(name, path, "share created");
             Ok(())
         }
 
         ShareAction::Remove { name } => {
-            println!("Removing share '{name}'...");
+            info!("Removing share '{name}'...");
 
             let existing = parse_smb_shares();
             if !existing.iter().any(|(n, _)| n == &name) {
@@ -1224,16 +1224,16 @@ async fn cmd_share(action: ShareAction) -> Result<()> {
                 .apply()
                 .context("Failed to apply Samba configuration")?;
 
-            println!("Share '{name}' removed.");
+            info!("Share '{name}' removed.");
             info!(name, "share removed");
             Ok(())
         }
 
         ShareAction::AddUser { username, password } => {
-            println!("Adding Samba user '{username}'...");
+            info!("Adding Samba user '{username}'...");
             sfnas_share::SambaConfig::add_user(&username, &password)
                 .with_context(|| format!("Failed to add Samba user '{username}'"))?;
-            println!("Samba user '{username}' added.");
+            info!("Samba user '{username}' added.");
             info!(username, "samba user added");
             Ok(())
         }
@@ -1246,30 +1246,30 @@ async fn cmd_backup(action: BackupAction) -> Result<()> {
         BackupAction::List => {
             let modules = parse_rsync_modules();
             if modules.is_empty() {
-                println!("No rsync modules configured.");
+                info!("No rsync modules configured.");
                 if !Path::new(RSYNCD_CONF_PATH).exists() {
-                    println!("  ({RSYNCD_CONF_PATH} not found)");
+                    info!("  ({RSYNCD_CONF_PATH} not found)");
                 }
             } else {
-                println!("Rsync Modules:");
-                println!("  {:<20} PATH", "NAME");
-                println!("  {:<20} ----", "----");
+                info!("Rsync Modules:");
+                info!("  {:<20} PATH", "NAME");
+                info!("  {:<20} ----", "----");
                 for (name, path) in &modules {
-                    println!("  {name:<20} {path}");
+                    info!("  {name:<20} {path}");
                 }
             }
             Ok(())
         }
 
         BackupAction::Add { name, path } => {
-            println!("Adding rsync module '{name}' -> {path}...");
+            info!("Adding rsync module '{name}' -> {path}...");
 
             // Validate the path exists
             let p = Path::new(&path);
             if !p.exists() {
                 std::fs::create_dir_all(p)
                     .with_context(|| format!("Failed to create directory: {path}"))?;
-                println!("  Created directory: {path}");
+                info!("  Created directory: {path}");
             }
 
             // Read existing config or create new
@@ -1318,12 +1318,12 @@ async fn cmd_backup(action: BackupAction) -> Result<()> {
             std::fs::write(RSYNCD_CONF_PATH, &new_conf)
                 .with_context(|| format!("Failed to write {RSYNCD_CONF_PATH}"))?;
 
-            println!("Rsync module '{name}' added.");
-            println!();
-            println!("To sync from a remote host:");
-            println!("  rsync -avz /source/ rsync://backup@<NAS_IP>/{name}/");
-            println!();
-            println!("Note: ensure rsyncd secrets file exists at /data/config/rsyncd.secrets");
+            info!("Rsync module '{name}' added.");
+            info!("");
+            info!("To sync from a remote host:");
+            info!("  rsync -avz /source/ rsync://backup@<NAS_IP>/{name}/");
+            info!("");
+            info!("Note: ensure rsyncd secrets file exists at /data/config/rsyncd.secrets");
 
             info!(name, path, "rsync module added");
             Ok(())
@@ -1338,9 +1338,9 @@ async fn cmd_fan(action: FanAction) -> Result<()> {
     match action {
         FanAction::Status => {
             let status = thermal.read_status();
-            println!("Fan Status:");
-            println!("  Active profile: {}", status.active_profile.name());
-            println!();
+            info!("Fan Status:");
+            info!("  Active profile: {}", status.active_profile.name());
+            info!("");
 
             for i in 0..FAN_COUNT {
                 let rpm = status.fan_rpm[i]
@@ -1349,11 +1349,11 @@ async fn cmd_fan(action: FanAction) -> Result<()> {
                 let pwm = status.pwm_values[i]
                     .map(|p| format!("{p}/255 ({:.0}%)", p as f64 / 255.0 * 100.0))
                     .unwrap_or_else(|| "N/A".to_string());
-                println!("  Fan {}: {rpm}  PWM: {pwm}", i + 1);
+                info!("  Fan {}: {rpm}  PWM: {pwm}", i + 1);
             }
 
-            println!();
-            println!("Temperatures:");
+            info!("");
+            info!("Temperatures:");
             print_thermal_temps(&status);
 
             Ok(())
@@ -1361,49 +1361,49 @@ async fn cmd_fan(action: FanAction) -> Result<()> {
 
         FanAction::Silence => {
             let profile = FanProfile::Silence;
-            println!("Setting fan profile: {} (min PWM {})...", profile.name(), profile.min_pwm());
+            info!("Setting fan profile: {} (min PWM {})...", profile.name(), profile.min_pwm());
             thermal.set_profile(profile.clone());
             apply_profile_fans(&mut thermal)?;
-            println!("Done. HDD target: {}C, CPU target: {}C",
+            info!("Done. HDD target: {}C, CPU target: {}C",
                 profile.hdd_target_c(), profile.cpu_target_c());
             Ok(())
         }
 
         FanAction::Balanced => {
             let profile = FanProfile::Balanced;
-            println!("Setting fan profile: {} (min PWM {})...", profile.name(), profile.min_pwm());
+            info!("Setting fan profile: {} (min PWM {})...", profile.name(), profile.min_pwm());
             thermal.set_profile(profile.clone());
             apply_profile_fans(&mut thermal)?;
-            println!("Done. HDD target: {}C, CPU target: {}C",
+            info!("Done. HDD target: {}C, CPU target: {}C",
                 profile.hdd_target_c(), profile.cpu_target_c());
             Ok(())
         }
 
         FanAction::Performance => {
             let profile = FanProfile::Performance;
-            println!("Setting fan profile: {} (min PWM {})...", profile.name(), profile.min_pwm());
+            info!("Setting fan profile: {} (min PWM {})...", profile.name(), profile.min_pwm());
             thermal.set_profile(profile.clone());
             apply_profile_fans(&mut thermal)?;
-            println!("Done. HDD target: {}C, CPU target: {}C",
+            info!("Done. HDD target: {}C, CPU target: {}C",
                 profile.hdd_target_c(), profile.cpu_target_c());
             Ok(())
         }
 
         FanAction::Max => {
-            println!("Setting all fans to 100% (PWM 255)...");
+            info!("Setting all fans to 100% (PWM 255)...");
             thermal.set_profile(FanProfile::Max);
             apply_profile_fans(&mut thermal)?;
-            println!("Done.");
+            info!("Done.");
             Ok(())
         }
 
         FanAction::Set { fan, pwm } => {
-            println!("Setting fan {fan} to PWM {pwm}...");
+            info!("Setting fan {fan} to PWM {pwm}...");
             thermal
                 .set_pwm(fan, pwm)
                 .map_err(|e| anyhow::anyhow!("failed to set fan PWM: {e}"))?;
             info!(fan, pwm, "fan PWM set directly");
-            println!("Done.");
+            info!("Done.");
             Ok(())
         }
     }
@@ -1413,22 +1413,19 @@ async fn cmd_fan(action: FanAction) -> Result<()> {
 async fn cmd_service(action: ServiceAction) -> Result<()> {
     match action {
         ServiceAction::Start { bind } => {
-            println!("Starting secfirstNAS services...");
+            info!("Starting secfirstNAS services...");
 
             // Start system services
             let services = ["samba", "sshd", "chronyd", "rsyncd"];
             for svc in &services {
                 match Command::new("rc-service").args([svc, "start"]).status() {
                     Ok(status) if status.success() => {
-                        println!("  {svc}: started");
                         info!(service = svc, "started");
                     }
                     Ok(_) => {
-                        eprintln!("  {svc}: FAILED to start");
-                        error!(service = svc, "failed to start");
+                        error!(service = svc, "FAILED to start");
                     }
                     Err(e) => {
-                        eprintln!("  {svc}: error: {e}");
                         error!(service = svc, error = %e, "failed to start");
                     }
                 }
@@ -1437,18 +1434,18 @@ async fn cmd_service(action: ServiceAction) -> Result<()> {
             // Open (or create) the encrypted database.
             // DB path configured via SFGW_DB_PATH env var (set in init script).
             // Defaults to /var/lib/sfgw/sfgw.db if unset.
-            println!("  db: opening...");
+            info!("  db: opening...");
             let db = sfgw_db::open_or_create()
                 .await
                 .map_err(|e| anyhow::anyhow!("database error: {e}"))?;
-            println!("  db: ready");
+            info!("  db: ready");
 
             // Start the API server
             let bind_addr: SocketAddr = bind
                 .parse()
                 .with_context(|| format!("invalid bind address: {bind}"))?;
 
-            println!("  api: starting on {bind_addr}...");
+            info!("  api: starting on {bind_addr}...");
             info!(%bind_addr, "starting API server");
 
             sfnas_api::serve(&db, bind_addr, Some(Path::new("/data/www")))
@@ -1459,32 +1456,29 @@ async fn cmd_service(action: ServiceAction) -> Result<()> {
         }
 
         ServiceAction::Stop => {
-            println!("Stopping secfirstNAS services...");
+            info!("Stopping secfirstNAS services...");
 
             let services = ["samba", "rsyncd"];
             for svc in &services {
                 match Command::new("rc-service").args([svc, "stop"]).status() {
                     Ok(status) if status.success() => {
-                        println!("  {svc}: stopped");
                         info!(service = svc, "stopped");
                     }
                     Ok(_) => {
-                        eprintln!("  {svc}: FAILED to stop");
-                        error!(service = svc, "failed to stop");
+                        error!(service = svc, "FAILED to stop");
                     }
                     Err(e) => {
-                        eprintln!("  {svc}: error: {e}");
                         error!(service = svc, error = %e, "failed to stop");
                     }
                 }
             }
 
-            println!("Done.");
+            info!("Done.");
             Ok(())
         }
 
         ServiceAction::Status => {
-            println!("Service Status:");
+            info!("Service Status:");
 
             let services = ["samba", "sshd", "chronyd", "rsyncd"];
             for svc in &services {
@@ -1500,12 +1494,12 @@ async fn cmd_service(action: ServiceAction) -> Result<()> {
                     }
                     Err(e) => format!("error: {e}"),
                 };
-                println!("  {svc:<12} {status}");
+                info!("  {svc:<12} {status}");
             }
 
             // Check if the API server port is listening
             let api_listening = check_port_listening(8080);
-            println!(
+            info!(
                 "  {:<12} {}",
                 "api",
                 if api_listening { "running (port 8080)" } else { "stopped" }
@@ -1535,7 +1529,7 @@ fn apply_profile_fans(thermal: &mut ThermalManager) -> Result<()> {
         let pwm = status.pwm_values[i]
             .map(|p| format!("PWM {p}"))
             .unwrap_or_else(|| "N/A".to_string());
-        println!("  Fan {}: {pwm} ({rpm})", i + 1);
+        info!("  Fan {}: {pwm} ({rpm})", i + 1);
     }
     Ok(())
 }
@@ -1545,14 +1539,14 @@ fn print_thermal_temps(status: &ThermalStatus) {
     for (i, temp_opt) in status.hwmon_temps_c.iter().enumerate() {
         if let Some(temp) = temp_opt {
             let label = read_hwmon_temp_label(i + 1).unwrap_or_else(|| format!("temp{}", i + 1));
-            println!("  {label}: {temp}C");
+            info!("  {label}: {temp}C");
         }
     }
     if let Some(cpu_temp) = status.cpu_temp_c {
-        println!("  CPU: {cpu_temp}C");
+        info!("  CPU: {cpu_temp}C");
     }
     for (dev, temp) in &status.hdd_temps_c {
-        println!("  {dev}: {temp}C");
+        info!("  {dev}: {temp}C");
     }
 }
 

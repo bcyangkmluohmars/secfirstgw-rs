@@ -456,7 +456,7 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
 }
 
 async fn show_status() -> Result<()> {
-    println!("secfirstgw v{}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("secfirstgw v{}", env!("CARGO_PKG_VERSION"));
     Ok(())
 }
 
@@ -468,19 +468,21 @@ async fn handle_fw(cmd: FwCommands) -> Result<()> {
             for rule in &rules {
                 let status = if rule.enabled { "ON " } else { "OFF" };
                 let id = rule.id.unwrap_or(0);
-                println!(
-                    "[{status}] #{id} {chain} p={pri} {detail}",
-                    chain = rule.chain,
-                    pri = rule.priority,
-                    detail = serde_json::to_string(&rule.detail)?
+                tracing::info!(
+                    status,
+                    id,
+                    chain = %rule.chain,
+                    priority = rule.priority,
+                    detail = %serde_json::to_string(&rule.detail)?,
+                    "firewall rule"
                 );
             }
-            println!("{} rules total", rules.len());
+            tracing::info!(count = rules.len(), "rules total");
         }
         FwCommands::Reload => {
             let db = sfgw_db::open_or_create().await?;
             sfgw_fw::apply_rules(&db).await?;
-            println!("Firewall rules applied.");
+            tracing::info!("firewall rules applied");
         }
     }
     Ok(())
@@ -493,7 +495,7 @@ async fn handle_vpn(cmd: VpnCommands) -> Result<()> {
             let tunnels = sfgw_vpn::tunnel::list_tunnels(&db).await?;
             for t in &tunnels {
                 let status = if t.enabled { "UP" } else { "DOWN" };
-                println!("[{status}] {} port={}", t.name, t.listen_port,);
+                tracing::info!(status, name = %t.name, port = t.listen_port, "VPN tunnel");
             }
         }
         VpnCommands::WgUp => {
@@ -501,7 +503,7 @@ async fn handle_vpn(cmd: VpnCommands) -> Result<()> {
             let tunnels = sfgw_vpn::tunnel::list_tunnels(&db).await?;
             for t in tunnels.iter().filter(|t| t.enabled) {
                 sfgw_vpn::tunnel::start_tunnel(&db, t.id).await?;
-                println!("Started tunnel: {}", t.name);
+                tracing::info!(name = %t.name, "started tunnel");
             }
         }
         VpnCommands::WgDown => {
@@ -509,7 +511,7 @@ async fn handle_vpn(cmd: VpnCommands) -> Result<()> {
             let tunnels = sfgw_vpn::tunnel::list_tunnels(&db).await?;
             for t in &tunnels {
                 let _ = sfgw_vpn::tunnel::stop_tunnel(&db, t.id).await;
-                println!("Stopped tunnel: {}", t.name);
+                tracing::info!(name = %t.name, "stopped tunnel");
             }
         }
     }
@@ -528,13 +530,14 @@ async fn handle_net(cmd: NetCommands) -> Result<()> {
                 } else {
                     format!("pvid={}", iface.pvid)
                 };
-                println!(
-                    "[{status}] {name:<12} {mac:<18} {pvid:<10} mtu={mtu} ips={ips}",
-                    name = iface.name,
-                    mac = iface.mac,
-                    pvid = pvid_str,
+                tracing::info!(
+                    status,
+                    name = %iface.name,
+                    mac = %iface.mac,
+                    pvid = %pvid_str,
                     mtu = iface.mtu,
-                    ips = iface.ips.join(", ")
+                    ips = %iface.ips.join(", "),
+                    "interface"
                 );
             }
         }
@@ -550,10 +553,10 @@ async fn handle_net(cmd: NetCommands) -> Result<()> {
                     .collect()
             };
             if vlans.is_empty() {
-                println!("No VLANs configured.");
+                tracing::info!("no VLANs configured");
             } else {
                 for (name, role, vlan_id) in &vlans {
-                    println!("VLAN {vlan_id}: {name} ({role})");
+                    tracing::info!(vlan_id, name = %name, role = %role, "VLAN");
                 }
             }
         }
@@ -567,18 +570,18 @@ async fn handle_adopt(cmd: AdoptCommands) -> Result<()> {
             let db = sfgw_db::open_or_create().await?;
             let pending = sfgw_adopt::list_pending(&db).await?;
             let all = sfgw_adopt::list_devices(&db).await?;
-            println!(
-                "{} devices total, {} pending approval",
-                all.len(),
-                pending.len()
+            tracing::info!(
+                total = all.len(),
+                pending = pending.len(),
+                "device scan results"
             );
             for d in &all {
-                println!(
-                    "  {} {} {:?} state={}",
-                    d.mac,
-                    d.ip.as_deref().unwrap_or("-"),
-                    d.model.as_deref().unwrap_or("-"),
-                    d.state
+                tracing::info!(
+                    mac = %d.mac,
+                    ip = %d.ip.as_deref().unwrap_or("-"),
+                    model = %d.model.as_deref().unwrap_or("-"),
+                    state = %d.state,
+                    "device"
                 );
             }
         }
@@ -593,7 +596,7 @@ async fn handle_adopt(cmd: AdoptCommands) -> Result<()> {
                 device_kem_public_key: None,
             };
             sfgw_adopt::approve_device(&db, &ca, &request).await?;
-            println!("Device {mac} approved.");
+            tracing::info!(mac = %mac, "device approved");
         }
     }
     Ok(())
@@ -607,7 +610,7 @@ async fn handle_crypto(cmd: CryptoCommands) -> Result<()> {
         CryptoCommands::Unlock => {
             let platform = sfgw_hal::init()?;
             sfgw_crypto::auto_unlock(&platform).await?;
-            println!("Crypto unlock complete.");
+            tracing::info!("crypto unlock complete");
         }
         CryptoCommands::Status => {
             handle_crypto_status()?;
@@ -622,19 +625,19 @@ fn handle_crypto_status() -> Result<()> {
     use std::process::Command;
 
     let platform = sfgw_hal::init()?;
-    println!("Platform: {platform}");
+    tracing::info!(platform = %platform, "crypto status");
 
     if !platform.has_hdd() {
-        println!("HDD: not detected");
-        println!("No HDD detected — encryption status not applicable.");
+        tracing::info!("HDD: not detected");
+        tracing::info!("no HDD detected — encryption status not applicable");
         return Ok(());
     }
 
-    println!("HDD: present");
+    tracing::info!("HDD: present");
 
     let mapper_path = Path::new("/dev/mapper/sfgw-data");
     if !mapper_path.exists() {
-        println!("Encryption: HDD present but encrypted volume not open");
+        tracing::info!("encryption: HDD present but encrypted volume not open");
         // Check if the underlying device at least has a LUKS header
         let luks_device = Path::new("/dev/sda1");
         if luks_device.exists() {
@@ -643,14 +646,14 @@ fn handle_crypto_status() -> Result<()> {
                 .output();
             match output {
                 Ok(o) if o.status.success() => {
-                    println!("LUKS header: detected on /dev/sda1");
+                    tracing::info!("LUKS header: detected on /dev/sda1");
                 }
                 _ => {
-                    println!("LUKS header: not found on /dev/sda1");
+                    tracing::info!("LUKS header: not found on /dev/sda1");
                 }
             }
         } else {
-            println!("Device /dev/sda1 not found");
+            tracing::info!("device /dev/sda1 not found");
         }
         return Ok(());
     }
@@ -663,7 +666,7 @@ fn handle_crypto_status() -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        println!("Encryption: failed to query status — {stderr}");
+        tracing::error!(stderr = %stderr, "encryption: failed to query status");
         return Ok(());
     }
 
@@ -689,17 +692,14 @@ fn handle_crypto_status() -> Result<()> {
         }
     }
 
-    println!("Volume:  /dev/mapper/sfgw-data");
-    println!("State:   {}", if active { "active" } else { "inactive" });
-    if let Some(dev) = device {
-        println!("Device:  {dev}");
-    }
-    if let Some(c) = cipher {
-        println!("Cipher:  {c}");
-    }
-    if let Some(k) = keysize {
-        println!("Keysize: {k}");
-    }
+    tracing::info!(
+        volume = "/dev/mapper/sfgw-data",
+        state = if active { "active" } else { "inactive" },
+        device = device.as_deref().unwrap_or("unknown"),
+        cipher = cipher.as_deref().unwrap_or("unknown"),
+        keysize = keysize.as_deref().unwrap_or("unknown"),
+        "LUKS volume status"
+    );
 
     Ok(())
 }
@@ -710,7 +710,7 @@ fn handle_crypto_init(confirm: bool) -> Result<()> {
     use std::process::Command;
 
     let platform = sfgw_hal::init()?;
-    println!("Platform: {platform}");
+    tracing::info!(platform = %platform, "crypto init");
 
     if !platform.has_hdd() {
         anyhow::bail!("no HDD detected on this platform — cannot initialize LUKS");
@@ -730,22 +730,21 @@ fn handle_crypto_init(confirm: bool) -> Result<()> {
     }
 
     if !confirm {
-        println!("WARNING: This will DESTROY ALL DATA on /dev/sda1.");
-        println!();
-        println!("To proceed, re-run with --confirm:");
-        println!("  sfgw crypto init --confirm");
-        println!();
-        println!("Or run manually:");
-        println!("  cryptsetup luksFormat --type luks2 \\");
-        println!("    --cipher aes-xts-plain64 --key-size 512 \\");
-        println!("    --pbkdf argon2id /dev/sda1");
+        tracing::warn!("WARNING: This will DESTROY ALL DATA on /dev/sda1");
+        tracing::info!("to proceed, re-run with --confirm: sfgw crypto init --confirm");
+        tracing::info!(
+            "or run manually: cryptsetup luksFormat --type luks2 --cipher aes-xts-plain64 --key-size 512 --pbkdf argon2id /dev/sda1"
+        );
         return Ok(());
     }
 
-    println!("Initializing LUKS2 on /dev/sda1...");
-    println!("  Type:   LUKS2");
-    println!("  Cipher: aes-xts-plain64 (AES-256-XTS)");
-    println!("  PBKDF:  argon2id");
+    tracing::info!("initializing LUKS2 on /dev/sda1");
+    tracing::info!(
+        luks_type = "LUKS2",
+        cipher = "aes-xts-plain64 (AES-256-XTS)",
+        pbkdf = "argon2id",
+        "LUKS parameters"
+    );
 
     let output = Command::new("cryptsetup")
         .args([
@@ -768,10 +767,10 @@ fn handle_crypto_init(confirm: bool) -> Result<()> {
         .context("failed to execute cryptsetup luksFormat")?;
 
     if output.status.success() {
-        println!("LUKS2 volume initialized successfully on /dev/sda1.");
-        println!("Next steps:");
-        println!("  1. Set up auto-unlock key (hardware-derived or key file)");
-        println!("  2. Run: sfgw crypto unlock");
+        tracing::info!("LUKS2 volume initialized successfully on /dev/sda1");
+        tracing::info!(
+            "next steps: 1) set up auto-unlock key (hardware-derived or key file), 2) run: sfgw crypto unlock"
+        );
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("cryptsetup luksFormat failed: {stderr}");
@@ -786,52 +785,44 @@ async fn handle_update(cmd: UpdateCommands) -> Result<()> {
     match cmd {
         UpdateCommands::Check => {
             let result = update::check_for_update(&db).await?;
-            println!("Current version: {}", result.current_version);
+            tracing::info!(current_version = %result.current_version, "firmware version");
             if let Some(ref info) = result.available {
-                println!("Update available: v{}", info.version);
-                println!(
-                    "  Channel:  {}",
-                    if info.prerelease { "beta" } else { "stable" }
-                );
-                println!("  Size:     {} bytes", info.size_bytes);
-                println!(
-                    "  SHA-256:  {}",
-                    if info.sha256.is_empty() {
-                        "n/a"
-                    } else {
-                        &info.sha256
-                    }
+                tracing::info!(
+                    version = %info.version,
+                    channel = if info.prerelease { "beta" } else { "stable" },
+                    size_bytes = info.size_bytes,
+                    sha256 = %if info.sha256.is_empty() { "n/a" } else { &info.sha256 },
+                    "update available"
                 );
                 if !info.release_notes.is_empty() {
-                    println!("  Notes:");
                     for line in info.release_notes.lines().take(10) {
-                        println!("    {line}");
+                        tracing::info!(note = %line, "release note");
                     }
                 }
             } else {
-                println!("No update available.");
+                tracing::info!("no update available");
             }
         }
         UpdateCommands::Apply => {
             let result = update::check_for_update(&db).await?;
             match result.available {
                 Some(info) => {
-                    println!("Downloading v{}...", info.version);
+                    tracing::info!(version = %info.version, "downloading firmware");
                     let _temp = update::download_firmware(&info).await?;
-                    println!("Download complete, applying update...");
+                    tracing::info!("download complete, applying update");
                     update::apply_update(&db, &info).await?;
-                    println!("Update applied. Service restarting.");
-                    println!("If the service fails to start, run: sfgw update rollback");
+                    tracing::info!("update applied, service restarting");
+                    tracing::info!("if the service fails to start, run: sfgw update rollback");
                 }
                 None => {
-                    println!("No update available.");
+                    tracing::info!("no update available");
                 }
             }
         }
         UpdateCommands::Rollback => {
-            println!("Rolling back to previous firmware version...");
+            tracing::info!("rolling back to previous firmware version");
             update::rollback(&db).await?;
-            println!("Rollback complete. Service restarted.");
+            tracing::info!("rollback complete, service restarted");
         }
     }
 
@@ -849,53 +840,64 @@ async fn handle_switch(cmd: SwitchCommands) -> Result<()> {
         SwitchCommands::Dump => {
             let drv = open_switch()?;
             let report = drv.dump_state().context("failed to dump switch state")?;
-            print!("{report}");
+            tracing::info!("{}", report);
         }
         SwitchCommands::Read { reg } => {
             let drv = open_switch()?;
             let val = drv.raw_read(reg).context("SMI read failed")?;
-            println!("0x{reg:04X} = 0x{val:04X} ({val})");
+            tracing::info!(
+                reg = format_args!("0x{reg:04X}"),
+                value = format_args!("0x{val:04X}"),
+                decimal = val,
+                "register read"
+            );
         }
         SwitchCommands::Write { reg, val } => {
             let drv = open_switch()?;
             drv.smi().smi_write(reg, val).context("SMI write failed")?;
-            println!("0x{reg:04X} <- 0x{val:04X}");
+            tracing::info!(
+                reg = format_args!("0x{reg:04X}"),
+                value = format_args!("0x{val:04X}"),
+                "register write"
+            );
         }
         SwitchCommands::Ports => {
             let drv = open_switch()?;
             for p in 0..=sfgw_net::rtl8370mb::MAX_PORT {
                 match drv.port_get_link(p) {
                     Ok(link) => {
-                        println!(
-                            "P{p:2}: {}  {}{}",
-                            if link.up { "UP  " } else { "DOWN" },
-                            if link.up {
-                                match link.speed_mbps {
-                                    10 => "10M",
-                                    100 => "100M",
-                                    1000 => "1G",
-                                    _ => "?",
-                                }
-                            } else {
-                                ""
-                            },
-                            if link.up && link.full_duplex {
-                                "/FD"
-                            } else if link.up {
-                                "/HD"
-                            } else {
-                                ""
+                        let speed = if link.up {
+                            match link.speed_mbps {
+                                10 => "10M",
+                                100 => "100M",
+                                1000 => "1G",
+                                _ => "?",
                             }
+                        } else {
+                            ""
+                        };
+                        let duplex = if link.up && link.full_duplex {
+                            "/FD"
+                        } else if link.up {
+                            "/HD"
+                        } else {
+                            ""
+                        };
+                        tracing::info!(
+                            port = p,
+                            status = if link.up { "UP" } else { "DOWN" },
+                            speed = format_args!("{speed}{duplex}"),
+                            "port link status"
                         );
                     }
-                    Err(e) => println!("P{p:2}: ERR {e}"),
+                    Err(e) => tracing::error!(port = p, error = %e, "port read error"),
                 }
             }
         }
         SwitchCommands::Reapply => {
             let db = sfgw_db::open_or_create().await?;
             sfgw_net::switch::reconfigure_networks(&db).await?;
-            println!("Switch VLAN config reapplied from DB.");
+            tracing::info!("switch VLAN config reapplied from DB");
         }
     }
     Ok(())
