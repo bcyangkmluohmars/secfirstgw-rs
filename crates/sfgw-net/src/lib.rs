@@ -387,9 +387,8 @@ fn detect_interfaces_for_platform(
                         }
                         // Only seed switch-managed ports (LAN + MGMT)
                         let port_name = port_def.iface;
-                        let n: Option<u8> = port_name
-                            .strip_prefix("eth")
-                            .and_then(|s| s.parse().ok());
+                        let n: Option<u8> =
+                            port_name.strip_prefix("eth").and_then(|s| s.parse().ok());
                         let is_switch_port = n.map_or(false, |p| {
                             sw.lan_ports.contains(&p) || sw.mgmt_port == Some(p)
                         });
@@ -412,11 +411,7 @@ fn detect_interfaces_for_platform(
                             pvid,
                             tagged_vlans: vec![],
                         });
-                        tracing::info!(
-                            name = port_name,
-                            pvid,
-                            "seeded logical switch port"
-                        );
+                        tracing::info!(name = port_name, pvid, "seeded logical switch port");
                     }
                 }
 

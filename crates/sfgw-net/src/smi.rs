@@ -51,7 +51,7 @@ struct SmiMsg {
 // _IOWR('R', 1, struct rtl8370mb_smi_msg) and _IOW('R', 2, ...)
 // On Linux: direction(2) | size(14) | type(8) | nr(8)
 // SmiMsg is 4 bytes.
-const RTL8370MB_SMI_READ: libc::c_ulong = 0xC004_5201;  // _IOWR('R', 1, 4)
+const RTL8370MB_SMI_READ: libc::c_ulong = 0xC004_5201; // _IOWR('R', 1, 4)
 const RTL8370MB_SMI_WRITE: libc::c_ulong = 0x4004_5202; // _IOW('R', 2, 4)
 
 // ── MDIO ioctl fallback definitions ─────────────────────────────────
@@ -80,7 +80,7 @@ struct MiiIoctlData {
 #[repr(C)]
 struct Ifreq {
     ifr_name: [u8; IFNAMSIZ], // 16 bytes
-    ifr_data: MiiIoctlData,    // 8 bytes
+    ifr_data: MiiIoctlData,   // 8 bytes
     _pad: [u8; 16],           // pad to 40 bytes (match struct ifmap on 64-bit)
 }
 
@@ -161,7 +161,11 @@ impl SmiAccess {
                 // SAFETY: Valid fd from File, correctly sized SmiMsg struct.
                 // The kernel module validates the register address.
                 let ret = unsafe {
-                    libc::ioctl(file.as_raw_fd(), RTL8370MB_SMI_WRITE as _, &mut msg as *mut SmiMsg)
+                    libc::ioctl(
+                        file.as_raw_fd(),
+                        RTL8370MB_SMI_WRITE as _,
+                        &mut msg as *mut SmiMsg,
+                    )
                 };
                 if ret < 0 {
                     return Err(std::io::Error::last_os_error());
@@ -172,9 +176,7 @@ impl SmiAccess {
                 sock,
                 ifname,
                 phy_addr,
-            } => {
-                mdio_smi_write(sock, ifname, *phy_addr, reg_addr, value)
-            }
+            } => mdio_smi_write(sock, ifname, *phy_addr, reg_addr, value),
         }
     }
 
@@ -189,7 +191,11 @@ impl SmiAccess {
                 // SAFETY: Valid fd, correctly sized struct. Kernel writes
                 // result into msg.val.
                 let ret = unsafe {
-                    libc::ioctl(file.as_raw_fd(), RTL8370MB_SMI_READ as _, &mut msg as *mut SmiMsg)
+                    libc::ioctl(
+                        file.as_raw_fd(),
+                        RTL8370MB_SMI_READ as _,
+                        &mut msg as *mut SmiMsg,
+                    )
                 };
                 if ret < 0 {
                     return Err(std::io::Error::last_os_error());
@@ -200,9 +206,7 @@ impl SmiAccess {
                 sock,
                 ifname,
                 phy_addr,
-            } => {
-                mdio_smi_read(sock, ifname, *phy_addr, reg_addr)
-            }
+            } => mdio_smi_read(sock, ifname, *phy_addr, reg_addr),
         }
     }
 
@@ -256,8 +260,7 @@ fn mdio_write(
     ifr.ifr_data.val_in = val;
 
     // SAFETY: Valid fd, correctly sized ifreq (40 bytes matching kernel struct).
-    let ret =
-        unsafe { libc::ioctl(sock.as_raw_fd(), SIOCSMIIREG as _, &ifr as *const Ifreq) };
+    let ret = unsafe { libc::ioctl(sock.as_raw_fd(), SIOCSMIIREG as _, &ifr as *const Ifreq) };
     if ret < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -274,8 +277,7 @@ fn mdio_read(
     ifr.ifr_data.reg_num = reg;
 
     // SAFETY: Valid fd, correctly sized ifreq. Kernel writes result to val_out.
-    let ret =
-        unsafe { libc::ioctl(sock.as_raw_fd(), SIOCGMIIREG as _, &mut ifr as *mut Ifreq) };
+    let ret = unsafe { libc::ioctl(sock.as_raw_fd(), SIOCGMIIREG as _, &mut ifr as *mut Ifreq) };
     if ret < 0 {
         return Err(std::io::Error::last_os_error());
     }

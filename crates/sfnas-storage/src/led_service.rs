@@ -103,7 +103,8 @@ impl GpioLines {
         let name = b"secfirstnas-led";
         req.consumer[..name.len()].copy_from_slice(name);
 
-        // Request lines via ioctl
+        // SAFETY: Valid fd from /dev/gpiochipN, req is correctly sized GpioV2LineRequest.
+        // Kernel writes the granted line fd into req.fd.
         let ret = unsafe {
             libc::ioctl(chip.as_raw_fd(), GPIO_V2_GET_LINE_IOCTL as _, &mut req)
         };
@@ -111,7 +112,8 @@ impl GpioLines {
             return Err(io::Error::last_os_error());
         }
 
-        // The ioctl returns a new fd in req.fd that we must keep open
+        // SAFETY: req.fd is a valid fd returned by the GPIO_V2_GET_LINE_IOCTL above.
+        // We take ownership so it gets closed on drop.
         let request_fd_owner = unsafe {
             use std::os::unix::io::FromRawFd;
             File::from_raw_fd(req.fd)
@@ -136,6 +138,7 @@ impl GpioLines {
         }
 
         let vals = GpioV2LineValues { bits, mask };
+        // SAFETY: self.fd is the valid line request fd, vals is correctly sized.
         let _ = unsafe {
             libc::ioctl(self.fd, GPIO_V2_LINE_SET_VALUES_IOCTL as _, &vals)
         };

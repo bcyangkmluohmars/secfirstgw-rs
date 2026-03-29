@@ -172,7 +172,10 @@ enum SwitchCommands {
 }
 
 fn parse_hex_u16(s: &str) -> Result<u16, String> {
-    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
     u16::from_str_radix(s, 16).map_err(|e| format!("invalid hex: {e}"))
 }
 
@@ -838,8 +841,7 @@ async fn handle_update(cmd: UpdateCommands) -> Result<()> {
 fn open_switch() -> Result<sfgw_net::rtl8370mb::Rtl8370mb> {
     let board = sfgw_hal::detect_board().context("no board detected")?;
     let sw = board.switch.context("no switch ASIC on this board")?;
-    sfgw_net::rtl8370mb::Rtl8370mb::new(sw.smi_iface, sw.smi_phy_addr)
-        .context("failed to open SMI")
+    sfgw_net::rtl8370mb::Rtl8370mb::new(sw.smi_iface, sw.smi_phy_addr).context("failed to open SMI")
 }
 
 async fn handle_switch(cmd: SwitchCommands) -> Result<()> {
@@ -877,7 +879,13 @@ async fn handle_switch(cmd: SwitchCommands) -> Result<()> {
                             } else {
                                 ""
                             },
-                            if link.up && link.full_duplex { "/FD" } else if link.up { "/HD" } else { "" }
+                            if link.up && link.full_duplex {
+                                "/FD"
+                            } else if link.up {
+                                "/HD"
+                            } else {
+                                ""
+                            }
                         );
                     }
                     Err(e) => println!("P{p:2}: ERR {e}"),
@@ -892,4 +900,3 @@ async fn handle_switch(cmd: SwitchCommands) -> Result<()> {
     }
     Ok(())
 }
-

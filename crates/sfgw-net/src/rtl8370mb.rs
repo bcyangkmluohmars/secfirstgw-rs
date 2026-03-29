@@ -46,12 +46,12 @@ const VLAN_PVID_CTRL_BASE: u16 = 0x0700;
 const TABLE_ACCESS_CTRL: u16 = 0x0500;
 const TABLE_ACCESS_ADDR: u16 = 0x0501;
 const TABLE_WRITE_DATA_BASE: u16 = 0x0510; // 0x0510-0x0512 (3 regs)
-const TABLE_READ_DATA_BASE: u16 = 0x0520;  // 0x0520-0x0522 (3 regs)
+const TABLE_READ_DATA_BASE: u16 = 0x0520; // 0x0520-0x0522 (3 regs)
 
 // Table access command: (op << 3) | target
 // op: 0=read, 1=write. target: 3=CVLAN
 const TABLE_CMD_WRITE_CVLAN: u16 = (1 << 3) | 3; // 0x000B
-const TABLE_CMD_READ_CVLAN: u16 = (0 << 3) | 3;  // 0x0003
+const TABLE_CMD_READ_CVLAN: u16 = (0 << 3) | 3; // 0x0003
 
 // Switch Global Control Register — VLAN enable bits
 const SGCR: u16 = 0x0000;
@@ -502,9 +502,9 @@ impl Rtl8370mb {
     /// configuration in a JSON-serializable form for the web UI.
     #[must_use = "switch state read result must be checked"]
     pub fn read_state(&self) -> std::io::Result<SwitchState> {
-        let (chip_id, chip_ver) = self.smi.with_unlock(|smi| {
-            Ok((smi.smi_read(CHIP_ID_REG)?, smi.smi_read(CHIP_VER_REG)?))
-        })?;
+        let (chip_id, chip_ver) = self
+            .smi
+            .with_unlock(|smi| Ok((smi.smi_read(CHIP_ID_REG)?, smi.smi_read(CHIP_VER_REG)?)))?;
 
         self.smi.with_unlock(|smi| {
             // Global config
@@ -634,9 +634,9 @@ impl Rtl8370mb {
         let mut out = String::with_capacity(4096);
 
         // Chip ID
-        let (chip_id, chip_ver) = self.smi.with_unlock(|smi| {
-            Ok((smi.smi_read(CHIP_ID_REG)?, smi.smi_read(CHIP_VER_REG)?))
-        })?;
+        let (chip_id, chip_ver) = self
+            .smi
+            .with_unlock(|smi| Ok((smi.smi_read(CHIP_ID_REG)?, smi.smi_read(CHIP_VER_REG)?)))?;
         out.push_str(&format!(
             "Chip: id=0x{chip_id:04X} ver=0x{chip_ver:04X}\n\n"
         ));

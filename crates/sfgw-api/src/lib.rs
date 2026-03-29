@@ -1247,16 +1247,31 @@ async fn interfaces_handler(
         // For switch-managed ports, use live data from the ASIC.
         // For all other ports, fall back to sysfs detection.
         let (is_up, speed, driver, port_type) = if let Some(link) = switch_links.get(&name) {
-            let speed_mbps = if link.up { i64::from(link.speed_mbps) } else { 0 };
+            let speed_mbps = if link.up {
+                i64::from(link.speed_mbps)
+            } else {
+                0
+            };
             (
                 json!(link.up),
-                if link.up { json!(speed_mbps) } else { Value::Null },
+                if link.up {
+                    json!(speed_mbps)
+                } else {
+                    Value::Null
+                },
                 Value::Null,
                 json!(format!("{} {}", link.connector, format_speed(speed_mbps))),
             )
         } else {
             let port_info = detect_port_type(&name);
-            (row.get::<_, bool>(4).map(|v| json!(v)).unwrap_or(json!(false)), port_info.0, port_info.1, port_info.2)
+            (
+                row.get::<_, bool>(4)
+                    .map(|v| json!(v))
+                    .unwrap_or(json!(false)),
+                port_info.0,
+                port_info.1,
+                port_info.2,
+            )
         };
 
         Ok(json!({
@@ -1285,10 +1300,7 @@ async fn interfaces_handler(
 /// If no hardware switch is detected, returns `{ "available": false }`.
 async fn switch_state_handler(_auth: AuthUser) -> impl IntoResponse {
     match sfgw_net::switch::read_switch_state() {
-        None => (
-            StatusCode::OK,
-            Json(json!({ "available": false })),
-        ),
+        None => (StatusCode::OK, Json(json!({ "available": false }))),
         Some(Err(e)) => {
             tracing::warn!("switch state read failed: {e}");
             (

@@ -40,8 +40,8 @@
 //!
 //! This means SSH connections survive the firmware transition.
 
-use crate::rtl8370mb::{Rtl8370mb, Vlan4kEntry, VlanMcEntry};
 use crate::Result;
+use crate::rtl8370mb::{Rtl8370mb, Vlan4kEntry, VlanMcEntry};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -657,8 +657,7 @@ pub async fn verify_switch_config(db: &sfgw_db::Db) -> bool {
 
     // Compute expected VLAN config to know expected MC indices
     let vlan_map = compute_vlan_port_map(&port_configs, &switch_layout);
-    let (_, _, expected_pvids) =
-        build_switch_config(&vlan_map, &port_configs, &switch_layout);
+    let (_, _, expected_pvids) = build_switch_config(&vlan_map, &port_configs, &switch_layout);
 
     // Compare expected vs actual MC indices (read via SMI)
     let mut drifted = false;
@@ -1022,7 +1021,11 @@ pub fn read_switch_port_links() -> HashMap<String, SwitchPortLink> {
                 );
             }
             Err(e) => {
-                tracing::debug!(port = n, iface = port_def.iface, "failed to read port link: {e}");
+                tracing::debug!(
+                    port = n,
+                    iface = port_def.iface,
+                    "failed to read port link: {e}"
+                );
             }
         }
     }

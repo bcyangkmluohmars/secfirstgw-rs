@@ -497,10 +497,7 @@ async fn kill_port53_holders() {
                     if Some(pid) == our_pid {
                         continue;
                     }
-                    tracing::warn!(
-                        pid,
-                        "killing foreign process on port 53 to reclaim DNS"
-                    );
+                    tracing::warn!(pid, "killing foreign process on port 53 to reclaim DNS");
                     let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
                 }
             }
@@ -674,7 +671,10 @@ pub async fn reload(proc: &DnsmasqProcess, db: &sfgw_db::Db) -> Result<()> {
     {
         let mut guard = proc.child.lock().await;
         if let Some(ref mut child) = *guard {
-            child.kill().await.context("failed to kill dnsmasq for reload")?;
+            child
+                .kill()
+                .await
+                .context("failed to kill dnsmasq for reload")?;
             tracing::info!("dnsmasq stopped for config reload");
         }
         *guard = None;
@@ -756,10 +756,7 @@ pub fn spawn_watchdog(proc: &DnsmasqProcess, db: sfgw_db::Db) {
                     // try_wait: None = still running, Some = exited
                     match c.try_wait() {
                         Ok(Some(status)) => {
-                            tracing::error!(
-                                ?status,
-                                "dnsmasq exited unexpectedly — respawning"
-                            );
+                            tracing::error!(?status, "dnsmasq exited unexpectedly — respawning");
                             *guard = None;
                             true
                         }

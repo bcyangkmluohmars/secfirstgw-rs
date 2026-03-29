@@ -287,11 +287,7 @@ pub async fn apply_ruleset(config: &str) -> Result<()> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         // Keep config file for debugging on failure.
         tracing::error!(path = tmp_path, "nft config kept for debugging");
-        anyhow::bail!(
-            "nft -f failed (exit {}): {}",
-            output.status,
-            stderr.trim()
-        );
+        anyhow::bail!("nft -f failed (exit {}): {}", output.status, stderr.trim());
     }
 
     // Clean up temp file on success.
@@ -324,9 +320,7 @@ async fn flush_foreign_filter_table() {
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
             // Not an error if the table doesn't exist.
-            if !stderr.contains("No such file or directory")
-                && !stderr.contains("does not exist")
-            {
+            if !stderr.contains("No such file or directory") && !stderr.contains("does not exist") {
                 tracing::warn!("failed to delete `inet filter` table: {}", stderr.trim());
             }
         }

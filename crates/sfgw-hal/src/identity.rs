@@ -86,8 +86,7 @@ impl HwIdentity {
 
         let board_id_raw = u16::from_be_bytes([data[0x0C], data[0x0D]]);
         let hw_rev_raw = u16::from_be_bytes([data[0x0E], data[0x0F]]);
-        let device_id_raw =
-            u32::from_be_bytes([data[0x10], data[0x11], data[0x12], data[0x13]]);
+        let device_id_raw = u32::from_be_bytes([data[0x10], data[0x11], data[0x12], data[0x13]]);
 
         let id = HwIdentity {
             board_id: format!("{board_id_raw:04x}"),

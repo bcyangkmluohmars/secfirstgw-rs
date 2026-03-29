@@ -472,8 +472,7 @@ static USG_PRO4_PORTS: &[PortDef] = &[
 #[must_use]
 pub fn detect_board() -> Option<BoardInfo> {
     // Try stock ubnthal first
-    let board_id = detect_board_id_ubnthal()
-        .or_else(detect_board_id_devicetree)?;
+    let board_id = detect_board_id_ubnthal().or_else(detect_board_id_devicetree)?;
 
     let (model, short_name, port_count, ports, switch) = match board_id.as_str() {
         "ea15" => (
