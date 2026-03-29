@@ -211,11 +211,19 @@ impl BoardInfo {
     }
 }
 
-/// Hardware switch ASIC configuration (e.g. RTL8370B on UDM Pro).
+/// Hardware switch ASIC configuration (e.g. RTL8370MB on UDM Pro).
+///
+/// The switch is programmed via SMI (Serial Management Interface) over the
+/// MDIO bus on `smi_iface`. VLAN sub-interfaces are created on `trunk_iface`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwitchAsic {
-    /// swconfig device name (e.g. "switch0").
-    pub device: &'static str,
+    /// Linux interface for VLAN sub-interfaces (e.g. "sw0").
+    /// VLAN sub-interfaces are created as `{trunk_iface}.{vid}`.
+    pub trunk_iface: &'static str,
+    /// Linux interface whose MDIO bus connects to the switch (e.g. "eth8").
+    pub smi_iface: &'static str,
+    /// MDIO PHY address of the switch ASIC (0x1D for RTL8370MB).
+    pub smi_phy_addr: u8,
     /// Switch port numbers that are LAN ports.
     pub lan_ports: &'static [u8],
     /// CPU port number (internal, always tagged in every VLAN).
@@ -256,16 +264,24 @@ impl fmt::Display for Connector {
 }
 
 // Switch ASIC definitions
+//
+// UDM Pro / SE: RTL8370MB with 8 GbE ports (0–7), CPU on EXT1 (port 9).
+// SMI management via eth8's MDIO bus at PHY address 0x1D.
+// Trunk interface sw0 (renamed from eth0, PCI 00:03.0 RGMII to EXT1).
 static UDMPRO_SWITCH: SwitchAsic = SwitchAsic {
-    device: "switch0",
+    trunk_iface: "sw0",
+    smi_iface: "eth8",
+    smi_phy_addr: 0x1D,
     lan_ports: &[0, 1, 2, 3, 4, 5, 6],
-    cpu_port: 8,
-    internal_ports: &[9],
+    cpu_port: 9,
+    internal_ports: &[],
     mgmt_port: Some(7),
 };
 
 static UDM_SWITCH: SwitchAsic = SwitchAsic {
-    device: "switch0",
+    trunk_iface: "sw0",
+    smi_iface: "eth8",
+    smi_phy_addr: 0x1D,
     lan_ports: &[0, 1, 2, 3],
     cpu_port: 4,
     internal_ports: &[],
@@ -273,6 +289,11 @@ static UDM_SWITCH: SwitchAsic = SwitchAsic {
 };
 
 // UDM Pro / SE port definitions
+//
+// Switch LAN ports use eth0–eth7 as logical names in the DB (not real Linux
+// interfaces — they are behind the RTL8370MB ASIC on trunk sw0).
+// ethN maps to switch ASIC port N via iface_to_switch_port().
+// Direct ports: eth8 (WAN RJ45), eth9 (SFP+ WAN), eth10 (SFP+ LAN).
 static UDMPRO_PORTS: &[PortDef] = &[
     PortDef {
         label: "1",

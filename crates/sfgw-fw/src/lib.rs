@@ -10,6 +10,7 @@
 
 pub mod ids_response;
 pub mod iptables;
+pub mod nft;
 pub mod qos;
 pub mod upnp;
 pub mod wan;
@@ -549,11 +550,12 @@ pub async fn toggle_rule(db: &sfgw_db::Db, id: i64, enabled: bool) -> Result<(),
     Ok(())
 }
 
-/// Load rules, generate iptables config, and atomically apply it.
+/// Load rules, generate firewall config, and atomically apply it.
 /// This is the main entry point — call after any rule change.
 ///
-/// Now zone-aware: loads interface zones from the DB and generates
-/// zone-based iptables rules instead of hardcoded interface names.
+/// Applies **both** iptables (legacy kernel) and nftables in parallel.
+/// Zone-aware: loads interface zones from the DB and generates
+/// zone-based rules instead of hardcoded interface names.
 pub async fn apply_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
     let rules = load_enabled_rules(db).await?;
     let zones = load_interface_zones(db).await?;
@@ -561,7 +563,7 @@ pub async fn apply_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
     let custom_zones = load_custom_zones(db).await.unwrap_or_default();
     let policy = FirewallPolicy::default();
 
-    // Load UPnP mappings and convert to PortForward entries for iptables generation.
+    // Load UPnP mappings and convert to PortForward entries for rule generation.
     let upnp_forwards: Vec<PortForward> = upnp::list_mappings(db)
         .await
         .unwrap_or_default()
@@ -577,8 +579,8 @@ pub async fn apply_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
         })
         .collect();
 
-    let config = if zones.is_empty() {
-        // Fallback to legacy generation when no zones are configured.
+    // ── iptables ──────────────────────────────────────────────────────
+    let ipt_config = if zones.is_empty() {
         if upnp_forwards.is_empty() {
             iptables::generate_ruleset(&rules, &policy)
         } else {
@@ -594,7 +596,24 @@ pub async fn apply_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
         )
     };
 
-    iptables::apply_ruleset(&config).await?;
+    iptables::apply_ruleset(&ipt_config).await?;
+
+    // ── nftables ─────────────────────────────────────────────────────
+    let nft_config = if zones.is_empty() {
+        if upnp_forwards.is_empty() {
+            nft::generate_ruleset(&rules, &policy)
+        } else {
+            nft::generate_ruleset_with_forwards(&rules, &policy, &upnp_forwards)
+        }
+    } else {
+        nft::generate_zone_ruleset(&zones, &rules, &policy, &upnp_forwards)
+    };
+
+    if let Err(e) = nft::apply_ruleset(&nft_config).await {
+        // Non-fatal: iptables is already applied, nft failure should not
+        // block startup. Log loudly so it gets investigated.
+        tracing::error!("nftables apply failed (iptables still active): {e}");
+    }
 
     // Apply WAN routing if groups are configured (non-fatal — don't block startup).
     if !wan_groups.is_empty()
@@ -603,7 +622,7 @@ pub async fn apply_rules(db: &sfgw_db::Db) -> Result<(), FwError> {
         tracing::error!("WAN routing failed (continuing): {e}");
     }
 
-    tracing::info!("iptables rules applied successfully (zone-aware)");
+    tracing::info!("firewall rules applied (iptables + nftables, zone-aware)");
     Ok(())
 }
 

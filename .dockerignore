@@ -1,0 +1,11 @@
+target
+web/node_modules
+web/dist
+web-nas/node_modules
+web-nas/dist
+.git
+dist
+*.db
+*.db-shm
+*.db-wal
+.Dockerfile.sfgw.*

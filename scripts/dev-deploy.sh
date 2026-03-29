@@ -1,8 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# dev-deploy.sh — Fast dev loop: rsync source to UDM Pro, build on-device,
-#                 install to /usr/local/bin, restart systemd service.
+# dev-deploy.sh — Cross-compile in Docker, push binary to UDM Pro, restart.
 #
 # Usage:
 #   ./scripts/dev-deploy.sh              # default: root@10.0.0.1
@@ -12,7 +11,6 @@ set -euo pipefail
 
 TARGET="${1:-10.0.0.1}"
 USER="root"
-REMOTE_SRC="/data/sfgw-src"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 
@@ -27,48 +25,32 @@ log()  { echo -e "${G}[dev]${N} $*"; }
 warn() { echo -e "${Y}[dev]${N} $*"; }
 err()  { echo -e "${R}[dev]${N} $*" >&2; exit 1; }
 
-# ─── Rsync source to UDM ─────────────────────────────────────────────────────
+# ─── Cross-compile in Docker ────────────────────────────────────────────────
 
-log "Syncing source to ${C}${USER}@${TARGET}:${REMOTE_SRC}${N}..."
+log "Cross-compiling for aarch64-musl in Docker..."
 
-tar -cf - -C "${PROJECT_DIR}" \
-    --exclude='target' \
-    --exclude='web/node_modules' \
-    --exclude='web/dist' \
-    --exclude='.git' \
-    --exclude='dist' \
-    . | ssh "${USER}@${TARGET}" "mkdir -p ${REMOTE_SRC} && tar -xf - -C ${REMOTE_SRC}"
+docker build -f "${PROJECT_DIR}/Dockerfile.cross" -o "${PROJECT_DIR}/out" "${PROJECT_DIR}" 2>&1 \
+    | while IFS= read -r line; do
+        # Show only cargo compile lines and the final result
+        case "$line" in
+            *Compiling*|*Finished*|*error*|*warning*sfgw*) echo "  $line" ;;
+        esac
+    done
 
-log "Sync complete."
+[ -f "${PROJECT_DIR}/out/sfgw" ] || err "Build failed — no binary produced"
+log "Build complete: $(ls -lh "${PROJECT_DIR}/out/sfgw" | awk '{print $5}') static binary"
 
-# ─── Build on device ─────────────────────────────────────────────────────────
+# ─── Push binary to device ──────────────────────────────────────────────────
 
-log "Building on ${C}${TARGET}${N} (release)..."
+log "Deploying to ${C}${USER}@${TARGET}${N}..."
 
-# shellcheck disable=SC2087
-ssh "${USER}@${TARGET}" bash <<'REMOTE_BUILD'
-set -euo pipefail
-export PATH="$HOME/.cargo/bin:$PATH"
+ssh "${USER}@${TARGET}" "rc-service sfgw stop 2>/dev/null || true; sleep 1"
+scp -q "${PROJECT_DIR}/out/sfgw" "${USER}@${TARGET}:/usr/local/bin/sfgw"
+ssh "${USER}@${TARGET}" "chmod 0755 /usr/local/bin/sfgw"
 
-cd /data/sfgw-src
-cargo build --release --bin sfgw 2>&1
+log "Binary deployed."
 
-# Stop service before overwriting binary ("text file busy")
-systemctl stop sfgw.service 2>/dev/null || true
-sleep 1
-
-# Install binary to persistent location
-cp target/release/sfgw /usr/local/bin/sfgw
-chmod 0755 /usr/local/bin/sfgw
-
-echo "BUILD_OK"
-REMOTE_BUILD
-
-log "Build complete."
-
-# ─── Copy web assets (pre-built locally) ──────────────────────────────────────
-# Must happen BEFORE service restart — sfgw start rebuilds the network stack
-# and the SSH connection may drop during that window.
+# ─── Copy web assets (pre-built locally) ─────────────────────────────────────
 
 if [ -d "${PROJECT_DIR}/web/dist" ]; then
     log "Syncing pre-built web assets..."
@@ -79,41 +61,35 @@ else
     warn "Continuing without web UI update."
 fi
 
-# ─── Restart sfgw service ────────────────────────────────────────────────────
+# ─── Restart sfgw service ───────────────────────────────────────────────────
 
 log "Restarting sfgw service..."
 
 ssh "${USER}@${TARGET}" bash <<'REMOTE_RESTART'
 set -euo pipefail
 
-# Mask uhwd and wan_arp_poll (sfgw manages fan via sysfs)
-for svc in uhwd wan_arp_poll; do
-    systemctl stop "${svc}.service" 2>/dev/null || true
-    systemctl mask "${svc}.service" 2>/dev/null || true
-done
-
 # Configure adt7475 hardware-autonomous fan control (UDM Pro)
-HW="/sys/bus/i2c/devices/4-002e"
-if [ -d "$HW" ]; then
-    echo 2 > "$HW/pwm2_auto_channels_temp" 2>/dev/null || true
-    echo 45000 > "$HW/temp2_auto_point1_temp" 2>/dev/null || true
-    echo 75000 > "$HW/temp2_auto_point2_temp" 2>/dev/null || true
-    echo 64 > "$HW/pwm2_auto_point1_pwm" 2>/dev/null || true
-    echo 255 > "$HW/pwm2_auto_point2_pwm" 2>/dev/null || true
-    echo 2 > "$HW/pwm2_enable" 2>/dev/null || true
+HW="/sys/class/hwmon/hwmon0"
+if [ -f "$HW/name" ] && [ "$(cat "$HW/name")" = "adt7475" ]; then
+    echo 2 > "$HW/pwm2_auto_channels_temp"
+    echo 45000 > "$HW/temp2_auto_point1_temp"
+    echo 75000 > "$HW/temp2_auto_point2_temp"
+    echo 64 > "$HW/pwm2_auto_point1_pwm"
+    echo 255 > "$HW/pwm2_auto_point2_pwm"
+    echo 2 > "$HW/pwm2_enable"
     echo "Fan: adt7475 autonomous mode (45-75°C ramp)"
 fi
 
-systemctl start sfgw.service
+rc-service sfgw start
 sleep 2
 
-if systemctl is-active sfgw.service >/dev/null 2>&1; then
-    PID=$(pgrep -f '/usr/local/bin/sfgw start' || true)
+if rc-service sfgw status | grep -q "started"; then
+    PID=$(pgrep -f '/usr/local/bin/sfgw' || true)
     if [ -n "$PID" ]; then
-        MEM=$(ps -o rss= -p $PID | awk '{printf "%.1f MB", $1/1024}')
-        echo "sfgw running — PID $PID, $MEM RAM (systemd)"
+        MEM=$(awk '/VmRSS/{printf "%.1f MB", $2/1024}' /proc/$PID/status 2>/dev/null || echo "? MB")
+        echo "sfgw running — PID $PID, $MEM RAM"
     else
-        echo "sfgw service active"
+        echo "sfgw service started"
     fi
 
     # Verify SSH still works after firewall rules applied.
@@ -131,7 +107,7 @@ if systemctl is-active sfgw.service >/dev/null 2>&1; then
         echo "SSH connectivity check passed."
     else
         echo "SSH BLOCKED — firewall lockout detected! Stopping service..."
-        systemctl stop sfgw.service 2>/dev/null || true
+        rc-service sfgw stop 2>/dev/null || true
         # Flush SFGW chains to restore connectivity (IPv4 + IPv6).
         for ipt in iptables ip6tables; do
             for chain in SFGW-INPUT SFGW-FORWARD SFGW-OUTPUT; do
@@ -147,16 +123,16 @@ if systemctl is-active sfgw.service >/dev/null 2>&1; then
             iptables -t nat -F "$chain" 2>/dev/null || true
             iptables -t nat -X "$chain" 2>/dev/null || true
         done
-        echo "SFGW chains flushed. SSH restored. Check /data/sfgw/sfgw.log"
+        echo "SFGW chains flushed. SSH restored. Check /var/log/sfgw/sfgw.log"
         exit 1
     fi
 else
-    echo "FAILED — sfgw service not active"
-    tail -20 /data/sfgw/sfgw.log
+    echo "FAILED — sfgw service not started"
+    tail -20 /var/log/sfgw/sfgw.log 2>/dev/null || tail -20 /var/log/sfgw/sfgw.err 2>/dev/null
     exit 1
 fi
 REMOTE_RESTART
 
 echo ""
 echo -e "${G}Done!${N} https://${TARGET}:443"
-echo -e "Logs: ssh ${USER}@${TARGET} tail -f /data/sfgw/sfgw.log"
+echo -e "Logs: ssh ${USER}@${TARGET} tail -f /var/log/sfgw/sfgw.log"

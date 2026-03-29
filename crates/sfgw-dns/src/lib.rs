@@ -457,6 +457,60 @@ pub fn render_template(
     Ok(rendered)
 }
 
+/// Kill any process (other than our own managed instance) that is bound to
+/// UDP or TCP port 53.  On the UDM-Pro, ubios may start its own dnsmasq
+/// which grabs port 53 before we can.  Without clearing the port first,
+/// our dnsmasq exits immediately with code 2.
+///
+/// Uses `ss -tlnp -ulnp` to find listeners and extracts PIDs.  Only kills
+/// processes that are NOT our managed sfgw-dnsmasq (checked via PID file).
+async fn kill_port53_holders() {
+    let our_pid: Option<u32> = tokio::fs::read_to_string(DEFAULT_PID_FILE)
+        .await
+        .ok()
+        .and_then(|s| s.trim().parse().ok());
+
+    let output = match tokio::process::Command::new("ss")
+        .args(["-tlnp", "-ulnp"])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("failed to run ss to check port 53: {e}");
+            return;
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        // Match lines with :53 as the listening port
+        if !line.contains(":53 ") && !line.contains(":53\t") {
+            continue;
+        }
+
+        // Extract PID from "pid=NNNN" in the line
+        for segment in line.split(',') {
+            if let Some(pid_str) = segment.strip_prefix("pid=") {
+                if let Ok(pid) = pid_str.trim_end_matches(')').parse::<u32>() {
+                    // Don't kill our own managed instance
+                    if Some(pid) == our_pid {
+                        continue;
+                    }
+                    tracing::warn!(
+                        pid,
+                        "killing foreign process on port 53 to reclaim DNS"
+                    );
+                    let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                }
+            }
+        }
+    }
+
+    // Brief wait for the port to actually free up after kill
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+}
+
 /// Default output path for the generated dnsmasq config.
 const DEFAULT_CONFIG_PATH: &str = "/etc/dnsmasq.d/sfgw.conf";
 
@@ -577,6 +631,10 @@ pub async fn start_with_paths(
         .await
         .with_context(|| "failed to create /data/sfgw")?;
 
+    // Kill any foreign process holding port 53 (e.g. ubios dnsmasq).
+    // Without this our dnsmasq can't bind and exits immediately.
+    kill_port53_holders().await;
+
     let child = tokio::process::Command::new("dnsmasq")
         .arg("--no-daemon")
         .arg(format!("--conf-file={}", config_path.display()))
@@ -602,11 +660,46 @@ pub async fn start_with_paths(
     })
 }
 
-/// Reload dnsmasq configuration (regenerate config, then SIGHUP).
+/// Reload dnsmasq configuration by doing a full restart.
+///
+/// SIGHUP only makes dnsmasq re-read `/etc/hosts` and the lease file —
+/// `address=`, `server=`, `dhcp-range=`, and all other main-config
+/// directives require a process restart.  So we kill the old instance,
+/// regenerate the config, and spawn a new one.
 pub async fn reload(proc: &DnsmasqProcess, db: &sfgw_db::Db) -> Result<()> {
+    // 1. Write updated config.
     write_config(db, Some(&proc.config_path)).await?;
-    proc.send_signal(Signal::SIGHUP).await?;
-    tracing::info!("dnsmasq reloaded (SIGHUP)");
+
+    // 2. Kill the running instance.
+    {
+        let mut guard = proc.child.lock().await;
+        if let Some(ref mut child) = *guard {
+            child.kill().await.context("failed to kill dnsmasq for reload")?;
+            tracing::info!("dnsmasq stopped for config reload");
+        }
+        *guard = None;
+    }
+
+    // 3. Kill any foreign process that grabbed port 53 in the meantime.
+    kill_port53_holders().await;
+
+    // 4. Spawn a new instance with the updated config.
+    let new_child = tokio::process::Command::new("dnsmasq")
+        .arg("--no-daemon")
+        .arg(format!("--conf-file={}", proc.config_path.display()))
+        .arg(format!("--pid-file={}", proc.pid_file.display()))
+        .kill_on_drop(true)
+        .spawn()
+        .context("failed to restart dnsmasq after reload")?;
+
+    let pid = new_child.id().unwrap_or(0);
+    tracing::info!(pid, "dnsmasq restarted with updated config");
+
+    {
+        let mut guard = proc.child.lock().await;
+        *guard = Some(new_child);
+    }
+
     Ok(())
 }
 
@@ -639,6 +732,80 @@ pub async fn reload_by_pid_file(db: &sfgw_db::Db) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Spawn a background watchdog that restarts dnsmasq if it exits unexpectedly.
+///
+/// Checks every 5 seconds whether the child process is still alive.  If
+/// dnsmasq has exited, the config is regenerated from the DB and a new
+/// instance is spawned.  This handles crashes, OOM kills, and any other
+/// unexpected termination.
+pub fn spawn_watchdog(proc: &DnsmasqProcess, db: sfgw_db::Db) {
+    let child = Arc::clone(&proc.child);
+    let config_path = proc.config_path.clone();
+    let pid_file = proc.pid_file.clone();
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+
+            let needs_respawn = {
+                let mut guard = child.lock().await;
+                if let Some(ref mut c) = *guard {
+                    // try_wait: None = still running, Some = exited
+                    match c.try_wait() {
+                        Ok(Some(status)) => {
+                            tracing::error!(
+                                ?status,
+                                "dnsmasq exited unexpectedly — respawning"
+                            );
+                            *guard = None;
+                            true
+                        }
+                        Ok(None) => false, // still running
+                        Err(e) => {
+                            tracing::error!("failed to check dnsmasq status: {e}");
+                            false
+                        }
+                    }
+                } else {
+                    // No child handle — dnsmasq was stopped or never started
+                    tracing::warn!("dnsmasq child handle missing — respawning");
+                    true
+                }
+            };
+
+            if needs_respawn {
+                // Regenerate config from current DB state before respawn.
+                if let Err(e) = write_config(&db, Some(&config_path)).await {
+                    tracing::error!("failed to regenerate dnsmasq config: {e}");
+                    continue;
+                }
+
+                // Kill any foreign process holding port 53.
+                kill_port53_holders().await;
+
+                match tokio::process::Command::new("dnsmasq")
+                    .arg("--no-daemon")
+                    .arg(format!("--conf-file={}", config_path.display()))
+                    .arg(format!("--pid-file={}", pid_file.display()))
+                    .kill_on_drop(true)
+                    .spawn()
+                {
+                    Ok(new_child) => {
+                        let pid = new_child.id().unwrap_or(0);
+                        tracing::info!(pid, "dnsmasq respawned by watchdog");
+                        let mut guard = child.lock().await;
+                        *guard = Some(new_child);
+                    }
+                    Err(e) => {
+                        tracing::error!("failed to respawn dnsmasq: {e}");
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Stop the managed dnsmasq process.

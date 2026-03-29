@@ -237,9 +237,39 @@ pub fn generate_ruleset_with_forwards(
 ///
 /// Writes config to a temp file, then runs `nft -f <file>`.
 /// On failure the old rules remain (nft is transactional).
+/// Validate that the generated nftables config contains at least one SSH
+/// ACCEPT rule so we never lock ourselves out of the device.
+fn validate_no_lockout(config: &str) -> Result<()> {
+    let has_ssh_accept = config.lines().any(|line| {
+        let l = line.trim();
+        l.contains("dport 22")
+            && l.contains("accept")
+            && l.starts_with("add rule inet")
+            && l.contains("input")
+    });
+    if !has_ssh_accept {
+        bail!(
+            "REFUSING to apply nftables ruleset: no SSH ACCEPT rule found — \
+             would lock out management access"
+        );
+    }
+    Ok(())
+}
+
 pub async fn apply_ruleset(config: &str) -> Result<()> {
     use tokio::fs;
     use tokio::process::Command;
+
+    // Safety: never apply a ruleset that would lock us out.
+    validate_no_lockout(config)?;
+
+    // Remove stale `inet filter` table if it exists.  On the UDM-Pro the
+    // system (ubios) may leave behind an `inet filter` table with a DROP
+    // policy and no ACCEPT rules.  Because both tables hook at the same
+    // priority, the foreign table's DROP verdict blocks SSH/HTTPS before
+    // our `inet sfgw` rules are ever evaluated.  We manage our own policy
+    // via `inet sfgw` (and iptables), so the stale table must go.
+    flush_foreign_filter_table().await;
 
     let tmp_path = "/tmp/sfgw-nft.conf";
     fs::write(tmp_path, config)
@@ -269,6 +299,41 @@ pub async fn apply_ruleset(config: &str) -> Result<()> {
 
     tracing::info!("nftables ruleset applied atomically");
     Ok(())
+}
+
+/// Remove the system `inet filter` table if it exists.
+///
+/// On the UDM-Pro, ubios creates `table inet filter` with a DROP policy
+/// on the input chain but no ACCEPT rules for SSH/HTTPS.  Since nftables
+/// evaluates *all* tables that hook the same family+hook+priority, the
+/// foreign table blocks traffic even though our `inet sfgw` table allows
+/// it.  Deleting the foreign table is safe because we fully manage
+/// firewall policy through `inet sfgw` and iptables.
+async fn flush_foreign_filter_table() {
+    use tokio::process::Command;
+
+    let output = Command::new("nft")
+        .args(["delete", "table", "inet", "filter"])
+        .output()
+        .await;
+
+    match output {
+        Ok(o) if o.status.success() => {
+            tracing::info!("deleted stale nftables `inet filter` table");
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            // Not an error if the table doesn't exist.
+            if !stderr.contains("No such file or directory")
+                && !stderr.contains("does not exist")
+            {
+                tracing::warn!("failed to delete `inet filter` table: {}", stderr.trim());
+            }
+        }
+        Err(e) => {
+            tracing::warn!("failed to run nft delete for `inet filter`: {e}");
+        }
+    }
 }
 
 /// Flush all sfgw rules (remove the table entirely).
@@ -374,7 +439,7 @@ pub fn generate_zone_ruleset(
     let has_wan = zone_has_interfaces(zones, &FirewallZone::Wan);
     let has_lan = zone_has_interfaces(zones, &FirewallZone::Lan);
     let has_dmz = zone_has_interfaces(zones, &FirewallZone::Dmz);
-    let has_mgmt = zone_has_interfaces(zones, &FirewallZone::Mgmt);
+    let _has_mgmt = zone_has_interfaces(zones, &FirewallZone::Mgmt);
     let has_guest = zone_has_interfaces(zones, &FirewallZone::Guest);
 
     if has_wan {
@@ -386,9 +451,12 @@ pub fn generate_zone_ruleset(
     if has_dmz {
         emit_dmz_zone_rules(&mut out, has_wan);
     }
-    if has_mgmt {
-        emit_mgmt_zone_rules(&mut out, has_wan, has_lan, has_dmz, has_guest);
-    }
+    // MGMT zone rules are ALWAYS emitted — even when the set is empty.
+    // If the set is empty the rules simply won't match, but crucially the
+    // ruleset still loads and doesn't fail on undefined references.  This
+    // prevents locking ourselves out when MGMT interfaces aren't assigned
+    // yet (e.g. VLAN interface not created at boot).
+    emit_mgmt_zone_rules(&mut out, has_wan, has_lan, has_dmz, has_guest);
     if has_guest {
         emit_guest_zone_rules(&mut out, has_wan);
     }
@@ -413,13 +481,21 @@ pub fn generate_zone_ruleset(
 }
 
 /// Emit nftables named sets for each zone's interfaces.
+///
+/// All standard zone sets are always created — even when empty — so that
+/// user-defined rules referencing `@mgmt_ifaces` etc. never fail due to
+/// an undefined set.  An empty set simply matches no packets, which is
+/// the correct "zone has no interfaces" behaviour.
 fn emit_zone_defines(out: &mut String, zones: &[ZonePolicy]) {
+    use std::collections::HashSet;
+
     writeln!(out, "    # ── Zone interface sets ──").unwrap();
 
+    // Collect which standard zones have been emitted so we can fill in
+    // any missing ones afterwards.
+    let mut emitted: HashSet<String> = HashSet::new();
+
     for zp in zones {
-        if zp.interfaces.is_empty() {
-            continue;
-        }
         // Validate every interface name before emitting into nft syntax.
         let mut valid_ifaces = Vec::new();
         for iface in &zp.interfaces {
@@ -433,17 +509,36 @@ fn emit_zone_defines(out: &mut String, zones: &[ZonePolicy]) {
             }
             valid_ifaces.push(format!("\"{iface}\""));
         }
-        if valid_ifaces.is_empty() {
-            continue;
-        }
         let set_name = format!("{}_ifaces", zp.zone);
-        writeln!(
-            out,
-            "    set {set_name} {{ type ifname; elements = {{ {} }}; }}",
-            valid_ifaces.join(", ")
-        )
-        .unwrap();
+        if valid_ifaces.is_empty() {
+            // Empty set — still created so rules referencing it don't fail.
+            writeln!(out, "    set {set_name} {{ type ifname; }}").unwrap();
+        } else {
+            writeln!(
+                out,
+                "    set {set_name} {{ type ifname; elements = {{ {} }}; }}",
+                valid_ifaces.join(", ")
+            )
+            .unwrap();
+        }
+        emitted.insert(set_name);
     }
+
+    // Ensure all standard zone sets exist even if the zone itself is not
+    // in the DB yet (e.g. first boot before MGMT zone is configured).
+    for zone in &[
+        FirewallZone::Wan,
+        FirewallZone::Lan,
+        FirewallZone::Dmz,
+        FirewallZone::Mgmt,
+        FirewallZone::Guest,
+    ] {
+        let set_name = format!("{}_ifaces", zone);
+        if !emitted.contains(&set_name) {
+            writeln!(out, "    set {set_name} {{ type ifname; }}").unwrap();
+        }
+    }
+
     writeln!(out).unwrap();
 }
 
@@ -816,6 +911,20 @@ fn emit_default_rules(out: &mut String) {
     )
     .unwrap();
 
+    // SSH on all internal bridges (always — never lock yourself out).
+    writeln!(
+        out,
+        "    add rule inet {TABLE} input iifname {{ \"br-lan\", \"br-mgmt\", \"br-guest\", \"br-dmz\", \"sw0\" }} tcp dport 22 accept comment \"SSH on internal\""
+    )
+    .unwrap();
+
+    // DHCPv6.
+    writeln!(
+        out,
+        "    add rule inet {TABLE} input ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept comment \"DHCPv6\""
+    )
+    .unwrap();
+
     writeln!(out).unwrap();
 }
 
@@ -823,50 +932,44 @@ fn emit_default_rules(out: &mut String) {
 fn emit_hardened_defaults(out: &mut String) {
     writeln!(out, "    # ── Hardened defaults (no user rules in DB) ──").unwrap();
 
-    // Allow DHCP on LAN interfaces (br-lan*, eth1*, vlan*).
+    // Allow DHCP on all internal bridges.
     writeln!(
         out,
-        "    add rule inet {TABLE} input iifname {{ \"br-lan*\", \"eth1*\", \"vlan*\" }} udp dport {{ 67, 68 }} accept comment \"DHCP on LAN\""
+        "    add rule inet {TABLE} input iifname {{ \"br-lan\", \"br-mgmt\", \"br-guest\", \"br-dmz\" }} udp dport {{ 67, 68 }} accept comment \"DHCP on internal\""
     ).unwrap();
 
-    // Allow DNS on LAN interfaces.
+    // Allow DNS on all internal bridges.
     writeln!(
         out,
-        "    add rule inet {TABLE} input iifname {{ \"br-lan*\", \"eth1*\", \"vlan*\" }} tcp dport 53 accept comment \"DNS on LAN\""
+        "    add rule inet {TABLE} input iifname {{ \"br-lan\", \"br-mgmt\", \"br-guest\", \"br-dmz\" }} tcp dport 53 accept comment \"DNS TCP\""
     ).unwrap();
     writeln!(
         out,
-        "    add rule inet {TABLE} input iifname {{ \"br-lan*\", \"eth1*\", \"vlan*\" }} udp dport 53 accept comment \"DNS on LAN\""
+        "    add rule inet {TABLE} input iifname {{ \"br-lan\", \"br-mgmt\", \"br-guest\", \"br-dmz\" }} udp dport 53 accept comment \"DNS UDP\""
     ).unwrap();
 
-    // Allow HTTPS on LAN + MGMT.
+    // Allow HTTPS + HTTP redirect on LAN + MGMT.
     writeln!(
         out,
-        "    add rule inet {TABLE} input iifname {{ \"br-lan*\", \"eth1*\", \"vlan*\", \"br-mgmt*\" }} tcp dport 443 accept comment \"HTTPS on LAN/MGMT\""
+        "    add rule inet {TABLE} input iifname {{ \"br-lan\", \"br-mgmt\" }} tcp dport {{ 80, 443 }} accept comment \"Web UI on LAN/MGMT\""
     ).unwrap();
 
     // Allow Inform (8080) on MGMT VLAN only.
     writeln!(
         out,
-        "    add rule inet {TABLE} input iifname \"br-mgmt*\" tcp dport 8080 accept comment \"Inform on MGMT only\""
+        "    add rule inet {TABLE} input iifname \"br-mgmt\" tcp dport 8080 accept comment \"Inform on MGMT only\""
     ).unwrap();
 
-    // Allow forwarding from LAN to WAN.
+    // Allow forwarding from internal zones to WAN.
     writeln!(
         out,
-        "    add rule inet {TABLE} forward iifname {{ \"br-lan*\", \"eth1*\", \"vlan*\" }} oifname {{ \"eth0*\", \"ppp*\", \"wan*\" }} accept comment \"LAN to WAN\""
-    ).unwrap();
-
-    // Allow forwarding from MGMT to WAN.
-    writeln!(
-        out,
-        "    add rule inet {TABLE} forward iifname \"br-mgmt*\" oifname {{ \"eth0*\", \"ppp*\", \"wan*\" }} accept comment \"MGMT to WAN\""
+        "    add rule inet {TABLE} forward iifname {{ \"br-lan\", \"br-mgmt\", \"br-guest\" }} oifname {{ \"eth8\", \"eth9\", \"ppp*\" }} accept comment \"Internal to WAN\""
     ).unwrap();
 
     // NAT masquerade on WAN.
     writeln!(
         out,
-        "    add rule inet {TABLE} postrouting oifname {{ \"eth0*\", \"ppp*\", \"wan*\" }} masquerade comment \"NAT masquerade WAN\""
+        "    add rule inet {TABLE} postrouting oifname {{ \"eth8\", \"eth9\", \"ppp*\" }} masquerade comment \"NAT masquerade WAN\""
     ).unwrap();
 
     // No WAN inbound (policy DROP handles it).

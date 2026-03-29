@@ -91,6 +91,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: UpdateCommands,
     },
+    /// Hardware switch ASIC diagnostics (RTL8370MB)
+    Switch {
+        #[command(subcommand)]
+        cmd: SwitchCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -142,6 +147,36 @@ enum CryptoCommands {
 }
 
 #[derive(Subcommand)]
+enum SwitchCommands {
+    /// Dump all switch ASIC registers (VLAN, ports, isolation, etc.)
+    Dump,
+    /// Read a single register by hex address (e.g. 0x1352)
+    Read {
+        /// Register address in hex (e.g. 0x1300)
+        #[arg(value_parser = parse_hex_u16)]
+        reg: u16,
+    },
+    /// Write a single register (use with caution)
+    Write {
+        /// Register address in hex
+        #[arg(value_parser = parse_hex_u16)]
+        reg: u16,
+        /// Value in hex
+        #[arg(value_parser = parse_hex_u16)]
+        val: u16,
+    },
+    /// Show port link status only
+    Ports,
+    /// Re-apply VLAN config from DB without full restart
+    Reapply,
+}
+
+fn parse_hex_u16(s: &str) -> Result<u16, String> {
+    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    u16::from_str_radix(s, 16).map_err(|e| format!("invalid hex: {e}"))
+}
+
+#[derive(Subcommand)]
 enum UpdateCommands {
     /// Check for available firmware updates
     Check,
@@ -174,6 +209,7 @@ async fn main() -> Result<()> {
         Some(Commands::Adopt { cmd }) => handle_adopt(cmd).await?,
         Some(Commands::Crypto { cmd }) => handle_crypto(cmd).await?,
         Some(Commands::Update { cmd }) => handle_update(cmd).await?,
+        Some(Commands::Switch { cmd }) => handle_switch(cmd).await?,
         None => start_services(event_tx).await?,
     }
 
@@ -275,6 +311,7 @@ async fn start_services(event_tx: sfgw_api::events::EventTx) -> Result<()> {
     // Phase 7: DNS/DHCP
     tracing::info!("starting DNS/DHCP");
     let _dnsmasq = sfgw_dns::start(&db).await?;
+    sfgw_dns::spawn_watchdog(&_dnsmasq, db.clone());
 
     // Phase 8: VPN
     tracing::info!("starting VPN services");
@@ -797,3 +834,62 @@ async fn handle_update(cmd: UpdateCommands) -> Result<()> {
 
     Ok(())
 }
+
+fn open_switch() -> Result<sfgw_net::rtl8370mb::Rtl8370mb> {
+    let board = sfgw_hal::detect_board().context("no board detected")?;
+    let sw = board.switch.context("no switch ASIC on this board")?;
+    sfgw_net::rtl8370mb::Rtl8370mb::new(sw.smi_iface, sw.smi_phy_addr)
+        .context("failed to open SMI")
+}
+
+async fn handle_switch(cmd: SwitchCommands) -> Result<()> {
+    match cmd {
+        SwitchCommands::Dump => {
+            let drv = open_switch()?;
+            let report = drv.dump_state().context("failed to dump switch state")?;
+            print!("{report}");
+        }
+        SwitchCommands::Read { reg } => {
+            let drv = open_switch()?;
+            let val = drv.raw_read(reg).context("SMI read failed")?;
+            println!("0x{reg:04X} = 0x{val:04X} ({val})");
+        }
+        SwitchCommands::Write { reg, val } => {
+            let drv = open_switch()?;
+            drv.smi().smi_write(reg, val).context("SMI write failed")?;
+            println!("0x{reg:04X} <- 0x{val:04X}");
+        }
+        SwitchCommands::Ports => {
+            let drv = open_switch()?;
+            for p in 0..=sfgw_net::rtl8370mb::MAX_PORT {
+                match drv.port_get_link(p) {
+                    Ok(link) => {
+                        println!(
+                            "P{p:2}: {}  {}{}",
+                            if link.up { "UP  " } else { "DOWN" },
+                            if link.up {
+                                match link.speed_mbps {
+                                    10 => "10M",
+                                    100 => "100M",
+                                    1000 => "1G",
+                                    _ => "?",
+                                }
+                            } else {
+                                ""
+                            },
+                            if link.up && link.full_duplex { "/FD" } else if link.up { "/HD" } else { "" }
+                        );
+                    }
+                    Err(e) => println!("P{p:2}: ERR {e}"),
+                }
+            }
+        }
+        SwitchCommands::Reapply => {
+            let db = sfgw_db::open_or_create().await?;
+            sfgw_net::switch::reconfigure_networks(&db).await?;
+            println!("Switch VLAN config reapplied from DB.");
+        }
+    }
+    Ok(())
+}
+

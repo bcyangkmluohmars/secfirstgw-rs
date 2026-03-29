@@ -57,7 +57,7 @@ pub async fn serve(
     let auth_limiter = RateLimiter::new(10, Duration::from_secs(60));
     // Protected API + read-only public endpoints: 120 requests per minute per IP.
     // Dashboard loads ~8-10 API calls at once, so 60 was too tight for power users.
-    let general_limiter = RateLimiter::new(120, Duration::from_secs(60));
+    let general_limiter = RateLimiter::new(600, Duration::from_secs(60));
     // Critical mutations (firewall apply, backup/restore, firmware update, VPN lifecycle,
     // log destroy, device adoption): 5 requests per minute per IP.
     // These are expensive or destructive operations that should not be spammable.
@@ -138,6 +138,7 @@ pub async fn serve(
         .route("/api/v1/status", get(status_handler))
         .route("/api/v1/system", get(system_handler))
         .route("/api/v1/interfaces", get(interfaces_handler))
+        .route("/api/v1/switch/state", get(switch_state_handler))
         .route(
             "/api/v1/interfaces/{name}",
             put(interface_update).delete(interface_delete),
@@ -1224,6 +1225,10 @@ async fn interfaces_handler(
     _auth: AuthUser,
     Extension(db): Extension<sfgw_db::Db>,
 ) -> impl IntoResponse {
+    // Read live switch port link status from hardware ASIC (if present).
+    // This runs outside the DB lock since it only touches SMI registers.
+    let switch_links = sfgw_net::switch::read_switch_port_links();
+
     let conn = db.lock().await;
     let mut stmt = match conn.prepare(
         "SELECT name, mac, ips, mtu, is_up, pvid, tagged_vlans, enabled FROM interfaces ORDER BY name",
@@ -1239,27 +1244,66 @@ async fn interfaces_handler(
         let tagged_vlans: Value =
             serde_json::from_str(&tagged_json).unwrap_or(Value::Array(vec![]));
 
-        // Detect hardware port type from sysfs
-        let port_info = detect_port_type(&name);
+        // For switch-managed ports, use live data from the ASIC.
+        // For all other ports, fall back to sysfs detection.
+        let (is_up, speed, driver, port_type) = if let Some(link) = switch_links.get(&name) {
+            let speed_mbps = if link.up { i64::from(link.speed_mbps) } else { 0 };
+            (
+                json!(link.up),
+                if link.up { json!(speed_mbps) } else { Value::Null },
+                Value::Null,
+                json!(format!("{} {}", link.connector, format_speed(speed_mbps))),
+            )
+        } else {
+            let port_info = detect_port_type(&name);
+            (row.get::<_, bool>(4).map(|v| json!(v)).unwrap_or(json!(false)), port_info.0, port_info.1, port_info.2)
+        };
 
         Ok(json!({
             "name": name,
             "mac": row.get::<_, String>(1)?,
             "ips": ips,
             "mtu": row.get::<_, i64>(3)?,
-            "is_up": row.get::<_, bool>(4)?,
+            "is_up": is_up,
             "pvid": row.get::<_, i64>(5)?,
             "tagged_vlans": tagged_vlans,
             "enabled": row.get::<_, bool>(7)?,
-            "speed": port_info.0,
-            "driver": port_info.1,
-            "port_type": port_info.2,
+            "speed": speed,
+            "driver": driver,
+            "port_type": port_type,
         }))
     }) {
         Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
         Err(e) => return internal_err(anyhow::anyhow!("{e}")),
     };
     (StatusCode::OK, Json(json!({ "interfaces": rows })))
+}
+
+/// GET /api/v1/switch/state — read complete switch ASIC register state.
+///
+/// Returns structured SMI register data for the Switch tab in the UI.
+/// If no hardware switch is detected, returns `{ "available": false }`.
+async fn switch_state_handler(_auth: AuthUser) -> impl IntoResponse {
+    match sfgw_net::switch::read_switch_state() {
+        None => (
+            StatusCode::OK,
+            Json(json!({ "available": false })),
+        ),
+        Some(Err(e)) => {
+            tracing::warn!("switch state read failed: {e}");
+            (
+                StatusCode::OK,
+                Json(json!({ "available": false, "error": "SMI read failed" })),
+            )
+        }
+        Some(Ok(state)) => (
+            StatusCode::OK,
+            Json(json!({
+                "available": true,
+                "state": state,
+            })),
+        ),
+    }
 }
 
 /// Detect port type, speed, and driver from sysfs.

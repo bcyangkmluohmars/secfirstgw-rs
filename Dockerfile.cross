@@ -1,0 +1,23 @@
+# Cross-compile sfgw for aarch64-musl (UDM Pro)
+#
+# Usage:
+#   docker build -f Dockerfile.cross -o out .
+#   # → out/sfgw (aarch64 static binary)
+#
+# Uses messense/rust-musl-cross which ships a complete musl cross-toolchain
+# (aarch64-linux-musl-gcc, headers, libc) so sqlite/openssl/ring compile cleanly.
+
+FROM messense/rust-musl-cross:aarch64-musl AS builder
+
+WORKDIR /build
+
+# Copy source
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+COPY patches patches
+
+RUN cargo build --release --bin sfgw
+
+# Output stage — just the binary
+FROM scratch AS output
+COPY --from=builder /build/target/aarch64-unknown-linux-musl/release/sfgw /sfgw

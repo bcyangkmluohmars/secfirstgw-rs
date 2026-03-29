@@ -2,9 +2,15 @@
 
 //! Hardware switch ASIC configuration and Linux bridge/VLAN setup.
 //!
-//! This module is platform-agnostic. Hardware-specific details (switch device
-//! name, port layout, CPU port) are passed in via [`SwitchLayout`].
+//! This module is platform-agnostic. Hardware-specific details (switch port
+//! layout, SMI interface, trunk interface) are passed in via [`SwitchLayout`].
 //! On platforms without a switch ASIC, only Linux bridges are created.
+//!
+//! # Switch programming model
+//!
+//! The RTL8370MB is programmed via direct SMI register writes (MDIO ioctl on
+//! the SMI interface). No `swconfig` or DSA framework is used — the custom
+//! kernel exposes only the raw MDIO bus.
 //!
 //! # VLAN programming model
 //!
@@ -34,9 +40,12 @@
 //!
 //! This means SSH connections survive the firmware transition.
 
+use crate::rtl8370mb::{Rtl8370mb, Vlan4kEntry, VlanMcEntry};
 use crate::Result;
 use anyhow::Context;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::process::Command;
 
 /// Describes the hardware switch port layout.
@@ -46,8 +55,13 @@ use std::process::Command;
 /// bridges are created.
 #[derive(Debug, Clone)]
 pub struct SwitchLayout {
-    /// swconfig device name (e.g. "switch0").
-    pub device: String,
+    /// Linux interface for VLAN sub-interfaces (e.g. "sw0").
+    /// VLAN sub-interfaces are created as `{trunk_iface}.{vid}`.
+    pub trunk_iface: String,
+    /// Linux interface whose MDIO bus connects to the switch (e.g. "eth8").
+    pub smi_iface: String,
+    /// MDIO PHY address of the switch ASIC (0x1D for RTL8370MB).
+    pub smi_phy_addr: u8,
     /// Switch port numbers that are LAN ports (e.g. [0,1,2,3,4,5,6]).
     pub lan_ports: Vec<u8>,
     /// CPU port number (internal, always tagged in every VLAN).
@@ -58,6 +72,14 @@ pub struct SwitchLayout {
     /// Dedicated MGMT port number, if any. This port gets its own PVID
     /// set to the MGMT VLAN and is excluded from the LAN VLAN.
     pub mgmt_port: Option<u8>,
+}
+
+impl SwitchLayout {
+    /// Open an RTL8370MB driver handle for this layout.
+    fn open_driver(&self) -> crate::Result<Rtl8370mb> {
+        Rtl8370mb::new(&self.smi_iface, self.smi_phy_addr)
+            .map_err(|e| crate::NetError::Internal(anyhow::anyhow!("failed to open SMI: {e}")))
+    }
 }
 
 /// A network zone to be provisioned on the switch and as a Linux bridge.
@@ -95,7 +117,9 @@ struct PortMember {
 pub async fn reconfigure_networks(db: &sfgw_db::Db) -> Result<()> {
     let switch_layout = if let Some(board) = sfgw_hal::detect_board() {
         board.switch.map(|sw| SwitchLayout {
-            device: sw.device.to_string(),
+            trunk_iface: sw.trunk_iface.to_string(),
+            smi_iface: sw.smi_iface.to_string(),
+            smi_phy_addr: sw.smi_phy_addr,
             lan_ports: sw.lan_ports.to_vec(),
             cpu_port: sw.cpu_port,
             internal_ports: sw.internal_ports.to_vec(),
@@ -110,7 +134,7 @@ pub async fn reconfigure_networks(db: &sfgw_db::Db) -> Result<()> {
 
 /// Configure VLANs and bridges for all enabled networks.
 ///
-/// - With a [`SwitchLayout`]: configures hardware switch VLANs via swconfig,
+/// - With a [`SwitchLayout`]: configures hardware switch VLANs via SMI,
 ///   creates VLAN sub-interfaces, and sets up Linux bridges.
 /// - Without: creates only Linux bridges (VM/Docker mode).
 ///
@@ -123,6 +147,11 @@ pub async fn setup_networks(db: &sfgw_db::Db, switch: Option<&SwitchLayout>) -> 
         return Ok(());
     }
 
+    // Step 0: Ensure trunk interface exists (rename PCI eth to sw0 if needed)
+    if let Some(sw) = switch {
+        ensure_trunk_iface(sw)?;
+    }
+
     // Step 1: Migrate legacy bridges (br0 → br-lan, etc.)
     migrate_legacy_bridges(&networks);
 
@@ -133,8 +162,14 @@ pub async fn setup_networks(db: &sfgw_db::Db, switch: Option<&SwitchLayout>) -> 
 
     // Step 3: Ensure all bridges exist with correct VLAN attachments and IPs,
     // and register them in the interfaces table so the API can see them.
-    let switch_dev = switch.map(|sw| sw.device.as_str());
-    setup_bridges(&networks, switch_dev, db).await?;
+    let trunk_iface = switch.map(|sw| sw.trunk_iface.as_str());
+    setup_bridges(&networks, trunk_iface, db).await?;
+
+    // Step 4: Attach direct physical ports (not on the switch ASIC) to their
+    // bridges based on PVID. E.g. eth10 (SFP+ LAN) → br-lan.
+    if let Some(sw) = switch {
+        attach_direct_ports(&networks, sw, db).await?;
+    }
 
     Ok(())
 }
@@ -310,22 +345,127 @@ fn compute_vlan_port_map(
     map
 }
 
-/// Format a list of port members into a swconfig port string.
+/// Build RTL8370MB 4K table entries, MC table entries, and PVID mappings.
 ///
-/// Tagged ports are formatted as `{port}t`, untagged as `{port}`.
-/// Members are joined with spaces.
-fn format_port_string(members: &[PortMember]) -> String {
-    members
-        .iter()
-        .map(|m| {
-            if m.tagged {
-                format!("{}t", m.port)
-            } else {
-                format!("{}", m.port)
+/// Returns `(vlan_4k_entries, mc_entries, pvids)` where:
+/// - `vlan_4k_entries`: one per VLAN, written to indirect 4K table
+/// - `mc_entries`: one per VLAN, written to direct MC table (index 0..N)
+/// - `pvids`: (port, mc_index) for each switch port
+fn build_switch_config(
+    vlan_map: &BTreeMap<u16, Vec<PortMember>>,
+    port_configs: &[PortVlanConfig],
+    sw: &SwitchLayout,
+) -> (Vec<Vlan4kEntry>, Vec<VlanMcEntry>, Vec<(u8, u8)>) {
+    let mut vlan_4k = Vec::new();
+    let mut mc = Vec::new();
+    let mut fid: u8 = 0;
+
+    // Build a VID → MC index map
+    let mut vid_to_mc: BTreeMap<u16, u8> = BTreeMap::new();
+
+    for (mc_idx, (&vid, members)) in vlan_map.iter().enumerate() {
+        let mut member_mask: u16 = 0;
+        let mut untag_mask: u16 = 0;
+
+        for m in members {
+            member_mask |= 1 << m.port;
+            if !m.tagged {
+                untag_mask |= 1 << m.port;
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+        }
+
+        vlan_4k.push(Vlan4kEntry {
+            vid,
+            member: member_mask,
+            untag: untag_mask,
+            fid,
+        });
+
+        mc.push(VlanMcEntry {
+            index: mc_idx as u8,
+            vid,
+            member: member_mask,
+            fid,
+        });
+
+        vid_to_mc.insert(vid, mc_idx as u8);
+        fid = fid.wrapping_add(1).min(15);
+    }
+
+    // Build PVID map: each port → MC index of its PVID VLAN
+    let mut pvids: Vec<(u8, u8)> = Vec::new();
+    for port_cfg in port_configs {
+        if let Some(switch_port) = iface_to_switch_port(&port_cfg.name, sw) {
+            if let Some(&mc_idx) = vid_to_mc.get(&port_cfg.pvid) {
+                pvids.push((switch_port, mc_idx));
+            }
+        }
+    }
+    // CPU port → MC index for VLAN 1 (catch-all)
+    if let Some(&mc_idx) = vid_to_mc.get(&1) {
+        pvids.push((sw.cpu_port, mc_idx));
+    }
+
+    (vlan_4k, mc, pvids)
+}
+
+// ── Trunk interface setup ───────────────────────────────────────────
+
+/// Ensure the trunk interface exists by renaming the PCI interface if needed.
+///
+/// On the UDM Pro with our custom kernel, the switch uplink (PCI 00:03.0)
+/// comes up as a regular ethN interface. We rename it to the configured
+/// trunk name (e.g. "sw0") so that eth0–eth7 are free for logical switch
+/// port names in the DB.
+///
+/// The rename is idempotent: if the trunk already exists, this is a no-op.
+fn ensure_trunk_iface(sw: &SwitchLayout) -> Result<()> {
+    if link_exists(&sw.trunk_iface) {
+        return Ok(());
+    }
+
+    // Find the PCI interface to rename by checking the expected device path.
+    // On UDM Pro: PCI 00:03.0 → ethN → sw0
+    // We identify it by reading the sysfs device symlink.
+    let pci_addr = "0000:00:03.0";
+    let sysfs = std::path::Path::new("/sys/class/net");
+    let mut source_iface: Option<String> = None;
+
+    if let Ok(entries) = std::fs::read_dir(sysfs) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip non-eth interfaces
+            if !name.starts_with("eth") {
+                continue;
+            }
+            // Check if this interface is on the right PCI device
+            let device_link = entry.path().join("device");
+            if let Ok(target) = std::fs::read_link(&device_link) {
+                let target_str = target.to_string_lossy();
+                if target_str.contains(pci_addr) {
+                    source_iface = Some(name);
+                    break;
+                }
+            }
+        }
+    }
+
+    let Some(src) = source_iface else {
+        tracing::warn!(
+            trunk = %sw.trunk_iface,
+            "trunk interface not found and no PCI device {pci_addr} to rename"
+        );
+        return Ok(());
+    };
+
+    tracing::info!(from = %src, to = %sw.trunk_iface, "renaming switch uplink interface");
+
+    // Must bring down before rename, then back up
+    let _ = run_ip(&["link", "set", &src, "down"]);
+    run_ip(&["link", "set", &src, "name", &sw.trunk_iface])?;
+    run_ip(&["link", "set", &sw.trunk_iface, "up"])?;
+
+    Ok(())
 }
 
 // ── Bridge migration ────────────────────────────────────────────────
@@ -391,30 +531,72 @@ fn migrate_legacy_bridges(networks: &[NetworkSetup]) {
     }
 }
 
-// ── Switch ASIC (swconfig) ──────────────────────────────────────────
+// ── Switch ASIC (SMI) ─────────────────────────────────────────────
 
-/// Configure VLANs on the hardware switch ASIC via `swconfig`.
+/// Configure VLANs on the hardware switch ASIC via SMI register writes.
 ///
 /// Reads per-port PVID + tagged VLAN config from the DB and computes per-VLAN
 /// port membership. Each port only carries VLANs it is explicitly configured
 /// for. VLAN 1 is always programmed as a void catch-all sink (no bridge).
-///
-/// Stale VLAN cleanup covers ranges 1–100 and 3000–3100 (zone VLAN range).
 async fn setup_switch_vlans(sw: &SwitchLayout, db: &sfgw_db::Db) -> Result<()> {
+    let driver = sw.open_driver()?;
+
+    // Verify chip responds before programming
+    match driver.verify_chip() {
+        Ok((chip_id, chip_ver)) => {
+            tracing::info!(
+                chip_id = format!("0x{chip_id:04X}"),
+                chip_ver = format!("0x{chip_ver:04X}"),
+                "RTL8370MB chip detected via SMI"
+            );
+        }
+        Err(e) => {
+            return Err(crate::NetError::Internal(anyhow::anyhow!(
+                "RTL8370MB not responding on SMI ({}:{:#04X}): {e}",
+                sw.smi_iface,
+                sw.smi_phy_addr,
+            )));
+        }
+    }
+
     // Load per-port config from DB (pvid > 0 only — excludes WAN ports)
     let port_configs = load_port_vlan_config(db).await?;
 
     // Compute per-VLAN port membership
     let vlan_map = compute_vlan_port_map(&port_configs, sw);
 
-    // Collect our computed VLAN IDs for stale cleanup
-    let our_vlans: std::collections::HashSet<u16> = vlan_map.keys().copied().collect();
+    // Build 4K table entries, MC table entries, and PVID mappings
+    let (vlan_4k, mc_entries, pvids) = build_switch_config(&vlan_map, &port_configs, sw);
 
-    // Clean up stale VLAN sub-interfaces (switch0.X where X is not one of ours)
+    // Program the switch ASIC (4K table + MC table + PVIDs)
+    driver
+        .apply_vlan_config(&mc_entries, &vlan_4k, &pvids)
+        .map_err(|e| {
+            crate::NetError::Internal(anyhow::anyhow!(
+                "failed to program switch VLANs via SMI: {e}"
+            ))
+        })?;
+
+    for entry in &vlan_4k {
+        tracing::info!(
+            vlan = entry.vid,
+            members = format!("0x{:03X}", entry.member),
+            untag = format!("0x{:03X}", entry.untag),
+            fid = entry.fid,
+            "configured 4K VLAN table via SMI"
+        );
+    }
+
+    for &(port, mc_idx) in &pvids {
+        tracing::info!(port, mc_idx, "set port PVID MC index via SMI");
+    }
+
+    // Clean up stale VLAN sub-interfaces on the trunk
+    let our_vlans: std::collections::HashSet<u16> = vlan_map.keys().copied().collect();
     let sysfs = std::path::Path::new("/sys/class/net");
-    if let Ok(entries) = std::fs::read_dir(sysfs) {
-        let prefix = format!("{}.", sw.device);
-        for entry in entries.flatten() {
+    if let Ok(dir_entries) = std::fs::read_dir(sysfs) {
+        let prefix = format!("{}.", sw.trunk_iface);
+        for entry in dir_entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if let Some(vid_str) = name.strip_prefix(&prefix)
                 && let Ok(vid) = vid_str.parse::<u16>()
@@ -427,123 +609,7 @@ async fn setup_switch_vlans(sw: &SwitchLayout, db: &sfgw_db::Db) -> Result<()> {
         }
     }
 
-    // Clear stale VLANs on the switch ASIC.
-    // Check the common range 1–100 plus the zone VLAN range 3000–3100.
-    let mut stale_vids: Vec<u16> = Vec::new();
-
-    let check_ranges: &[(u16, u16)] = &[(1, 100), (3000, 3100)];
-    for &(start, end) in check_ranges {
-        for vid in start..=end {
-            if !our_vlans.contains(&vid)
-                && !stale_vids.contains(&vid)
-                && swconfig_vlan_has_ports(&sw.device, vid as i32)
-            {
-                stale_vids.push(vid);
-            }
-        }
-    }
-
-    for vid in &stale_vids {
-        tracing::info!(vlan = vid, "clearing stale switch VLAN");
-        let _ = swconfig_set_vlan_ports(&sw.device, *vid as i32, "");
-    }
-
-    // Program each VLAN with its port membership
-    for (&vid, members) in &vlan_map {
-        let ports_str = format_port_string(members);
-        swconfig_set_vlan_ports(&sw.device, vid as i32, &ports_str)?;
-        tracing::info!(vlan = vid, ports = %ports_str, "configured switch VLAN");
-    }
-
-    // Set PVID for each port that has a known switch port number
-    for port_cfg in &port_configs {
-        if let Some(switch_port) = iface_to_switch_port(&port_cfg.name, sw) {
-            swconfig_set_pvid(&sw.device, switch_port, port_cfg.pvid as i32)?;
-            tracing::info!(
-                iface = %port_cfg.name,
-                port = switch_port,
-                pvid = port_cfg.pvid,
-                "set switch port PVID"
-            );
-        }
-    }
-
-    // Apply all changes atomically
-    swconfig_apply(&sw.device)?;
-
     Ok(())
-}
-
-fn swconfig_set_vlan_ports(device: &str, vlan_id: i32, ports: &str) -> Result<()> {
-    run_swconfig(&[
-        "dev",
-        device,
-        "vlan",
-        &vlan_id.to_string(),
-        "set",
-        "ports",
-        ports,
-    ])
-}
-
-fn swconfig_set_pvid(device: &str, port: u8, pvid: i32) -> Result<()> {
-    run_swconfig(&[
-        "dev",
-        device,
-        "port",
-        &port.to_string(),
-        "set",
-        "pvid",
-        &pvid.to_string(),
-    ])
-}
-
-/// Check if a VLAN has any ports assigned on the switch.
-fn swconfig_vlan_has_ports(device: &str, vlan_id: i32) -> bool {
-    let output = Command::new("swconfig")
-        .args(["dev", device, "vlan", &vlan_id.to_string(), "get", "ports"])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            !stdout.trim().is_empty()
-        }
-        _ => false,
-    }
-}
-
-fn swconfig_apply(device: &str) -> Result<()> {
-    run_swconfig(&["dev", device, "set", "apply"])
-}
-
-fn run_swconfig(args: &[&str]) -> Result<()> {
-    let output = Command::new("swconfig")
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to execute swconfig {}", args.join(" ")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(crate::NetError::Internal(anyhow::anyhow!(
-            "swconfig {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        )));
-    }
-
-    Ok(())
-}
-
-/// Read the current PVID of a switch port via `swconfig`.
-fn swconfig_get_pvid(device: &str, port: u8) -> Option<u16> {
-    let output = Command::new("swconfig")
-        .args(["dev", device, "port", &port.to_string(), "get", "pvid"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 // ── Switch ASIC watchdog ────────────────────────────────────────────
@@ -559,7 +625,9 @@ pub async fn verify_switch_config(db: &sfgw_db::Db) -> bool {
     let switch_layout = match sfgw_hal::detect_board() {
         Some(board) => match board.switch {
             Some(sw) => SwitchLayout {
-                device: sw.device.to_string(),
+                trunk_iface: sw.trunk_iface.to_string(),
+                smi_iface: sw.smi_iface.to_string(),
+                smi_phy_addr: sw.smi_phy_addr,
                 lan_ports: sw.lan_ports.to_vec(),
                 cpu_port: sw.cpu_port,
                 internal_ports: sw.internal_ports.to_vec(),
@@ -568,6 +636,14 @@ pub async fn verify_switch_config(db: &sfgw_db::Db) -> bool {
             None => return false, // No switch ASIC on this platform
         },
         None => return false,
+    };
+
+    let driver = match switch_layout.open_driver() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!(error = %e, "switch watchdog: failed to open SMI");
+            return false;
+        }
     };
 
     // Load expected per-port config from DB
@@ -579,21 +655,29 @@ pub async fn verify_switch_config(db: &sfgw_db::Db) -> bool {
         }
     };
 
-    // Compare expected vs actual PVIDs
+    // Compute expected VLAN config to know expected MC indices
+    let vlan_map = compute_vlan_port_map(&port_configs, &switch_layout);
+    let (_, _, expected_pvids) =
+        build_switch_config(&vlan_map, &port_configs, &switch_layout);
+
+    // Compare expected vs actual MC indices (read via SMI)
     let mut drifted = false;
-    for port_cfg in &port_configs {
-        if let Some(switch_port) = iface_to_switch_port(&port_cfg.name, &switch_layout)
-            && let Some(actual_pvid) = swconfig_get_pvid(&switch_layout.device, switch_port)
-            && actual_pvid != port_cfg.pvid
-        {
-            tracing::warn!(
-                port = switch_port,
-                iface = %port_cfg.name,
-                expected = port_cfg.pvid,
-                actual = actual_pvid,
-                "switch ASIC PVID drift detected"
-            );
-            drifted = true;
+    for &(port, expected_mc) in &expected_pvids {
+        match driver.read_pvid_locked(port) {
+            Ok(actual_mc) if actual_mc != expected_mc => {
+                tracing::warn!(
+                    port,
+                    expected_mc,
+                    actual_mc,
+                    "switch ASIC PVID MC index drift detected"
+                );
+                drifted = true;
+            }
+            Err(e) => {
+                tracing::warn!(port, error = %e, "switch watchdog: failed to read PVID MC index");
+                drifted = true;
+            }
+            _ => {}
         }
     }
 
@@ -601,9 +685,7 @@ pub async fn verify_switch_config(db: &sfgw_db::Db) -> bool {
         return false;
     }
 
-    // Drift detected — ubios-udapi-server likely restarted and reset the
-    // entire network stack (interfaces, bridges, IPs, firewall, switch ASIC).
-    // We must rebuild everything, not just the switch VLANs.
+    // Drift detected — rebuild everything.
     tracing::warn!("switch ASIC drift detected — rebuilding full network stack");
 
     // Step 1: Re-apply switch VLANs + PVIDs
@@ -620,7 +702,7 @@ pub async fn verify_switch_config(db: &sfgw_db::Db) -> bool {
             return false;
         }
     };
-    if let Err(e) = setup_bridges(&networks, Some(&switch_layout.device), db).await {
+    if let Err(e) = setup_bridges(&networks, Some(&switch_layout.trunk_iface), db).await {
         tracing::error!(error = %e, "switch watchdog: failed to rebuild bridges");
         return false;
     }
@@ -642,7 +724,7 @@ pub async fn watchdog_loop(db: sfgw_db::Db) {
     let interval = std::time::Duration::from_secs(10);
     let mut timer = tokio::time::interval(interval);
     tracing::info!(
-        "switch ASIC watchdog started ({}s interval)",
+        "switch ASIC watchdog started ({}s interval, SMI)",
         interval.as_secs()
     );
     loop {
@@ -661,7 +743,7 @@ pub async fn watchdog_loop(db: sfgw_db::Db) {
 /// - Gateway IPs are assigned if not already set
 async fn setup_bridges(
     networks: &[NetworkSetup],
-    switch_dev: Option<&str>,
+    trunk_iface: Option<&str>,
     db: &sfgw_db::Db,
 ) -> Result<()> {
     for net in networks {
@@ -682,8 +764,8 @@ async fn setup_bridges(
             tracing::info!(bridge = %bridge_name, "created bridge");
         }
 
-        // Create VLAN sub-interface and attach to bridge
-        if let (Some(dev), Some(vid)) = (switch_dev, vlan_id) {
+        // Create VLAN sub-interface on the trunk and attach to bridge
+        if let (Some(dev), Some(vid)) = (trunk_iface, vlan_id) {
             let vlan_iface = format!("{dev}.{vid}");
 
             if !link_exists(&vlan_iface) {
@@ -731,6 +813,75 @@ async fn setup_bridges(
             vlan = ?vlan_id,
             gateway = %net.gateway,
             "network zone ready"
+        );
+    }
+
+    Ok(())
+}
+
+/// Attach direct physical ports (not managed by the switch ASIC) to their
+/// bridges based on PVID.
+///
+/// Switch-managed ports (eth0–eth7 on UDM Pro) are behind the RTL8370MB and
+/// reach bridges via the trunk VLAN sub-interfaces (sw0.10, sw0.3000, etc.).
+/// Direct ports like eth10 (SFP+ LAN) are real Linux interfaces that must be
+/// added to the bridge as regular members.
+async fn attach_direct_ports(
+    networks: &[NetworkSetup],
+    sw: &SwitchLayout,
+    db: &sfgw_db::Db,
+) -> Result<()> {
+    let port_configs = load_port_vlan_config(db).await?;
+
+    // Build VLAN-ID → zone lookup from networks
+    let vlan_to_zone: std::collections::HashMap<i32, &str> = networks
+        .iter()
+        .filter_map(|n| n.vlan_id.map(|vid| (vid, n.zone.as_str())))
+        .collect();
+
+    for port in &port_configs {
+        // Skip ports that are on the switch ASIC — they use trunk sub-interfaces
+        if iface_to_switch_port(&port.name, sw).is_some() {
+            continue;
+        }
+
+        // Skip bridges, VLAN sub-interfaces, loopback, and the trunk itself
+        if port.name.starts_with("br-")
+            || port.name.contains('.')
+            || port.name == "lo"
+            || port.name == sw.trunk_iface
+        {
+            continue;
+        }
+
+        // Skip if the interface doesn't exist in Linux
+        if !link_exists(&port.name) {
+            continue;
+        }
+
+        // Find the zone for this port's PVID
+        let Some(zone) = vlan_to_zone.get(&(port.pvid as i32)) else {
+            tracing::debug!(
+                iface = %port.name,
+                pvid = port.pvid,
+                "direct port PVID has no matching network zone"
+            );
+            continue;
+        };
+
+        let bridge_name = format!("br-{zone}");
+
+        // Attach to bridge (ignore error if already attached)
+        let _ = run_ip(&["link", "set", &port.name, "master", &bridge_name]);
+
+        // Bring up the interface
+        run_ip(&["link", "set", &port.name, "up"])?;
+
+        tracing::info!(
+            iface = %port.name,
+            bridge = %bridge_name,
+            pvid = port.pvid,
+            "attached direct port to bridge"
         );
     }
 
@@ -811,23 +962,109 @@ fn run_ip(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Live link status for a switch-managed port.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchPortLink {
+    pub up: bool,
+    pub speed_mbps: u16,
+    pub full_duplex: bool,
+    pub connector: String,
+}
+
+/// Read live link status for all switch-managed ports from the hardware ASIC.
+///
+/// Returns a map from interface name (e.g. "eth0") to link status.
+/// Returns an empty map if no hardware switch is detected or on read error.
+#[must_use]
+pub fn read_switch_port_links() -> HashMap<String, SwitchPortLink> {
+    let mut links = HashMap::new();
+
+    let board = match sfgw_hal::detect_board() {
+        Some(b) => b,
+        None => return links,
+    };
+    let sw = match board.switch {
+        Some(s) => s,
+        None => return links,
+    };
+    let rtl = match Rtl8370mb::new(sw.smi_iface, sw.smi_phy_addr) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("failed to open SMI for port link status: {e}");
+            return links;
+        }
+    };
+
+    for port_def in board.ports {
+        let n: u8 = match port_def
+            .iface
+            .strip_prefix("eth")
+            .and_then(|s| s.parse().ok())
+        {
+            Some(n) => n,
+            None => continue,
+        };
+
+        if !sw.lan_ports.contains(&n) && sw.mgmt_port != Some(n) {
+            continue;
+        }
+
+        match rtl.port_get_link(n) {
+            Ok(link) => {
+                links.insert(
+                    port_def.iface.to_string(),
+                    SwitchPortLink {
+                        up: link.up,
+                        speed_mbps: link.speed_mbps,
+                        full_duplex: link.full_duplex,
+                        connector: port_def.connector.to_string(),
+                    },
+                );
+            }
+            Err(e) => {
+                tracing::debug!(port = n, iface = port_def.iface, "failed to read port link: {e}");
+            }
+        }
+    }
+
+    links
+}
+
+/// Read complete switch ASIC state via SMI registers.
+///
+/// Returns `None` if no hardware switch is detected, or `Some(Err)` on
+/// SMI access failure, or `Some(Ok(state))` with structured register data.
+pub fn read_switch_state() -> Option<std::io::Result<crate::rtl8370mb::SwitchState>> {
+    let board = sfgw_hal::detect_board()?;
+    let sw = board.switch?;
+    let rtl = match Rtl8370mb::new(sw.smi_iface, sw.smi_phy_addr) {
+        Ok(r) => r,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(rtl.read_state())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn udm_pro_layout() -> SwitchLayout {
         SwitchLayout {
-            device: "switch0".to_string(),
+            trunk_iface: "sw0".to_string(),
+            smi_iface: "eth8".to_string(),
+            smi_phy_addr: 0x1D,
             lan_ports: vec![0, 1, 2, 3, 4, 5, 6],
-            cpu_port: 8,
-            internal_ports: vec![9],
+            cpu_port: 9,
+            internal_ports: vec![],
             mgmt_port: Some(7),
         }
     }
 
     fn generic_layout() -> SwitchLayout {
         SwitchLayout {
-            device: "switch0".to_string(),
+            trunk_iface: "sw0".to_string(),
+            smi_iface: "eth8".to_string(),
+            smi_phy_addr: 0x1D,
             lan_ports: vec![0, 1, 2, 3],
             cpu_port: 4,
             internal_ports: vec![],
@@ -867,53 +1104,46 @@ mod tests {
         assert_eq!(iface_to_switch_port("br-lan", &sw), None);
     }
 
-    // ── format_port_string ─────────────────────────────────────────
+    // ── build_switch_config ─────────────────────────────────────────
 
     #[test]
-    fn test_format_port_string() {
-        let members = vec![
-            PortMember {
-                port: 0,
-                tagged: false,
-            },
-            PortMember {
-                port: 1,
-                tagged: false,
-            },
-            PortMember {
-                port: 7,
-                tagged: true,
-            },
-            PortMember {
-                port: 8,
-                tagged: true,
-            },
-        ];
-        assert_eq!(format_port_string(&members), "0 1 7t 8t");
-    }
+    fn test_build_switch_config_basic() {
+        let sw = udm_pro_layout();
+        let ports: Vec<PortVlanConfig> = (0u8..=7)
+            .map(|i| PortVlanConfig {
+                name: format!("eth{i}"),
+                pvid: if i < 7 { 10 } else { 3000 },
+                tagged_vlans: vec![],
+            })
+            .collect();
 
-    #[test]
-    fn test_format_port_string_all_tagged() {
-        let members = vec![
-            PortMember {
-                port: 0,
-                tagged: true,
-            },
-            PortMember {
-                port: 7,
-                tagged: true,
-            },
-            PortMember {
-                port: 8,
-                tagged: true,
-            },
-        ];
-        assert_eq!(format_port_string(&members), "0t 7t 8t");
-    }
+        let vlan_map = compute_vlan_port_map(&ports, &sw);
+        let (vlan_4k, mc, pvids) = build_switch_config(&vlan_map, &ports, &sw);
 
-    #[test]
-    fn test_format_port_string_empty() {
-        assert_eq!(format_port_string(&[]), "");
+        // 3 VLANs: 1, 10, 3000
+        assert_eq!(vlan_4k.len(), 3);
+        assert_eq!(mc.len(), 3);
+
+        // 4K: VLAN 10 = ports 0-6 + CPU(9)
+        let v10 = vlan_4k.iter().find(|e| e.vid == 10).unwrap();
+        assert_eq!(v10.member, 0x027F);
+        assert_eq!(v10.untag, 0x007F);
+
+        // MC entries have sequential indices
+        assert_eq!(mc[0].index, 0);
+        assert_eq!(mc[1].index, 1);
+        assert_eq!(mc[2].index, 2);
+
+        // PVIDs: ports 0-6 → MC index of VID 10, port 7 → MC index of VID 3000
+        let vid10_mc = mc.iter().find(|e| e.vid == 10).unwrap().index;
+        let vid3000_mc = mc.iter().find(|e| e.vid == 3000).unwrap().index;
+        for &(port, mc_idx) in &pvids {
+            if port <= 6 {
+                assert_eq!(mc_idx, vid10_mc, "port {port} should map to VID 10 MC");
+            } else if port == 7 {
+                assert_eq!(mc_idx, vid3000_mc, "port 7 should map to VID 3000 MC");
+            }
+        }
     }
 
     // ── compute_vlan_port_map ──────────────────────────────────────
@@ -933,7 +1163,7 @@ mod tests {
 
         let map = compute_vlan_port_map(&ports, &sw);
 
-        // VLAN 10: ports 0–6 untagged, CPU(8t), internal(9t)
+        // VLAN 10: ports 0–6 untagged, CPU(9t)
         let vlan10 = map.get(&10).expect("VLAN 10 should exist");
         for port in 0u8..=6 {
             assert!(
@@ -946,36 +1176,18 @@ mod tests {
         }
         assert!(
             vlan10.contains(&PortMember {
-                port: 8,
+                port: 9,
                 tagged: true
             }),
             "CPU port in VLAN 10"
         );
-        assert!(
-            vlan10.contains(&PortMember {
-                port: 9,
-                tagged: true
-            }),
-            "internal port in VLAN 10"
-        );
         // MGMT port 7 must NOT be in VLAN 10
         assert!(
-            !vlan10.contains(&PortMember {
-                port: 7,
-                tagged: false
-            }),
-            "MGMT port must not be untagged in VLAN 10"
-        );
-        assert!(
-            !vlan10.contains(&PortMember {
-                port: 7,
-                tagged: true
-            }),
-            "MGMT port must not be tagged in VLAN 10"
+            !vlan10.iter().any(|m| m.port == 7),
+            "MGMT port must not be in VLAN 10"
         );
 
-        // VLAN 3000: port 7 untagged, CPU(8t), internal(9t)
-        // Ports 0–6 must NOT be in VLAN 3000 (they don't have 3000 in tagged_vlans)
+        // VLAN 3000: port 7 untagged, CPU(9t)
         let vlan3000 = map.get(&3000).expect("VLAN 3000 should exist");
         assert!(
             vlan3000.contains(&PortMember {
@@ -986,31 +1198,21 @@ mod tests {
         );
         assert!(
             vlan3000.contains(&PortMember {
-                port: 8,
+                port: 9,
                 tagged: true
             }),
             "CPU in VLAN 3000"
         );
-        assert!(
-            vlan3000.contains(&PortMember {
-                port: 9,
-                tagged: true
-            }),
-            "internal in VLAN 3000"
-        );
         for port in 0u8..=6 {
             assert!(
-                !vlan3000.contains(&PortMember {
-                    port,
-                    tagged: false
-                }) && !vlan3000.contains(&PortMember { port, tagged: true }),
+                !vlan3000.iter().any(|m| m.port == port),
                 "LAN port {port} must not be in VLAN 3000"
             );
         }
 
-        // VLAN 1: all ports tagged (catch-all sink)
+        // VLAN 1: all LAN + MGMT + CPU ports tagged (catch-all sink)
         let vlan1 = map.get(&1).expect("VLAN 1 should always exist");
-        for port in 0u8..=9 {
+        for port in [0u8, 1, 2, 3, 4, 5, 6, 7, 9] {
             assert!(
                 vlan1.contains(&PortMember { port, tagged: true }),
                 "port {port} should be tagged in VLAN 1"
@@ -1037,11 +1239,7 @@ mod tests {
             port: 0,
             tagged: false
         }));
-        // CPU and internal always tagged
-        assert!(vlan10.contains(&PortMember {
-            port: 8,
-            tagged: true
-        }));
+        // CPU always tagged
         assert!(vlan10.contains(&PortMember {
             port: 9,
             tagged: true
@@ -1065,7 +1263,6 @@ mod tests {
     #[test]
     fn test_compute_vlan_port_map_vlan1_always_present() {
         let sw = udm_pro_layout();
-        // Even with no explicit VLAN 1 config, VLAN 1 must appear
         let ports = vec![PortVlanConfig {
             name: "eth0".to_string(),
             pvid: 10,
@@ -1076,8 +1273,8 @@ mod tests {
         assert!(map.contains_key(&1), "VLAN 1 must always be in the map");
 
         let vlan1 = &map[&1];
-        // All ports tagged
-        for port in [0u8, 7, 8, 9] {
+        // All LAN + MGMT + CPU ports tagged
+        for port in [0u8, 7, 9] {
             assert!(
                 vlan1.contains(&PortMember { port, tagged: true }),
                 "port {port} should be tagged in VLAN 1"
@@ -1089,8 +1286,6 @@ mod tests {
     fn test_compute_vlan_port_map_wan_excluded() {
         let sw = udm_pro_layout();
 
-        // WAN ports (eth8, eth9) have pvid=0 and are excluded by the SQL query.
-        // Here we simulate what the DB returns: no entries for WAN ports.
         let ports = vec![PortVlanConfig {
             name: "eth0".to_string(),
             pvid: 10,
@@ -1099,24 +1294,17 @@ mod tests {
 
         let map = compute_vlan_port_map(&ports, &sw);
 
-        // VLAN 10 should not contain port 8 as untagged (8 is CPU, always tagged)
-        // and should not contain port 9 as untagged (9 is internal)
-        // The key point: eth8/eth9 as LAN ports would mean ports 8 and 9 in lan_ports,
-        // but they are NOT in sw.lan_ports or sw.mgmt_port.
-        // So they should only appear via cpu_port/internal_ports (always tagged).
         let vlan10 = map.get(&10).unwrap();
         // Port 0 untagged (from config)
         assert!(vlan10.contains(&PortMember {
             port: 0,
             tagged: false
         }));
-        // Port 8 (cpu) tagged — not as a "WAN port"
+        // Port 9 (cpu) tagged
         assert!(vlan10.contains(&PortMember {
-            port: 8,
+            port: 9,
             tagged: true
         }));
-        // WAN interfaces ethN where N is not in lan_ports/mgmt_port don't appear untagged
-        // This is verified implicitly: eth8 → iface_to_switch_port returns None
     }
 
     #[test]
@@ -1135,14 +1323,12 @@ mod tests {
         let map = compute_vlan_port_map(&ports, &sw);
 
         let vlan10 = map.get(&10).expect("VLAN 10 must exist");
-        // Port 7 must not appear in VLAN 10 in any form
         assert!(
             !vlan10.iter().any(|m| m.port == 7),
             "MGMT port 7 must not appear in VLAN 10"
         );
 
         let vlan3000 = map.get(&3000).expect("VLAN 3000 must exist");
-        // Port 7 must be untagged in VLAN 3000
         assert!(
             vlan3000.contains(&PortMember {
                 port: 7,
@@ -1150,7 +1336,6 @@ mod tests {
             }),
             "MGMT port 7 must be untagged in VLAN 3000"
         );
-        // LAN ports 0–6 must not appear in VLAN 3000
         for port in 0u8..=6 {
             assert!(
                 !vlan3000.iter().any(|m| m.port == port),
@@ -1161,18 +1346,6 @@ mod tests {
 
     // ── Integration-level: full UDM Pro VLAN map ───────────────────
 
-    /// Verify the complete VLAN map and PVID list for UDM Pro default config.
-    ///
-    /// Scenario:
-    /// - eth0–eth6: pvid=10 (LAN)
-    /// - eth7: pvid=3000 (MGMT)
-    /// - eth8, eth9: pvid=0 (WAN) — excluded by SQL WHERE pvid > 0
-    ///
-    /// Expected:
-    /// - VLAN 1: all ports 0–9 tagged (catch-all sink)
-    /// - VLAN 10: ports 0–6 untagged, port 8 (CPU) tagged, port 9 (internal) tagged
-    /// - VLAN 3000: port 7 untagged, port 8 (CPU) tagged, port 9 (internal) tagged
-    /// - PVIDs: port 0–6 = 10, port 7 = 3000
     #[tokio::test]
     async fn test_setup_switch_vlans_produces_correct_commands() {
         let db = sfgw_db::open_in_memory()
@@ -1220,98 +1393,37 @@ mod tests {
         );
         assert_eq!(port_configs.len(), 8, "should have 8 non-WAN ports");
 
-        // Compute VLAN map
+        // Compute VLAN map and build switch config
         let vlan_map = compute_vlan_port_map(&port_configs, &sw);
+        let (vlan_4k, mc, pvids) = build_switch_config(&vlan_map, &port_configs, &sw);
 
-        // VLAN 1: all ports 0–9 tagged (catch-all sink)
-        let vlan1 = vlan_map.get(&1).expect("VLAN 1 must exist");
-        for port in 0u8..=9 {
-            assert!(
-                vlan1.contains(&PortMember { port, tagged: true }),
-                "port {port} must be tagged in VLAN 1"
-            );
+        // 3 VLANs: 1 (catch-all), 10 (LAN), 3000 (MGMT)
+        assert_eq!(vlan_4k.len(), 3);
+
+        let e1 = vlan_4k.iter().find(|e| e.vid == 1).expect("VLAN 1");
+        let e10 = vlan_4k.iter().find(|e| e.vid == 10).expect("VLAN 10");
+        let e3000 = vlan_4k.iter().find(|e| e.vid == 3000).expect("VLAN 3000");
+
+        assert_eq!(e1.member, 0x02FF);
+        assert_eq!(e1.untag, 0x0000);
+        assert_eq!(e10.member, 0x027F);
+        assert_eq!(e10.untag, 0x007F);
+        assert_eq!(e3000.member, 0x0280);
+        assert_eq!(e3000.untag, 0x0080);
+
+        // MC entries: sequential indices, matching VIDs
+        assert_eq!(mc.len(), 3);
+        let mc10 = mc.iter().find(|e| e.vid == 10).expect("MC for VID 10");
+        let mc3000 = mc.iter().find(|e| e.vid == 3000).expect("MC for VID 3000");
+
+        // PVIDs: port 0-6 → MC index of VID 10, port 7 → MC index of VID 3000
+        for &(port, mc_idx) in &pvids {
+            if port <= 6 {
+                assert_eq!(mc_idx, mc10.index, "port {port} MC index");
+            } else if port == 7 {
+                assert_eq!(mc_idx, mc3000.index, "port 7 MC index");
+            }
         }
-
-        // VLAN 10: ports 0–6 untagged, CPU(8t), internal(9t)
-        let vlan10 = vlan_map.get(&10).expect("VLAN 10 must exist");
-        for port in 0u8..=6 {
-            assert!(
-                vlan10.contains(&PortMember {
-                    port,
-                    tagged: false
-                }),
-                "port {port} must be untagged in VLAN 10"
-            );
-        }
-        assert!(
-            vlan10.contains(&PortMember {
-                port: 8,
-                tagged: true
-            }),
-            "CPU in VLAN 10"
-        );
-        assert!(
-            vlan10.contains(&PortMember {
-                port: 9,
-                tagged: true
-            }),
-            "internal in VLAN 10"
-        );
-        // MGMT port 7 must NOT be in VLAN 10
-        assert!(
-            !vlan10.iter().any(|m| m.port == 7),
-            "port 7 must not be in VLAN 10"
-        );
-
-        // VLAN 3000: port 7 untagged, CPU(8t), internal(9t)
-        let vlan3000 = vlan_map.get(&3000).expect("VLAN 3000 must exist");
-        assert!(
-            vlan3000.contains(&PortMember {
-                port: 7,
-                tagged: false
-            }),
-            "port 7 untagged in VLAN 3000"
-        );
-        assert!(
-            vlan3000.contains(&PortMember {
-                port: 8,
-                tagged: true
-            }),
-            "CPU in VLAN 3000"
-        );
-        assert!(
-            vlan3000.contains(&PortMember {
-                port: 9,
-                tagged: true
-            }),
-            "internal in VLAN 3000"
-        );
-        // LAN ports 0–6 must NOT be in VLAN 3000
-        for port in 0u8..=6 {
-            assert!(
-                !vlan3000.iter().any(|m| m.port == port),
-                "LAN port {port} must not be in VLAN 3000"
-            );
-        }
-
-        // PVID verification: each port's pvid must match the config
-        let pvid_map: std::collections::HashMap<&str, u16> = port_configs
-            .iter()
-            .map(|p| (p.name.as_str(), p.pvid))
-            .collect();
-
-        for port in 0u8..=6 {
-            let iface = format!("eth{port}");
-            assert_eq!(pvid_map[iface.as_str()], 10, "eth{port} must have pvid=10");
-        }
-        assert_eq!(pvid_map["eth7"], 3000, "eth7 must have pvid=3000");
-
-        // VM/Docker path: verify setup_networks does not call switch code when switch=None
-        // (code path verification: if switch=None, setup_switch_vlans is never called)
-        // We can verify this by confirming setup_networks with None switch returns Ok
-        // without touching swconfig (which would fail in test env).
-        // This test verifies the guard is intact by testing the data path only.
-        // The actual guard `if let Some(sw) = switch` in setup_networks is code inspection.
     }
 
     #[test]

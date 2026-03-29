@@ -2,6 +2,9 @@
 #![deny(unsafe_code)]
 
 pub mod ddns;
+pub mod rtl8370mb;
+#[allow(unsafe_code)] // MDIO ioctl for RTL8370MB switch register access
+pub mod smi;
 pub mod switch;
 pub mod wan;
 pub mod wireless;
@@ -262,18 +265,22 @@ pub async fn configure(db: &sfgw_db::Db, platform: &sfgw_hal::Platform) -> Resul
         });
     }
 
-    // Apply all enabled WAN configs (start DHCP clients, PPPoE, set static routes, etc.)
-    let wan_configs = wan::list_wan_configs(db).await.unwrap_or_default();
-    for wc in &wan_configs {
-        if wc.enabled
-            && let Err(e) = wan::apply_wan_config(wc).await
-        {
-            tracing::warn!(
-                interface = %wc.interface,
-                "failed to apply WAN config at boot: {e}"
-            );
+    // Apply all enabled WAN configs in the background (DHCP/PPPoE timeouts
+    // must not block startup — the rest of the stack needs to come up fast).
+    let db_wan = db.clone();
+    tokio::spawn(async move {
+        let wan_configs = wan::list_wan_configs(&db_wan).await.unwrap_or_default();
+        for wc in &wan_configs {
+            if wc.enabled {
+                if let Err(e) = wan::apply_wan_config(wc).await {
+                    tracing::warn!(
+                        interface = %wc.interface,
+                        "failed to apply WAN config at boot: {e}"
+                    );
+                }
+            }
         }
-    }
+    });
 
     Ok(())
 }
@@ -351,6 +358,68 @@ fn detect_interfaces_for_platform(
             if let Some(board) = sfgw_hal::detect_board() {
                 let wan = board.wan_ifaces();
                 let mgmt = board.mgmt_iface();
+
+                // Seed logical switch port entries (eth0–ethN) for boards with
+                // a hardware switch ASIC. These ports don't exist as Linux
+                // interfaces — they're behind the switch on the trunk — but
+                // they need DB entries for per-port VLAN config.
+                if let Some(sw) = board.switch {
+                    let trunk_mac = interfaces
+                        .iter()
+                        .find(|i| {
+                            // Find the trunk interface (may still be named ethN
+                            // before rename to sw0)
+                            i.name == sw.trunk_iface
+                                || i.mac
+                                    == interfaces
+                                        .iter()
+                                        .find(|j| j.name == sw.trunk_iface)
+                                        .map(|j| j.mac.as_str())
+                                        .unwrap_or("")
+                        })
+                        .map(|i| i.mac.clone())
+                        .unwrap_or_default();
+
+                    for port_def in board.ports {
+                        // Skip ports that already exist as real Linux interfaces
+                        if interfaces.iter().any(|i| i.name == port_def.iface) {
+                            continue;
+                        }
+                        // Only seed switch-managed ports (LAN + MGMT)
+                        let port_name = port_def.iface;
+                        let n: Option<u8> = port_name
+                            .strip_prefix("eth")
+                            .and_then(|s| s.parse().ok());
+                        let is_switch_port = n.map_or(false, |p| {
+                            sw.lan_ports.contains(&p) || sw.mgmt_port == Some(p)
+                        });
+                        if !is_switch_port {
+                            continue;
+                        }
+
+                        let pvid = if port_def.default_zone == "mgmt" {
+                            3000
+                        } else {
+                            10
+                        };
+
+                        interfaces.push(InterfaceInfo {
+                            name: port_name.to_string(),
+                            mac: trunk_mac.clone(),
+                            ips: vec![],
+                            mtu: 1500,
+                            is_up: false, // virtual — no real operstate
+                            pvid,
+                            tagged_vlans: vec![],
+                        });
+                        tracing::info!(
+                            name = port_name,
+                            pvid,
+                            "seeded logical switch port"
+                        );
+                    }
+                }
+
                 for iface in &mut interfaces {
                     if wan.contains(&iface.name.as_str()) {
                         iface.pvid = 0; // WAN: outside internal VLAN space
@@ -369,7 +438,9 @@ fn detect_interfaces_for_platform(
                     "port PVIDs assigned from board ID"
                 );
                 switch_layout = board.switch.map(|sw| switch::SwitchLayout {
-                    device: sw.device.to_string(),
+                    trunk_iface: sw.trunk_iface.to_string(),
+                    smi_iface: sw.smi_iface.to_string(),
+                    smi_phy_addr: sw.smi_phy_addr,
                     lan_ports: sw.lan_ports.to_vec(),
                     cpu_port: sw.cpu_port,
                     internal_ports: sw.internal_ports.to_vec(),

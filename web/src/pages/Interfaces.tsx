@@ -3,6 +3,8 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api, type NetworkInterface, type ZoneInfo } from '../api'
 import { PageHeader, Spinner, Badge, Button, Modal, Input, Select, Toggle, Card, EmptyState } from '../components/ui'
+import Tabs from '../components/ui/Tabs'
+import SwitchTab from './network/SwitchTab'
 import { useToast } from '../hooks/useToast'
 
 const ROLES = ['wan', 'lan', 'dmz', 'mgmt', 'guest'] as const
@@ -69,6 +71,9 @@ export default function Interfaces() {
   const [editForm, setEditForm] = useState({ role: '', mtu: '', vlanId: '' as string | null })
   const toast = useToast()
 
+  // Tab state — 'ports' is the default, 'switch' only shown when hardware switch exists
+  const [tab, setTab] = useState('ports')
+
   // Port config panel state
   const [configPort, setConfigPort] = useState<NetworkInterface | null>(null)
   const [configPvid, setConfigPvid] = useState<number>(10)
@@ -90,6 +95,9 @@ export default function Interfaces() {
   }, [toast])
 
   useEffect(() => { load() }, [load])
+
+  // Detect switch presence: a sw* interface means a hardware switch ASIC is managed
+  const hasSwitch = interfaces.some(i => /^sw\d/.test(i.name))
 
   // Build vlan_id → ZoneInfo lookup for PVID-based zone resolution
   const vlanToZone = new Map<number, ZoneInfo>()
@@ -646,6 +654,11 @@ export default function Interfaces() {
   // WAN ports (pvid=0) and void ports (pvid=1) can't carry tagged VLANs
   const taggedDisabled = configPvid === 0 || configPvid === 1
 
+  const tabList = [
+    { key: 'ports', label: 'Ports' },
+    ...(hasSwitch ? [{ key: 'switch', label: 'Switch ASIC' }] : []),
+  ]
+
   return (
     <div className="space-y-6 stagger-children">
       <PageHeader
@@ -653,13 +666,19 @@ export default function Interfaces() {
         subtitle={board ? `${board.short_name} — ${board.port_count} ports` : 'Hardware ports, VLANs, and virtual interfaces'}
       />
 
-      {interfaces.length === 0 ? (
+      {hasSwitch && (
+        <Tabs tabs={tabList} active={tab} onChange={setTab} />
+      )}
+
+      {tab === 'switch' && hasSwitch && <SwitchTab />}
+
+      {tab === 'ports' && interfaces.length === 0 ? (
         <EmptyState
           icon={<svg className="w-10 h-10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="2" y="6" width="20" height="12" rx="2" /><circle cx="6" cy="12" r="1.5" /><circle cx="10" cy="12" r="1.5" /></svg>}
           title="No interfaces found"
           description="Network interfaces will appear here once detected."
         />
-      ) : (
+      ) : tab === 'ports' ? (
         <>
           {/* Visual Switch Panel */}
           <Card noPadding>
@@ -1075,7 +1094,7 @@ export default function Interfaces() {
             )}
           </Modal>
         </>
-      )}
+      ) : null}
     </div>
   )
 }

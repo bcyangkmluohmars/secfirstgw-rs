@@ -772,6 +772,59 @@ export interface UserInfo {
   created_at: string;
 }
 
+// Switch ASIC state types
+export interface SwitchPortState {
+  port: number
+  status_raw: number
+  link_up: boolean
+  speed_mbps: number
+  full_duplex: boolean
+  pvid_mc_index: number
+  isolation_mask: number
+}
+
+export interface SwitchMcEntry {
+  index: number
+  vid: number
+  member_mask: number
+  fid: number
+}
+
+export interface SwitchVlan4kEntry {
+  vid: number
+  member_mask: number
+  untag_mask: number
+  fid: number
+}
+
+export interface SwitchGlobalConfig {
+  sgcr_raw: number
+  vlan_enabled: boolean
+  vlan_4k_enabled: boolean
+  ingress_filter_raw: number
+  stp_state: [number, number]
+  ext_mode: number
+  ext1_force: number
+  ext1_rgmxf: number
+  cpu_port_mask: number
+  cpu_port_ctrl: number
+}
+
+export interface SwitchAsicState {
+  chip_id: number
+  chip_version: number
+  global: SwitchGlobalConfig
+  ports: SwitchPortState[]
+  mc_table: SwitchMcEntry[]
+  vlan_4k_table: SwitchVlan4kEntry[]
+}
+
+export interface SwitchStateResponse {
+  available: boolean
+  error?: string
+  state?: SwitchAsicState
+}
+
 // ---- API endpoints ----
 
 export const api = {
@@ -920,6 +973,10 @@ export const api = {
   // Personality
   getPersonality: () => request<{ active: string; personalities: { name: string; description: string; active: boolean }[] }>('/api/v1/personality'),
   setPersonality: (name: string) => request<{ ok: boolean; active: string }>('/api/v1/personality', { method: 'PUT', body: { name } }),
+
+  // Switch ASIC state
+  getSwitchState: () =>
+    request<SwitchStateResponse>('/api/v1/switch/state'),
 
   // Ports (PVID/tagged VLAN config)
   getPort: (name: string) =>
