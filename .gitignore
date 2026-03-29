@@ -12,3 +12,5 @@ web/dist/
 .planning/
 analysis/
 tools/ssh-diag/target/
+out/
+*.db
