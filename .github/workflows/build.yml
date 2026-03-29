@@ -100,7 +100,7 @@ jobs:
       - name: Check for println! in library code
         run: |
           failed=0
-          for f in $(find crates/ -name '*.rs' -not -path '*/sfgw-cli/*'); do
+          for f in $(find crates/ -name '*.rs' -not -path '*/sfgw-cli/*' -not -path '*/sfnas-cli/*'); do
             # Skip test modules
             if grep -n 'println!' "$f" | grep -v '#\[cfg(test)\]' | grep -v 'mod tests' | grep -v '//'; then
               # Check if the println is inside a test block
