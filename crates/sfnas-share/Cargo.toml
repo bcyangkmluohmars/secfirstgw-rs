@@ -1,0 +1,15 @@
+[package]
+name = "sfnas-share"
+description = "SMB3 file sharing management for secfirstNAS via Samba"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# sfgw-db = { path = "../sfgw-db" }  # TODO: add back for user management via DB
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

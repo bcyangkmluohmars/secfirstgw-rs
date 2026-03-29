@@ -1,0 +1,68 @@
+#!/usr/sbin/nft -f
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# secfirstNAS — Minimal firewall ruleset (nftables)
+#
+# Security first: default DROP on input, only essential ports open.
+# Applied via: nft -f /etc/nftables.d/secfirstnas.nft
+#
+# Open ports:
+#   22  — SSH (remote management)
+#   80  — HTTP (redirect to HTTPS only)
+#   443 — HTTPS (Web UI + API, TLS 1.3)
+#   445 — SMB3 (file sharing, encrypted)
+#   873 — rsync (backup sync)
+
+flush ruleset
+
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        # Loopback — always allow
+        iif lo accept
+
+        # Established/related connections — allow return traffic
+        ct state established,related accept
+
+        # ICMPv4 — ping
+        ip protocol icmp icmp type echo-request accept
+
+        # ICMPv6 — essential for IPv6 neighbor discovery + ping
+        ip6 nexthdr icmpv6 icmpv6 type {
+            echo-request,
+            nd-neighbor-solicit,
+            nd-neighbor-advert,
+            nd-router-solicit,
+            nd-router-advert
+        } accept
+
+        # SSH — remote management
+        tcp dport 22 accept
+
+        # HTTP — redirect to HTTPS (handled by API server)
+        tcp dport 80 accept
+
+        # HTTPS — Web UI + REST API (TLS 1.3)
+        tcp dport 443 accept
+
+        # SMB3 — file sharing (Samba, encrypted transport)
+        tcp dport 445 accept
+
+        # rsync — backup synchronization
+        tcp dport 873 accept
+
+        # Log and drop everything else (rate-limited to avoid log spam)
+        limit rate 5/minute log prefix "secfirstnas-drop: " drop
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+        # NAS does not route traffic
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+        # Outbound is unrestricted (DNS, NTP, package updates, etc.)
+    }
+}

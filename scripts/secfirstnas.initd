@@ -1,0 +1,167 @@
+#!/sbin/openrc-run
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# secfirstnas — OpenRC init script for SecFirstNAS
+#
+# Install:
+#   cp secfirstnas.initd /etc/init.d/secfirstnas
+#   chmod 755 /etc/init.d/secfirstnas
+#   rc-update add secfirstnas default
+
+name="secfirstnas"
+description="SecFirstNAS — Security-first NAS firmware"
+command="/usr/local/bin/secfirstnas"
+command_args="service start"
+command_background=true
+pidfile="/run/${name}.pid"
+output_log="/tmp/${name}/${name}.log"
+error_log="/tmp/${name}/${name}.err"
+
+# API server port
+SFNAS_API_PORT="${SFNAS_API_PORT:-8080}"
+
+# Fan profile: silent | balanced | performance | full
+SFNAS_FAN_PROFILE="${SFNAS_FAN_PROFILE:-balanced}"
+
+depend() {
+    need net
+    need sshd
+    after firewall dns
+    use logger
+}
+
+start_pre() {
+    # Create log directory on tmpfs (preserve eMMC write cycles)
+    mkdir -p "/tmp/${name}"
+
+    # Load kernel modules (belt-and-suspenders, modules-load.d handles boot)
+    for mod in al_dma al_ssm al_eth al_sgpo; do
+        modprobe "${mod}" 2>/dev/null || true
+    done
+
+    # Firewall — minimal attack surface (default DROP, only essential ports)
+    if command -v nft >/dev/null 2>&1; then
+        local fw_rules="/etc/nftables.d/secfirstnas.nft"
+        if [ -f "${fw_rules}" ]; then
+            nft -f "${fw_rules}" 2>/dev/null && einfo "Firewall: nftables rules loaded" || ewarn "Firewall: failed to load nftables rules"
+        fi
+    fi
+
+    # Set fan profile to balanced
+    if [ -x "${command}" ]; then
+        "${command}" fan set-profile "${SFNAS_FAN_PROFILE}" 2>/dev/null || true
+        einfo "Fan profile: ${SFNAS_FAN_PROFILE}"
+    fi
+
+    # Bay LEDs are managed by the built-in LED service thread
+    # (boot animation + continuous sync every 1s)
+    einfo "Bay LEDs: managed by LED service"
+
+    # --- RAID auto-assembly ---
+    # Assemble any previously created MD arrays (critical after reboot)
+    if command -v mdadm >/dev/null 2>&1; then
+        # Generate mdadm.conf from existing arrays if missing
+        if [ ! -f /etc/mdadm.conf ] || ! grep -q "^ARRAY" /etc/mdadm.conf 2>/dev/null; then
+            mdadm --detail --scan > /etc/mdadm.conf 2>/dev/null || true
+        fi
+        mdadm --assemble --scan 2>/dev/null || true
+        # Brief wait for arrays to become active
+        sleep 1
+        if [ -f /proc/mdstat ]; then
+            local arrays
+            arrays=$(grep -c "^md" /proc/mdstat 2>/dev/null || echo 0)
+            einfo "RAID arrays assembled: ${arrays}"
+        fi
+    fi
+
+    # --- Crypto volumes ---
+    # Open dm-crypt volumes if keyfile exists (non-interactive boot)
+    if command -v cryptsetup >/dev/null 2>&1; then
+        for md_dev in /dev/md/*; do
+            [ -b "${md_dev}" ] || continue
+            local crypt_name
+            crypt_name="crypt-$(basename "${md_dev}")"
+            # Skip if already open
+            [ -e "/dev/mapper/${crypt_name}" ] && continue
+            # Try keyfile-based open (key stored by sfnas-storage during setup)
+            local keyfile="/data/config/.luks-keyfile"
+            if [ -f "${keyfile}" ]; then
+                cryptsetup luksOpen "${md_dev}" "${crypt_name}" \
+                    --key-file "${keyfile}" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    # --- Auto-mount filesystems ---
+    # Mount everything from fstab (includes RAID/Btrfs mounts)
+    mount -a 2>/dev/null || true
+    # Also try mounting any Btrfs on dm-crypt or MD devices not in fstab
+    for dm_dev in /dev/mapper/crypt-*; do
+        [ -b "${dm_dev}" ] || continue
+        local mount_name
+        mount_name=$(basename "${dm_dev}")
+        local mount_point="/mnt/${mount_name}"
+        # Skip if already mounted
+        mountpoint -q "${mount_point}" 2>/dev/null && continue
+        # Try Btrfs mount
+        mkdir -p "${mount_point}"
+        mount -t btrfs -o compress=zstd,noatime,space_cache=v2 \
+            "${dm_dev}" "${mount_point}" 2>/dev/null || true
+    done
+    # Direct MD mount (no encryption layer)
+    for md_dev in /dev/md/*; do
+        [ -b "${md_dev}" ] || continue
+        local crypt_name
+        crypt_name="crypt-$(basename "${md_dev}")"
+        # Skip if there's a corresponding dm-crypt device (handled above)
+        [ -e "/dev/mapper/${crypt_name}" ] && continue
+        local mount_point="/mnt/md-$(basename "${md_dev}")"
+        mountpoint -q "${mount_point}" 2>/dev/null && continue
+        mkdir -p "${mount_point}"
+        mount -t btrfs -o compress=zstd,noatime,space_cache=v2 \
+            "${md_dev}" "${mount_point}" 2>/dev/null || true
+    done
+
+    # Export API port for the service
+    export SFNAS_API_PORT
+
+    # Database path (separate from GW database)
+    export SFGW_DB_PATH="/data/sfnas/sfnas.db"
+    mkdir -p /data/sfnas
+
+    # TLS certificate path (separate from GW TLS)
+    export SFNAS_TLS_DIR="/data/sfnas-tls"
+
+    einfo "Starting ${name} on port ${SFNAS_API_PORT}"
+}
+
+start() {
+    ebegin "Starting ${name}"
+    start-stop-daemon --start \
+        --make-pidfile \
+        --pidfile "${pidfile}" \
+        --background \
+        --stdout "${output_log}" \
+        --stderr "${error_log}" \
+        --exec "${command}" \
+        -- ${command_args}
+    eend $?
+}
+
+stop() {
+    ebegin "Stopping ${name}"
+    start-stop-daemon --stop \
+        --pidfile "${pidfile}" \
+        --retry TERM/10/KILL/5
+    eend $?
+}
+
+status() {
+    if [ -f "${pidfile}" ] && kill -0 "$(cat "${pidfile}")" 2>/dev/null; then
+        einfo "${name} is running (PID $(cat "${pidfile}"))"
+        return 0
+    else
+        ewarn "${name} is not running"
+        return 3
+    fi
+}

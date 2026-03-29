@@ -1,0 +1,49 @@
+[package]
+name = "sfnas-api"
+description = "REST API server for secfirstNAS — serves the web UI and provides storage/share/user management endpoints"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sfnas-storage = { path = "../sfnas-storage" }
+sfnas-share = { path = "../sfnas-share" }
+sfgw-db = { path = "../sfgw-db" }
+sfgw-crypto = { path = "../sfgw-crypto" }
+
+anyhow = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+# Auth + crypto
+rusqlite.workspace = true
+ring = { workspace = true }
+fips203 = { workspace = true }
+argon2 = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+base64 = { workspace = true }
+http-body-util = { workspace = true }
+
+# OIDC / OAuth2
+reqwest = { workspace = true }
+jsonwebtoken = { workspace = true }
+sha2 = "0.10"
+rand = "0.8"
+
+# LDAP / Active Directory
+ldap3 = { workspace = true }
+
+# TLS
+rustls = { workspace = true, features = ["ring"] }
+tokio-rustls = { workspace = true }
+rcgen = { workspace = true }
+axum-server = { workspace = true }
+rustls-pki-types = { workspace = true }
+rustls-pemfile = { workspace = true }

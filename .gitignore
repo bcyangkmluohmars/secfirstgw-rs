@@ -9,6 +9,8 @@ Cargo.lock
 /data/
 web/node_modules/
 web/dist/
+web-nas/node_modules/
+web-nas/dist/
 .planning/
 analysis/
 tools/ssh-diag/target/

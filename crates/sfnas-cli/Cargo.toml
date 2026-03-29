@@ -1,0 +1,26 @@
+[package]
+name = "sfnas-cli"
+description = "secfirstNAS — security-first NAS firmware binary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "secfirstnas"
+path = "src/main.rs"
+
+[dependencies]
+sfnas-storage = { path = "../sfnas-storage" }
+sfnas-share = { path = "../sfnas-share" }
+sfnas-api = { path = "../sfnas-api" }
+sfgw-db = { path = "../sfgw-db" }
+# Heavy deps disabled for MVP — add back when needed:
+# sfgw-hal = { path = "../sfgw-hal" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }

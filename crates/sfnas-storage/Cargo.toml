@@ -1,0 +1,20 @@
+[package]
+name = "sfnas-storage"
+description = "Storage management for secfirstNAS — mdadm RAID, dm-crypt, Btrfs, disk health, bay control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# TODO: add back when full platform integration is needed:
+# sfgw-hal = { path = "../sfgw-hal" }
+# sfgw-crypto = { path = "../sfgw-crypto" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+nix = { workspace = true }
+uuid = { workspace = true }
+libc = { workspace = true }
