@@ -3,7 +3,7 @@
   <p align="center">
     <strong>A security-first gateway firmware, written in Rust.</strong>
     <br />
-    One binary. 11 MB RAM. Zero trust.
+    One binary. 14 MB RAM. Zero trust.
   </p>
   <p align="center">
     <a href="#quickstart"><strong>Quickstart</strong></a> · 
@@ -23,7 +23,7 @@ We audited commercial gateway firmware. What we found was unacceptable.
 
 This is not a theoretical concern. These are findings from real firmware running on real networks protecting real businesses.
 
-**secfirstgw-rs** is the answer: a single static Rust binary that replaces the entire stack. 57,000 lines of Rust. 11 MB of RAM on a UDM Pro. No JVM. No databases listening on the network. No message brokers. No hardcoded anything. Every secret encrypted in memory. Every firewall zone ending with `DROP`.
+**secfirstgw-rs** is the answer: a single static Rust binary that replaces the entire stack. 74,000 lines of Rust. 14 MB of RAM on a UDM Pro. No JVM. No databases listening on the network. No message brokers. No hardcoded anything. Every secret encrypted in memory. Every firewall zone ending with `DROP`.
 
 If you know, you know. If you don't — the firewall will let you know.
 
@@ -31,7 +31,7 @@ If you know, you know. If you don't — the firewall will let you know.
 
 ### Firewall & Router
 
-- **nftables** on modern kernels, **iptables-legacy** on older platforms (UDM Pro / kernel 4.19)
+- **nftables** + **iptables-legacy** applied in parallel with SSH lockout validation
 - **Dual-stack IPv4/IPv6** with identical policies — no IPv6 bypass
 - **Zone-based security model**: WAN, LAN, DMZ, MGMT, GUEST, plus custom zones (IoT, VPN, user-defined)
 - **Atomic ruleset application** via `iptables-restore` with SSH lockout rollback
@@ -59,6 +59,15 @@ If you know, you know. If you don't — the firewall will let you know.
 - DNSSEC validation
 - DNS rebind protection
 - Per-zone DNS/DHCP policies
+- Automatic port 53 reclaim from foreign processes + dnsmasq watchdog
+
+### Hardware Switch ASIC (RTL8370MB)
+
+- **Direct SMI register programming** via MDIO ioctl — no swconfig, no DSA
+- Per-port VLAN (PVID), tagged trunking, port isolation, 4K VLAN table
+- Live port link status, speed detection, register dump via CLI and API
+- Direct physical ports (SFP+ LAN) automatically bridged alongside switch trunk
+- Full Switch ASIC tab in the web UI with register-level diagnostics
 
 ### Network Controller
 
@@ -98,6 +107,7 @@ If you know, you know. If you don't — the firewall will let you know.
 - **DDNS client** — DynDNS2, DuckDNS, Cloudflare with IP change detection
 - **Backup/Restore** — JSON config export/import, secrets excluded, atomic restore
 - **OTA firmware updates** — SHA-256 verified, atomic binary swap, auto-rollback on failure
+- **EEPROM identity** — hardware serial/MAC read from MTD partition for device fingerprinting
 
 ## Personality
 
@@ -146,8 +156,9 @@ For the complete security architecture, see [docs/ARCHITECTURE.md](docs/ARCHITEC
 
 | Platform | Networking | Storage | Display | Status |
 |----------|-----------|---------|---------|--------|
-| **UDM Pro** (aarch64) | Hardware switch ASICs | LUKS2 on HDD | Native LCM serial | ✅ Verified |
-| **UDM SE** (aarch64) | Hardware switch ASICs | LUKS2 on HDD | Native LCM serial | Prepared |
+| **UDM Pro** (aarch64) | RTL8370MB switch ASIC (direct SMI) + SFP+ | LUKS2 on HDD | Native LCM serial | ✅ Verified |
+| **UDM SE** (aarch64) | RTL8370MB switch ASIC + SFP+ | LUKS2 on HDD | Native LCM serial | Prepared |
+| **UNVR** (aarch64, NAS) | 1GbE | 4-bay SATA, LUKS2, RAID | Bay LEDs (GPIO) | ✅ Verified |
 | VM (QEMU/KVM) | virtio-net / e1000 | LUKS2 on vdisk | - | Untested |
 | Docker | macvlan / host | Volume mount | - | Untested |
 | Bare metal (x86_64) | Standard NICs | LUKS2 | - | Untested |
@@ -177,36 +188,31 @@ The install script will:
 ### Build from Source
 
 ```bash
-# Prerequisites: Rust stable toolchain, Node.js (for web UI)
+# Prerequisites: Rust stable toolchain, Node.js 22+ (for web UIs), Docker (for cross-compile)
 git clone https://github.com/bcyangkmluohmars/secfirstgw-rs.git
 cd secfirstgw-rs
 
-# Development build
-make build
+# Build gateway
+cargo build --release --bin sfgw
 
-# Run tests
-make test
+# Build NAS
+cargo build --release --bin secfirstnas
 
-# Cross-compile for ARM64 (UDM Pro)
-make aarch64
+# Cross-compile for ARM64 (UDM Pro / UNVR)
+docker build -f Dockerfile.cross -o out .
 
-# Build distribution tarballs for both architectures
-make dist
-```
-
-### Docker
-
-```bash
-docker compose up --build
+# Deploy to device (development)
+scripts/dev-deploy.sh 10.0.0.1
 ```
 
 For detailed setup instructions, see [docs/QUICKSTART.md](docs/QUICKSTART.md).
 
 ## Architecture
 
-secfirstgw-rs is a Cargo workspace with 16 crates, each with a single responsibility:
+secfirstgw-rs is a Cargo workspace with 21 crates across two products:
 
 ```
+Gateway (sfgw):
 ┌──────────────────────────────────────────────────────────┐
 │                       sfgw-cli                           │  ← Single binary entry point
 ├──────────┬──────────┬──────────┬─────────────────────────┤
@@ -219,6 +225,15 @@ secfirstgw-rs is a Cargo workspace with 16 crates, each with a single responsibi
 │ sfgw-ids │    sfgw-crypto      │      sfgw-log           │  ← Detection & foundation
 ├──────────┴─────────────────────┴─────────────────────────┤
 │              sfgw-db   │   sfgw-hal                       │  ← Storage & hardware
+└──────────────────────────────────────────────────────────┘
+
+NAS (secfirstnas):
+┌──────────────────────────────────────────────────────────┐
+│                     sfnas-cli                             │  ← NAS binary entry point
+├──────────────────┬───────────────────────────────────────┤
+│   sfnas-api      │         sfnas-share                    │  ← API + file sharing
+├──────────────────┴───────────────────────────────────────┤
+│                   sfnas-storage                           │  ← Disk, RAID, crypto, thermal
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -236,11 +251,15 @@ secfirstgw-rs is a Cargo workspace with 16 crates, each with a single responsibi
 | `sfgw-inform` | UniFi TNBU protocol, Inform handler, system_cfg |
 | `sfgw-ids` | ARP/DHCP/DNS/VLAN anomaly detection, alert correlation |
 | `sfgw-log` | Forward-secret log encryption |
-| `sfgw-hal` | Hardware abstraction, Ubiquiti board detection |
+| `sfgw-hal` | Hardware abstraction, board detection, EEPROM identity |
 | `sfgw-display` | LCM serial, HD44780, framebuffer |
 | `sfgw-nas` | SMB (ksmbd) + NFS |
 | `sfgw-personality` | Switchable error message personalities |
 | `sfgw-controller` | High-level service lifecycle orchestration |
+| `sfnas-cli` | NAS binary entry point, service orchestration |
+| `sfnas-api` | NAS axum API, E2EE, JWT auth, OAuth/LDAP |
+| `sfnas-share` | SMB3 (Samba), NFS, rsync share management |
+| `sfnas-storage` | Disk/bay detection, RAID, LUKS2, thermal, LED service |
 
 For the full architectural deep dive, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -264,7 +283,7 @@ SSH           :22                        — (not installed on managed devices)
 
 | Capability | secfirstgw-rs | Typical Commercial |
 |-----------|---------------|-------------------|
-| RAM usage | **11 MB** | 1.8 GB+ |
+| RAM usage | **14 MB** | 1.8 GB+ |
 | Open network ports | **2-3** | 12+ |
 | VPN throughput | Multi-core WireGuard | Single-core, 30 MB/s |
 | Database | Embedded SQLite (no port) | MongoDB/PostgreSQL (network-exposed) |
@@ -280,11 +299,13 @@ We do not name specific vendors in this comparison. The numbers speak for themse
 
 ## Project Status
 
-**Current version: v0.3.0** — See [ROADMAP.md](ROADMAP.md) for detailed status.
+**Current version: v0.4.2** — See [ROADMAP.md](ROADMAP.md) for detailed status.
 
-**Working:** Firewall (nftables + iptables-legacy), zone model, dual-stack IPv4/IPv6, Web UI + API (axum, TLS 1.3, E2EE), DNS/DHCP, UniFi Inform adoption, WiFi management, IDS active response, honeypot, QoS, WAN failover, DDNS, backup/restore, OTA updates, UPnP/NAT-PMP, IPSec, LCM display, SQLCipher, personality system.
+**Working:** Firewall (nftables + iptables-legacy, parallel apply), zone model, dual-stack IPv4/IPv6, Web UI + API (axum, TLS 1.3, E2EE), DNS/DHCP, UniFi Inform adoption, WiFi management, IDS active response, honeypot, QoS, WAN failover, DDNS, backup/restore, OTA updates, UPnP/NAT-PMP, IPSec, LCM display, SQLCipher, personality system, RTL8370MB switch ASIC (direct SMI), SFP+ LAN bridging, EEPROM identity.
 
-**In progress:** Forward-secret logging, NAS (SMB/NFS), LUKS2 integration.
+**Working (NAS):** secfirstnas firmware for UNVR — disk/bay detection, RAID management, LUKS2 encryption, thermal/fan control, bay LED service, SMB3/rsync shares, web UI with setup wizard.
+
+**In progress:** Forward-secret logging.
 
 **Planned:** Multi-site VPN, HA (active/passive failover), advanced WiFi (multi-SSID VAP, 802.11r).
 
@@ -317,5 +338,5 @@ Contributions require a [CLA](https://gist.github.com/CLAassistant/bd1ea8ec8aa03
 ---
 
 <p align="center">
-  <sub>57,000 lines of Rust · 16 crates · 1 binary · 11 MB RAM · Zero trust</sub>
+  <sub>74,000 lines of Rust · 21 crates · 2 binaries · 14 MB RAM · Zero trust</sub>
 </p>
