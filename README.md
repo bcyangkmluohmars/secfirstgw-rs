@@ -163,6 +163,8 @@ For the complete security architecture, see [docs/ARCHITECTURE.md](docs/ARCHITEC
 | Docker | macvlan / host | Volume mount | - | Untested |
 | Bare metal (x86_64) | Standard NICs | LUKS2 | - | Untested |
 
+**Kernel:** Ubiquiti devices ship with kernel 4.19. secfirstgw-rs works on stock, but for full nftables support and RTL8370MB switch ASIC drivers we recommend flashing our [custom kernel 6.12 LTS](https://github.com/bcyangkmluohmars/linux-alpine-v2) (Alpine V2, aarch64-musl). The iptables-legacy fallback keeps everything functional on 4.19.
+
 See [HARDWARE.md](HARDWARE.md) for detailed hardware support and community testing info.
 
 ## Quickstart
